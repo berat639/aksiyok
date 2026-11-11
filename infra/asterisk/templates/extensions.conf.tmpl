@@ -1,0 +1,96 @@
+; ─────────────────────────────────────────────────────────────────────────────
+; Netgsm gelen çağrı dialplan
+; AudioSocket() ile sesi voiceai-server:12000 TCP soketine ham SLIN olarak akıt
+; ─────────────────────────────────────────────────────────────────────────────
+
+[general]
+static=yes
+writeprotect=no
+
+[globals]
+
+[from-netgsm]
+; Netgsm bazen DID/EXTEN'i bos birakir -> 's' default extension'a duser.
+; Bu yuzden hem _X. (DID ile gelen) hem de 's' (DID'siz) icin ayni handler
+; yazilir. Goto ile referans verirsek Asterisk degisken substitution'u
+; '${EXTEN:-s}' formunu desteklemedigi icin sonsuz donguye girer.
+
+exten => _X.,1,NoOp(Netgsm inbound: ${CALLERID(num)} -> ${EXTEN})
+ same => n,Answer()
+ same => n,Set(DENOISE(rx)=on)
+ same => n,Set(AUDIOSOCKET_UUID=${UUID()})
+ same => n,AGI(callerid_notify.sh,${AUDIOSOCKET_UUID},${CALLERID(num)},${CHANNEL},inbound,${EXTEN},${CALLERID(dnid)},${VOICEAI_CLINIC_ID},${VOICEAI_TEST_ID},${CHANNEL(endpoint)})
+ same => n,GotoIf($["${AI_AUTHORIZED}" != "1"]?denied)
+ same => n,Gosub(ai-admission,s,1)
+ same => n,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:${AUDIOSOCKET_PORT})
+ same => n(denied),Hangup()
+
+exten => s,1,NoOp(Netgsm inbound (s/default): ${CALLERID(num)})
+ same => n,Answer()
+ same => n,Set(DENOISE(rx)=on)
+ same => n,Set(AUDIOSOCKET_UUID=${UUID()})
+ same => n,Set(VOICEAI_DID=${PJSIP_PARSE_URI(${PJSIP_HEADER(read,To)},user)})
+ same => n,ExecIf($["${VOICEAI_DID}" = "" | "${VOICEAI_DID}" = "s"]?Set(VOICEAI_DID=${CALLERID(dnid)}))
+ same => n,AGI(callerid_notify.sh,${AUDIOSOCKET_UUID},${CALLERID(num)},${CHANNEL},inbound,s,${VOICEAI_DID},${VOICEAI_CLINIC_ID},${VOICEAI_TEST_ID},${CHANNEL(endpoint)})
+ same => n,GotoIf($["${AI_AUTHORIZED}" != "1"]?denied)
+ same => n,Gosub(ai-admission,s,1)
+ same => n,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:${AUDIOSOCKET_PORT})
+ same => n(denied),Hangup()
+
+; Test extension (Asterisk CLI'dan: console dial Local/100@from-netgsm)
+exten => 100,1,NoOp(Test AudioSocket bridge)
+ same => n,Answer()
+ same => n,Set(DENOISE(rx)=on)
+ same => n,Set(AUDIOSOCKET_UUID=${UUID()})
+ same => n,AGI(callerid_notify.sh,${AUDIOSOCKET_UUID},${CALLERID(num)},${CHANNEL},inbound,${EXTEN},${CALLERID(dnid)},${VOICEAI_CLINIC_ID},${VOICEAI_TEST_ID},${CHANNEL(endpoint)})
+ same => n,GotoIf($["${AI_AUTHORIZED}" != "1"]?denied)
+ same => n,Gosub(ai-admission,s,1)
+ same => n,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:${AUDIOSOCKET_PORT})
+ same => n(denied),Hangup()
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Dinamik Transfer Context: AMI Redirect ile buraya aktarılır
+; ─────────────────────────────────────────────────────────────────────────────
+[ai-admission]
+; Telefon AI kapasitesi klinik ayarından gelir (2–5). Slot doluysa çağrı
+; burada tutulur; bir görüşme kapanınca sıradaki çağrı AudioSocket'e geçer.
+exten => s,1,NoOp(AI admission: max=${AI_MAX_ACTIVE}, group=${AI_QUEUE_GROUP})
+ same => n,ExecIf($["${AI_MAX_ACTIVE}" = ""]?Set(AI_MAX_ACTIVE=3))
+ same => n,ExecIf($["${AI_QUEUE_GROUP}" = ""]?Set(AI_QUEUE_GROUP=clinic_default))
+ same => n(loop),Set(LOCK_RESULT=${LOCK(ai_admission_lock)})
+ same => n,Set(AI_ACTIVE=${GROUP_COUNT(${AI_QUEUE_GROUP}@ai)})
+ same => n,GotoIf($[${AI_ACTIVE} < ${AI_MAX_ACTIVE}]?admit:wait)
+ same => n(wait),Set(UNLOCK_RESULT=${UNLOCK(ai_admission_lock)})
+ same => n,NoOp(AI kapasitesi dolu (${AI_ACTIVE}/${AI_MAX_ACTIVE}) — kuyrukta bekliyor)
+ same => n,MusicOnHold(default,5)
+ same => n,Wait(1)
+ same => n,Goto(loop)
+ same => n(admit),Set(GROUP(ai)=${AI_QUEUE_GROUP})
+ same => n,Set(UNLOCK_RESULT=${UNLOCK(ai_admission_lock)})
+ same => n,NoOp(AI slot ayrıldı (${AI_ACTIVE}/${AI_MAX_ACTIVE}) — AudioSocket'e bağlanıyor)
+ same => n,Return()
+
+[dynamic-forward]
+exten => _X.,1,NoOp(Dinamik Yonlendirme: ${EXTEN})
+ same => n,GotoIf($["${VOICEAI_ENDPOINT}" = ""]?denied)
+ same => n,Set(CALLERID(num)=${VOICEAI_CALLER_ID})
+ same => n,Dial(PJSIP/${EXTEN}@${VOICEAI_ENDPOINT},30,g)
+ same => n,AGI(callerid_notify.sh,${AUDIOSOCKET_UUID},${CALLERID(num)},${CHANNEL},transfer,${DIALSTATUS},${DIALSTATUS},${VOICEAI_CLINIC_ID},${VOICEAI_TEST_ID},${VOICEAI_ENDPOINT})
+ same => n(denied),Hangup()
+
+exten => s,1,NoOp(Dinamik Yonlendirme default)
+ same => n(denied),Hangup()
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Outbound AI Context
+; ─────────────────────────────────────────────────────────────────────────────
+[outbound-ai]
+exten => s,1,NoOp(Outbound call answered by ${CUSTOMER_NUMBER})
+ same => n,Answer()
+ same => n,Set(DENOISE(rx)=on)
+ same => n,Set(AUDIOSOCKET_UUID=${UUID()})
+ same => n,AGI(callerid_notify.sh,${AUDIOSOCKET_UUID},${CUSTOMER_NUMBER},${CHANNEL},outbound,s,${CALLERID(dnid)},${VOICEAI_CLINIC_ID},${VOICEAI_TEST_ID},${CHANNEL(endpoint)})
+ same => n,GotoIf($["${AI_AUTHORIZED}" != "1"]?denied)
+ same => n,Gosub(ai-admission,s,1)
+ same => n,AudioSocket(${AUDIOSOCKET_UUID},${AUDIOSOCKET_HOST}:${AUDIOSOCKET_PORT})
+ same => n(denied),Hangup()

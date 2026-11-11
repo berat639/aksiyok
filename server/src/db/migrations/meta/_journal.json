@@ -1,0 +1,83 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1786509722697,
+      "tag": "0000_violet_speed_demon",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786515791872,
+      "tag": "0001_medical_sue_storm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786641355769,
+      "tag": "0002_long_kinsey_walden",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786848460657,
+      "tag": "0003_rich_blackheart",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787067221009,
+      "tag": "0004_omniscient_thena",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787082972376,
+      "tag": "0005_nosy_night_thrasher",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787154607066,
+      "tag": "0006_strong_northstar",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787419433719,
+      "tag": "0007_fearless_scrambler",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787489868022,
+      "tag": "0008_loud_virginia_dare",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787490000000,
+      "tag": "0009_add_patient_opt_out",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787951136901,
+      "tag": "0010_woozy_titania",
+      "breakpoints": true
+    }
+  ]
+}

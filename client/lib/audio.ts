@@ -1,0 +1,243 @@
+import { createAudioContext } from "./browser-audio-support";
+
+/**
+ * AudioStreamPlayer — Real-time audio playback for streaming PCM chunks.
+ * Schedules audio buffers seamlessly one after another for gapless playback.
+ */
+export class AudioStreamPlayer {
+  private audioContext: AudioContext;
+  private nextStartTime = 0;
+  private isActive = true;
+  private gainNode: GainNode;
+  private pendingChunks: Float32Array[] = [];
+  private activeSources = new Set<AudioBufferSourceNode>();
+  private readonly maxScheduledAheadSeconds = 1.8;
+  private readonly initialJitterBufferSeconds = 0.06;
+
+  constructor(sampleRate = 24000) {
+    this.audioContext = createAudioContext({ sampleRate });
+    this.gainNode = this.audioContext.createGain();
+    this.gainNode.connect(this.audioContext.destination);
+    // This constructor runs from the Start button handler. Resuming here keeps
+    // mobile browsers from leaving playback suspended after async setup work.
+    void this.audioContext.resume().then(() => this.drainQueue()).catch(() => {});
+  }
+
+  /**
+   * Add a base64-encoded PCM L16 chunk to the playback queue.
+   */
+  addChunk(base64Data: string) {
+    if (!this.isActive) return;
+
+    const float32 = this.base64ToFloat32(base64Data);
+    if (float32.length === 0) return;
+
+    this.pendingChunks.push(float32);
+    this.drainQueue();
+  }
+
+  get isPlaying(): boolean {
+    const hwLatency =
+      (this.audioContext.baseLatency || 0) +
+      ((this.audioContext as unknown as { outputLatency?: number }).outputLatency || 0) +
+      0.32;
+    return (
+      this.pendingChunks.length > 0 ||
+      this.activeSources.size > 0 ||
+      this.audioContext.currentTime < this.nextStartTime + hwLatency
+    );
+  }
+
+  /**
+   * Kuyruktaki tüm ses paketlerinin ve işletim sistemi hoparlör tamponunun
+   * son heceye kadar tamamen çalınmasını bekler.
+   */
+  waitForDrain(maxWaitMs = 15000): Promise<void> {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + maxWaitMs;
+      const check = () => {
+        if (!this.isActive || Date.now() >= deadline) {
+          resolve();
+          return;
+        }
+        this.drainQueue();
+        if (!this.isPlaying) {
+          // Hoparlör donanım tamponundaki son hecenin kesilmemesi için 350ms ek kuyruk payı
+          setTimeout(resolve, 350);
+          return;
+        }
+        setTimeout(check, 80);
+      };
+      check();
+    });
+  }
+
+  /** Discard the current assistant turn without losing the user-unlocked context. */
+  clear() {
+    this.pendingChunks = [];
+    for (const source of this.activeSources) {
+      try { source.stop() } catch { /* already ended */ }
+    }
+    this.activeSources.clear();
+    this.nextStartTime = this.audioContext.currentTime;
+  }
+
+  stop() {
+    this.isActive = false;
+    this.clear();
+    try {
+      this.audioContext.close();
+    } catch {
+      // Already closed
+    }
+  }
+
+  private base64ToFloat32(base64: string): Float32Array {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+    return float32;
+  }
+
+  private drainQueue() {
+    if (!this.isActive || this.audioContext.state !== 'running') return;
+
+    const now = this.audioContext.currentTime;
+    // Akış yeni başlıyorsa veya kuyruk tamamen boşalmışsa 60ms mikro-jitter tamponu bırak;
+    // ardışık paketlerde ise boşluk eklemeden doğrudan nextStartTime üzerine kenetle.
+    if (this.nextStartTime <= now) {
+      this.nextStartTime = now + (this.activeSources.size === 0 ? this.initialJitterBufferSeconds : 0.005);
+    }
+
+    while (
+      this.pendingChunks.length > 0 &&
+      this.nextStartTime < now + this.maxScheduledAheadSeconds
+    ) {
+      const float32 = this.pendingChunks.shift();
+      if (!float32) break;
+
+      const buffer = this.audioContext.createBuffer(1, float32.length, this.audioContext.sampleRate);
+      buffer.getChannelData(0).set(float32);
+
+      const source = this.audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.gainNode);
+      source.onended = () => {
+        this.activeSources.delete(source);
+        this.drainQueue();
+      };
+
+      const startTime = Math.max(now + 0.002, this.nextStartTime);
+      source.start(startTime);
+      this.nextStartTime = startTime + buffer.duration;
+      this.activeSources.add(source);
+    }
+  }
+}
+
+/**
+ * MicrophoneCapture — Captures microphone audio as PCM L16 base64 chunks.
+ * Uses AudioWorkletNode (modern API) with ScriptProcessorNode fallback.
+ */
+export class MicrophoneCapture {
+  private audioContext: AudioContext | null = null;
+  private stream: MediaStream | null = null;
+  private workletNode: AudioWorkletNode | null = null;
+  private isActive = false;
+  private noiseFilterEnabled = true;
+
+  constructor(options?: { noiseFilter?: boolean }) {
+    if (typeof options?.noiseFilter === "boolean") {
+      this.noiseFilterEnabled = options.noiseFilter;
+    }
+  }
+
+  setNoiseFilter(enabled: boolean) {
+    this.noiseFilterEnabled = enabled;
+    if (this.workletNode) {
+      this.workletNode.port.postMessage({ type: "config", noiseFilter: enabled });
+    }
+  }
+
+  async start(
+    onChunk: (base64: string) => void,
+    onLevel?: (level: number, meta?: { rawLevel?: number; suppressed?: boolean }) => void
+  ) {
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      // Cihazın kendi örnekleme hızında açılır (Firefox 16 kHz bağlamı reddeder);
+      // 16 kHz'e indirme audio-processor.js içinde yapılır.
+      this.audioContext = createAudioContext();
+      // Safari: bağlam kullanıcı jestiyle başlatılan çağrıdan açılır, resume zorunludur.
+      if (this.audioContext.state === "suspended") await this.audioContext.resume();
+      const source = this.audioContext.createMediaStreamSource(this.stream);
+
+      // Load AudioWorklet processor
+      await this.audioContext.audioWorklet.addModule("/audio-processor.js");
+
+      this.workletNode = new AudioWorkletNode(
+        this.audioContext,
+        "mic-processor"
+      );
+      this.workletNode.port.postMessage({
+        type: "config",
+        noiseFilter: this.noiseFilterEnabled,
+      });
+
+      this.workletNode.port.onmessage = (event) => {
+        if (!this.isActive) return;
+        const { pcmBuffer, level, rawLevel, suppressed } = event.data;
+
+        // Convert raw Int16 buffer to base64 in main thread (btoa is available here)
+        const bytes = new Uint8Array(pcmBuffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const pcmBase64 = btoa(binary);
+
+        onChunk(pcmBase64);
+        if (onLevel) onLevel(level, { rawLevel, suppressed });
+      };
+
+      source.connect(this.workletNode);
+      this.workletNode.connect(this.audioContext.destination);
+
+      this.isActive = true;
+    } catch (err) {
+      console.error("Microphone access denied:", err);
+      throw err;
+    }
+  }
+
+  stop() {
+    this.isActive = false;
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
+    if (this.stream) {
+      this.stream.getTracks().forEach((t) => t.stop());
+      this.stream = null;
+    }
+  }
+}

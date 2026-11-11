@@ -1,0 +1,21 @@
+{
+  "name": "voice-ai",
+  "private": true,
+  "workspaces": ["server", "client"],
+  "scripts": {
+    "dev": "concurrently \"bun run dev:server\" \"bun run dev:client\"",
+    "dev:server": "cd server && bun run dev",
+    "dev:client": "cd client && bun run dev",
+    "ngrok": "bash scripts/ngrok-voice-ai.sh"
+  },
+  "devDependencies": {
+    "@dagrejs/dagre": "^3.1.1",
+    "@xyflow/react": "^12.11.2",
+    "client": "^0.0.1",
+    "concurrently": "^9.0.0"
+  },
+  "dependencies": {
+    "@fullcalendar/resource-daygrid": "^6.1.21",
+    "glob": "^13.0.6"
+  }
+}

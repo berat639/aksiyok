@@ -1,0 +1,200 @@
+'use client'
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+export type VoiceStatus = 'idle' | 'connecting' | 'listening' | 'speaking' | 'error'
+export type TranscriptEntry = { role: 'user' | 'model'; text: string; id: string }
+
+export function useVoiceAI(wsUrl: string) {
+  const [status, setStatus] = useState<VoiceStatus>('idle')
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
+  const [serverError, setServerError] = useState<string | null>(null)
+
+  const wsRef = useRef<WebSocket | null>(null)
+  const micCtxRef = useRef<AudioContext | null>(null)
+  const playCtxRef = useRef<AudioContext | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const workletRef = useRef<AudioWorkletNode | null>(null)
+  const sourcesRef = useRef<AudioBufferSourceNode[]>([])
+  const nextTimeRef = useRef(0)
+  const statusRef = useRef<VoiceStatus>('idle')
+
+  // Mic başlatma — AI'ın ilk selamlaması bitene kadar beklenir
+  const micStartedRef = useRef(false)
+  const micPendingRef = useRef<{ ctx: AudioContext; stream: MediaStream; ws: WebSocket } | null>(null)
+
+  const setStatusBoth = (s: VoiceStatus) => {
+    statusRef.current = s
+    setStatus(s)
+  }
+
+  const stopPlayback = useCallback(() => {
+    for (const src of sourcesRef.current) {
+      try { src.stop(0) } catch { /* ignore */ }
+    }
+    sourcesRef.current = []
+    nextTimeRef.current = 0
+  }, [])
+
+  const schedulePCM = useCallback((buffer: ArrayBuffer) => {
+    const ctx = playCtxRef.current
+    if (!ctx) return
+    const int16 = new Int16Array(buffer)
+    if (int16.length === 0) return
+    const float32 = new Float32Array(int16.length)
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768
+    const audioBuffer = ctx.createBuffer(1, float32.length, 24000)
+    audioBuffer.getChannelData(0).set(float32)
+    const source = ctx.createBufferSource()
+    source.buffer = audioBuffer
+    source.connect(ctx.destination)
+    const startAt = Math.max(ctx.currentTime + 0.05, nextTimeRef.current)
+    source.start(startAt)
+    nextTimeRef.current = startAt + audioBuffer.duration
+    sourcesRef.current.push(source)
+    setStatusBoth('speaking')
+    source.onended = () => {
+      sourcesRef.current = sourcesRef.current.filter(s => s !== source)
+      if (sourcesRef.current.length === 0 && statusRef.current === 'speaking') {
+        setStatusBoth('listening')
+      }
+    }
+  }, [])
+
+  // Sayfa kapanınca/yenilenince WS ve mikrofonu temizle
+  const cleanupRef = useRef<() => void>(() => {})
+  useEffect(() => {
+    const handler = () => cleanupRef.current()
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [])
+
+  const start = useCallback(async () => {
+    if (statusRef.current !== 'idle' && statusRef.current !== 'error') return
+    setServerError(null)
+    setStatusBoth('connecting')
+    micStartedRef.current = false
+
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Mikrofon erişimi yalnızca güvenli bağlantılarda (HTTPS veya localhost) kullanılabilir.')
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      streamRef.current = stream
+
+      const micCtx = new AudioContext()
+      const playCtx = new AudioContext({ sampleRate: 24000 })
+      micCtxRef.current = micCtx
+      playCtxRef.current = playCtx
+
+      await micCtx.audioWorklet.addModule('/mic-worklet.js')
+
+      const ws = new WebSocket(wsUrl)
+      ws.binaryType = 'arraybuffer'
+      wsRef.current = ws
+
+      ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          schedulePCM(event.data)
+        } else {
+          try {
+            const msg = JSON.parse(event.data as string)
+            switch (msg.type) {
+              case 'ping':
+                // Server heartbeat — pong ile cevapla
+                try { ws.send(JSON.stringify({ type: 'pong' })) } catch {}
+                break
+              case 'ready':
+                setStatusBoth('listening')
+                // Mic'i hemen açma — AI selam bitirsin, sonra aç
+                micPendingRef.current = { ctx: micCtx, stream, ws }
+                break
+              case 'interrupted':
+                stopPlayback()
+                setStatusBoth('listening')
+                break
+              case 'transcript':
+                setTranscript(prev => [...prev, {
+                  id: crypto.randomUUID(),
+                  role: msg.role as 'model',
+                  text: msg.text as string,
+                }])
+                break
+              case 'turn_complete':
+                // İlk tur tamamlandı → artık mikrofonu başlat
+                if (!micStartedRef.current && micPendingRef.current) {
+                  micStartedRef.current = true
+                  const { ctx, stream: s, ws: w } = micPendingRef.current
+                  micPendingRef.current = null
+                  startMicStreaming(ctx, s, w)
+                }
+                break
+              case 'error': {
+                const detail =
+                  typeof msg.message === 'string' && msg.message.trim()
+                    ? msg.message
+                    : 'Sunucu hatası'
+                setServerError(detail)
+                cleanup()
+                setStatusBoth('error')
+                break
+              }
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+
+      ws.onerror = () => {
+        setServerError((prev) => prev ?? 'Bağlantı hatası')
+        cleanup()
+        setStatusBoth('error')
+      }
+      ws.onclose = () => {
+        cleanup()
+        if (statusRef.current !== 'error') setStatusBoth('idle')
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Başlatılamadı'
+      setServerError(msg)
+      setStatusBoth('error')
+      cleanup()
+    }
+  }, [wsUrl, schedulePCM, stopPlayback])
+
+  function startMicStreaming(ctx: AudioContext, stream: MediaStream, ws: WebSocket) {
+    const source = ctx.createMediaStreamSource(stream)
+    const worklet = new AudioWorkletNode(ctx, 'mic-processor')
+    source.connect(worklet)
+    workletRef.current = worklet
+    worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(e.data)
+    }
+  }
+
+  function cleanup() {
+    stopPlayback()
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    workletRef.current?.disconnect()
+    try { micCtxRef.current?.close() } catch {}
+    try { playCtxRef.current?.close() } catch {}
+    wsRef.current?.close()
+    streamRef.current = null
+    workletRef.current = null
+    micCtxRef.current = null
+    playCtxRef.current = null
+    wsRef.current = null
+    nextTimeRef.current = 0
+    micStartedRef.current = false
+    micPendingRef.current = null
+  }
+  cleanupRef.current = cleanup
+
+  const stop = useCallback(() => {
+    cleanup()
+    setServerError(null)
+    setStatusBoth('idle')
+    setTranscript([])
+  }, [stopPlayback])
+
+  return { status, transcript, serverError, start, stop }
+}

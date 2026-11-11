@@ -1,0 +1,571 @@
+.page {
+  --integration-card: var(--card-bg);
+  --integration-surface: var(--card-inner);
+  --integration-surface-hover: var(--glass-bg-hover, var(--card-inner));
+  --integration-border: var(--input-border);
+  --integration-border-strong: var(--input-border);
+  --integration-text: var(--foreground);
+  --integration-text-muted: var(--foreground-2);
+  --integration-placeholder: var(--foreground-2);
+  --integration-primary: #1d4ed8;
+  --integration-primary-hover: #1d4ed8;
+  --integration-primary-border: #1d4ed8;
+  --integration-focus: var(--pc-blue, var(--accent));
+  --integration-disabled-bg: var(--card-inner);
+  --integration-disabled-text: var(--foreground-2);
+  --integration-success-bg: var(--btn-clinic-mint-bg);
+  --integration-success-border: var(--btn-clinic-mint-border);
+  --integration-success-text: var(--btn-clinic-mint-fg);
+  --integration-danger-bg: var(--flow-danger-bg);
+  --integration-danger-border: var(--danger);
+  --integration-danger-text: var(--danger);
+  --integration-warning-bg: var(--flow-node-cond);
+  --integration-warning-border: var(--flow-node-cond-border);
+  --integration-warning-text: var(--flow-node-cond-text);
+  --integration-accent-bg: var(--flow-node-action);
+  --integration-accent-text: var(--flow-node-action-text);
+  --integration-selected-bg: var(--pc-tint);
+  --integration-selected-border: var(--pc-blue);
+  --integration-link-text: var(--pc-tint-fg);
+  --integration-coming-soon-bg: var(--badge-clinic-bg);
+  --integration-coming-soon-border: var(--badge-clinic-border);
+  --integration-coming-soon-text: var(--badge-clinic-fg);
+
+  display: flex;
+  width: 100%;
+  max-width: 1100px;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--foreground);
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 48px;
+}
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  animation: spin 700ms linear infinite;
+  border: 2px solid var(--input-border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.toast {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 999;
+  max-width: min(420px, calc(100vw - 40px));
+  padding: 11px 15px;
+  border: 1.5px solid var(--input-border);
+  border-radius: 10px;
+  box-shadow: var(--pc-modal-shadow);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.page .toast.toastSuccess {
+  background: var(--btn-clinic-mint-bg);
+  border-color: var(--btn-clinic-mint-border);
+  color: var(--btn-clinic-mint-fg) !important;
+}
+
+.page .toast.toastError {
+  background: var(--flow-danger-bg);
+  border-color: var(--danger);
+  color: var(--danger) !important;
+}
+
+.card {
+  padding: 24px;
+  background: var(--card-bg);
+  border: 1.5px solid var(--input-border);
+  border-radius: 14px;
+  box-shadow: var(--pc-neo-card);
+}
+
+.cardTitle {
+  margin: 0 0 8px;
+  color: var(--foreground) !important;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.page .card .cardDescription {
+  margin: 0 0 20px;
+  color: var(--foreground-2) !important;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.integrationStatus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.integrationStatus p {
+  margin: 0;
+  color: var(--foreground-2) !important;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid;
+  border-radius: 999px;
+  box-shadow: var(--pc-clay-pale);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.statusSuccess {
+  background: var(--btn-clinic-mint-bg);
+  border-color: var(--btn-clinic-mint-border);
+  color: var(--btn-clinic-mint-fg) !important;
+}
+
+.statusWarning {
+  background: var(--flow-node-cond);
+  border-color: var(--flow-node-cond-border);
+  color: var(--flow-node-cond-text) !important;
+}
+
+.statusDanger {
+  background: var(--flow-danger-bg);
+  border-color: var(--danger);
+  color: var(--danger) !important;
+}
+
+.comingSoonHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.comingSoonHeader .cardTitle {
+  margin: 0;
+}
+
+.comingSoonBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 12px;
+  background: var(--pc-tint);
+  border: 1px solid var(--pc-border, var(--input-border));
+  border-radius: 999px;
+  box-shadow: var(--pc-clay-pale);
+  color: var(--pc-tint-fg) !important;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.comingSoonNotice {
+  margin: 0 !important;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.page .field .fieldLabel {
+  color: var(--foreground-2) !important;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 12px;
+  background: var(--input-bg) !important;
+  border: 1.5px solid var(--input-border) !important;
+  border-radius: 9px;
+  box-shadow: var(--pc-neo-inset);
+  color: var(--foreground) !important;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.field input::placeholder {
+  color: var(--foreground-2);
+  opacity: 1;
+}
+
+.field input:focus,
+.field select:focus,
+.uploadButton:focus-within,
+.saveButton:focus-visible {
+  border-color: var(--pc-blue, var(--accent)) !important;
+  outline: 2px solid var(--pc-blue, var(--accent));
+  outline-offset: 2px;
+}
+
+.logoRow {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.logoPreview {
+  display: flex;
+  width: 80px;
+  height: 80px;
+  flex: 0 0 80px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--card-inner);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  box-shadow: var(--pc-neo-subcard);
+}
+
+.logoPreview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.logoPlaceholder {
+  color: var(--foreground-2) !important;
+  font-size: 24px;
+}
+
+.logoActions { flex: 1; }
+
+.uploadButton,
+.saveButton,
+.page .uploadButton,
+.page .saveButton,
+:global([data-theme='light']) .page .uploadButton,
+:global([data-theme='light']) .page .saveButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 9px 16px;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  border: 1px solid #1d4ed8;
+  border-radius: 9px;
+  box-shadow: var(--pc-clay-primary);
+  color: #ffffff !important;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.uploadButton *,
+.saveButton *,
+.page .uploadButton *,
+.page .saveButton *,
+:global([data-theme='light']) .page .uploadButton *,
+:global([data-theme='light']) .page .saveButton * {
+  color: #ffffff !important;
+}
+
+.uploadButton:hover,
+.saveButton:hover:not(:disabled) {
+  filter: brightness(1.04);
+}
+
+.uploadButton input { display: none; }
+
+.page .logoActions .helperText {
+  margin: 8px 0 0;
+  color: var(--foreground-2) !important;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.roleHeading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.page .roleHeading .roleIcon {
+  display: flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  align-items: center;
+  justify-content: center;
+  background: var(--pc-tint);
+  border: 1px solid var(--pc-border, var(--input-border));
+  border-radius: 9px;
+  box-shadow: var(--pc-clay-pale);
+  color: var(--pc-tint-fg) !important;
+}
+
+.roleHeading .cardTitle { margin-bottom: 3px; }
+.roleHeading .cardDescription { margin-bottom: 0; }
+
+.roleList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.roleGroup {
+  padding: 16px;
+  background: var(--card-inner);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  box-shadow: var(--pc-neo-subcard);
+}
+
+.roleName {
+  margin-bottom: 12px;
+  color: var(--foreground) !important;
+  font-size: 14px;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.permissionList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.page .roleGroup .permission {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--foreground-2) !important;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.permission input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--pc-blue, var(--accent));
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+.saveButton {
+  min-width: 150px;
+  padding-inline: 24px;
+  font-size: 14px;
+}
+
+.saveButton:disabled {
+  background: var(--card-inner);
+  border-color: var(--input-border);
+  box-shadow: none;
+  color: var(--foreground-2) !important;
+  cursor: wait;
+}
+
+.saveButton:disabled * {
+  color: var(--foreground-2) !important;
+}
+
+.priorityList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.priorityItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--card-inner);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  box-shadow: var(--pc-neo-subcard);
+}
+
+.priorityItemDisabled {
+  opacity: 0.65;
+}
+
+.priorityLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.priorityOrderBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--pc-tint);
+  border: 1px solid var(--pc-border, var(--input-border));
+  box-shadow: var(--pc-clay-pale);
+  color: var(--pc-tint-fg) !important;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.priorityInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.priorityTitle {
+  color: var(--foreground) !important;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.priorityDesc {
+  color: var(--foreground-2) !important;
+  font-size: 12px;
+}
+
+.priorityControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.orderBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--btn-clinic-blue-bg, var(--card-bg));
+  border: 1px solid var(--btn-clinic-blue-border, var(--input-border));
+  box-shadow: var(--pc-clay-btn);
+  color: var(--btn-clinic-blue-fg, var(--foreground)) !important;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.orderBtn:hover:not(:disabled) {
+  background: var(--btn-clinic-blue-hover, var(--card-inner));
+}
+
+.orderBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.channelToggleBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 82px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  box-shadow: var(--pc-clay-btn);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid;
+}
+
+.channelToggleActive {
+  background: var(--btn-clinic-mint-bg);
+  border-color: var(--btn-clinic-mint-border);
+  color: var(--btn-clinic-mint-fg) !important;
+}
+
+.channelToggleInactive {
+  background: var(--card-bg);
+  border-color: var(--input-border);
+  color: var(--foreground-2) !important;
+}
+
+.policyRulesBox {
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--card-inner);
+  border: 1px solid var(--input-border);
+  box-shadow: var(--pc-neo-subcard);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.policyCheckRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding-top: 6px;
+}
+
+.policyActionRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.policyHint {
+  color: var(--foreground-2) !important;
+  font-size: 12px;
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .card { padding: 18px; }
+  .logoRow { align-items: flex-start; }
+  .priorityItem { flex-direction: column; align-items: stretch; }
+  .priorityControls { justify-content: flex-end; }
+  .footer, .saveButton { width: 100%; }
+}

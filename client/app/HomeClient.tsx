@@ -1,0 +1,838 @@
+'use client'
+
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { ThemeToggle } from './theme-provider'
+import { AiLiveSession, type LiveChatCallbacks, type SessionConfig } from '@/lib/ai-live'
+import { AudioStreamPlayer, MicrophoneCapture } from '@/lib/audio'
+
+type VoiceStatus = 'idle' | 'connecting' | 'listening' | 'speaking' | 'thinking' | 'error'
+
+const STATUS_LABEL: Record<VoiceStatus, string> = {
+  idle: 'Başlamak için tıklayın',
+  connecting: 'Bağlanıyor...',
+  listening: 'Sizi dinliyorum',
+  speaking: 'Asistan konuşuyor...',
+  thinking: 'Asistan işlemi tamamlıyor...',
+  error: 'Bir hata oluştu',
+}
+
+const STATUS_COLOR: Record<VoiceStatus, string> = {
+  idle: '#334155',
+  connecting: '#f59e0b',
+  listening: '#22c55e',
+  speaking: '#818cf8',
+  thinking: '#0ea5e9',
+  error: '#ef4444',
+}
+
+const STATUS_ICON: Record<VoiceStatus, string> = {
+  idle: '🎙️',
+  connecting: '⏳',
+  listening: '🎙️',
+  speaking: '🔊',
+  thinking: '🧠',
+  error: '⚠️',
+}
+
+type TranscriptEntry = { id: string; role: 'user' | 'model'; text: string }
+
+function isWebConversationFarewell(text: string, customCloseMessage?: string): boolean {
+  const normalize = (value: string) =>
+    value
+      .toLocaleLowerCase('tr-TR')
+      .replace(/[.,!?;:()[\]{}"']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  const normalized = normalize(text)
+  if (!normalized) return false
+
+  if (customCloseMessage) {
+    const customNorm = normalize(customCloseMessage)
+    if (customNorm.length >= 10 && normalized.includes(customNorm)) {
+      return true
+    }
+  }
+
+  return [
+    /\bhoşça\s*kalın\b/,
+    /\bhoşçakalın\b/,
+    /\bgüle\s*güle\b/,
+    /\biyi\s+(?:günler|akşamlar|geceler)\b/,
+    /\bsağlıklı\s+günler\b/,
+    /\bkendinize\s+iyi\s+bakın\b/,
+    /\bgörüş(?:meyi|memizi)\s+sonlandır/,
+    /\bbaşka\s+bir\s+zaman\s+(?:tekrar\s+)?görüş/,
+    /\bgörüşmek\s+dileğiyle\b/,
+  ].some(pattern => pattern.test(normalized))
+}
+
+export default function Home() {
+  const [status, setStatus] = useState<VoiceStatus>('idle')
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
+  const [errorMsg, setErrorMsg] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [sessionConfig, setSessionConfig] = useState<SessionConfig | null>(null)
+  const [mode, setMode] = useState<'audio' | 'text'>('audio')
+  const [textInput, setTextInput] = useState('')
+  const [logoError, setLogoError] = useState(false)
+
+  const sessionRef = useRef<AiLiveSession | null>(null)
+  const playerRef = useRef<AudioStreamPlayer | null>(null)
+  const micRef = useRef<MicrophoneCapture | null>(null)
+  const textBufferRef = useRef('')
+  const farewellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const webSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const webSilenceCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const webMaxWarnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const webMaxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const webCloseFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const webWarningPendingRef = useRef(false)
+  const webClosingRef = useRef(false)
+  const lastWebSpeechAtRef = useRef(0)
+  const isActive = status !== 'idle' && status !== 'error'
+  const isTextAssistantOpen = mode === 'text' && isActive
+
+  const clearWebTimers = useCallback(() => {
+    for (const timerRef of [
+      webSilenceTimerRef,
+      webSilenceCloseTimerRef,
+      webMaxWarnTimerRef,
+      webMaxDurationTimerRef,
+      webCloseFallbackTimerRef,
+    ]) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+    webWarningPendingRef.current = false
+    webClosingRef.current = false
+  }, [])
+
+  const clearWebSilenceTimers = useCallback(() => {
+    for (const timerRef of [webSilenceTimerRef, webSilenceCloseTimerRef]) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+    webWarningPendingRef.current = false
+  }, [])
+
+  const stop = useCallback(() => {
+    if (farewellTimerRef.current) {
+      clearTimeout(farewellTimerRef.current)
+      farewellTimerRef.current = null
+    }
+    clearWebTimers()
+    micRef.current?.stop()
+    micRef.current = null
+    sessionRef.current?.disconnect()
+    sessionRef.current = null
+    playerRef.current?.stop()
+    playerRef.current = null
+    setStatus('idle')
+  }, [clearWebTimers])
+
+  const stopAfterPlayback = useCallback(() => {
+    webClosingRef.current = true
+    micRef.current?.stop()
+    micRef.current = null
+    if (farewellTimerRef.current) {
+      clearTimeout(farewellTimerRef.current)
+      farewellTimerRef.current = null
+    }
+    const player = playerRef.current
+    if (!player) {
+      stop()
+      return
+    }
+    void player.waitForDrain(15000).then(() => {
+      if (webClosingRef.current) stop()
+    })
+  }, [stop])
+
+  const scheduleWebSilenceTimer = useCallback((warningSeconds: number, closeSeconds: number) => {
+    if (mode !== 'audio' || !sessionRef.current || webClosingRef.current) return
+
+    if (webSilenceTimerRef.current) clearTimeout(webSilenceTimerRef.current)
+    if (webSilenceCloseTimerRef.current) clearTimeout(webSilenceCloseTimerRef.current)
+    webWarningPendingRef.current = false
+
+    webSilenceTimerRef.current = setTimeout(() => {
+      if (!sessionRef.current || webClosingRef.current) return
+      webWarningPendingRef.current = true
+      sessionRef.current.sendText(
+        `Sistem bildirimi: Kullanıcı ${warningSeconds} saniyedir konuşmadı. Kısa ve nazik bir sessizlik uyarısı yap, ardından kullanıcının konuşması için bekle.`
+      )
+      webSilenceCloseTimerRef.current = setTimeout(() => {
+        if (!sessionRef.current || !webWarningPendingRef.current) return
+        webClosingRef.current = true
+        micRef.current?.stop()
+        micRef.current = null
+        sessionRef.current.sendText(
+          `Sistem bildirimi: Sessizlik uyarısından sonra da yanıt gelmedi. Görüşmeyi kısa bir veda cümlesiyle sonlandır ve iyi günler dile.`
+        )
+        webCloseFallbackTimerRef.current = setTimeout(() => {
+          if (webClosingRef.current) stopAfterPlayback()
+        }, 12000)
+      }, closeSeconds * 1000)
+    }, warningSeconds * 1000)
+  }, [mode, stopAfterPlayback])
+
+  const scheduleWebMaxDurationTimer = useCallback((maxSeconds: number) => {
+    if (!sessionRef.current || maxSeconds <= 0) return
+    if (webMaxWarnTimerRef.current) clearTimeout(webMaxWarnTimerRef.current)
+    if (webMaxDurationTimerRef.current) clearTimeout(webMaxDurationTimerRef.current)
+
+    // Bitişten 20 sn önce uyarı vererek konuyu toparlamasını sağla
+    const warnDelayMs = Math.max(10_000, (maxSeconds - 20) * 1000)
+    if (maxSeconds > 25) {
+      webMaxWarnTimerRef.current = setTimeout(() => {
+        if (!sessionRef.current || webClosingRef.current) return
+        sessionRef.current.sendText(
+          `Sistem bildirimi: Maksimum görüşme süresinin dolmasına 20 saniye kaldı. Kullanıcıya kısaca "Görüşme süremiz dolmak üzere, randevu veya klinik talebinizi hemen tamamlayalım; konu dışı devam edersek görüşmeyi sonlandırmam gerekecek." de.`
+        )
+      }, warnDelayMs)
+    }
+
+    // Maksimum süre dolduğunda mikrofonu kapat (barge-in ile kapanışın iptal edilmesini önle) ve görüşmeyi bitir
+    webMaxDurationTimerRef.current = setTimeout(() => {
+      if (!sessionRef.current || webClosingRef.current) return
+      webClosingRef.current = true
+      clearWebSilenceTimers()
+      micRef.current?.stop()
+      micRef.current = null
+      sessionRef.current.sendText(
+        `Sistem bildirimi: Maksimum görüşme süresi (${Math.round(maxSeconds / 60)} dakika) doldu. Yeni soru sorma; yalnızca "Görüşme süremiz doldu, sağlıklı ve iyi günler dilerim." diyerek görüşmeyi hemen sonlandır.`
+      )
+      webCloseFallbackTimerRef.current = setTimeout(() => {
+        if (webClosingRef.current) stopAfterPlayback()
+      }, 12000)
+    }, maxSeconds * 1000)
+  }, [clearWebSilenceTimers, stopAfterPlayback])
+
+  const markWebSpeech = useCallback((warningSeconds: number, closeSeconds: number) => {
+    // Kapanış aşamasına geçildiyse (maksimum süre dolduysa veya sessizlik kapanışı başladıysa) konuşma sayacı sıfırlayamaz
+    if (webClosingRef.current) return
+    const now = Date.now()
+    if (now - lastWebSpeechAtRef.current < 250) return
+    lastWebSpeechAtRef.current = now
+    if (webSilenceCloseTimerRef.current) {
+      clearTimeout(webSilenceCloseTimerRef.current)
+      webSilenceCloseTimerRef.current = null
+    }
+    webWarningPendingRef.current = false
+    scheduleWebSilenceTimer(warningSeconds, closeSeconds)
+  }, [scheduleWebSilenceTimer])
+
+  // Fetch config on mount (safe, just static DB info)
+  useEffect(() => {
+    fetch('/api/direct-session-config')
+      .then(r => r.json())
+      .then((config: SessionConfig) => {
+        setSessionConfig(config)
+        if (config.branding?.title) {
+          document.title = `Voice AI — ${config.branding.title}`
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  const addTranscript = useCallback((role: 'user' | 'model', text: string) => {
+    setTranscript(prev => [...prev, { id: `${Date.now()}-${Math.random()}`, role, text }])
+  }, [])
+
+  const start = useCallback(async () => {
+    setStatus('connecting')
+    setErrorMsg('')
+    setTranscript([])
+
+    // Create and resume the actual playback context while this click still has
+    // browser user-activation. Network setup below contains awaits.
+    const player = new AudioStreamPlayer(24000)
+    playerRef.current = player
+
+    let currentApiKey = apiKey
+    if (!currentApiKey) {
+      try {
+        const r = await fetch('/api/direct-session')
+        const d = await r.json()
+        if (d.apiKey) {
+          currentApiKey = d.apiKey
+          setApiKey(d.apiKey)
+        } else {
+          throw new Error('API Key alınamadı')
+        }
+      } catch (err) {
+        player.stop()
+        if (playerRef.current === player) playerRef.current = null
+        setStatus('error')
+        setErrorMsg('Bağlantı kurulamadı (API Key hatası).')
+        return
+      }
+    }
+
+    let activeSessionConfig = sessionConfig
+    try {
+      const cfgRes = await fetch('/api/direct-session-config')
+      if (cfgRes.ok) {
+        const freshCfg = (await cfgRes.json()) as SessionConfig
+        activeSessionConfig = freshCfg
+        setSessionConfig(freshCfg)
+      }
+    } catch { /* fallback to existing sessionConfig */ }
+
+    if (!currentApiKey || !activeSessionConfig) {
+      player.stop()
+      playerRef.current = null
+      setStatus('error')
+      setErrorMsg('API key veya oturum ayarları bulunamadı. Server ayarlarını kontrol edin.')
+      return
+    }
+
+    let liveConfig = activeSessionConfig
+    try {
+      const response = await fetch('/api/flow-sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ direction: 'web' }) })
+      if (response.ok) {
+        const flowSession = await response.json()
+        liveConfig = {
+          ...activeSessionConfig,
+          flowSession,
+          systemPrompt: `${activeSessionConfig.systemPrompt}\n\nAKIŞ YÖNETİMİ: Müşteri yeni veya düzeltilmiş bilgi verdiğinde önce akisBilgisiGuncelle aracını çağır. Araçtan gelen sıradaki görevi uygula. Araç bir bilgi istemenizi söylerse yalnızca o bilgiyi iste. Randevu işlemini ancak araç işlem adımına ulaştığında çağır.`,
+        }
+      }
+    } catch { /* Akış motoru kapalı veya ulaşılamıyor; mevcut görüşme yolu korunur. */ }
+
+    try {
+      // iOS AudioContext unlock
+      const unlockCtx = new AudioContext()
+      const buf = unlockCtx.createBuffer(1, 1, 22050)
+      const src = unlockCtx.createBufferSource()
+      src.buffer = buf
+      src.connect(unlockCtx.destination)
+      src.start(0)
+      setTimeout(() => unlockCtx.close(), 100)
+    } catch { /* ignore */ }
+
+    const callbacks: LiveChatCallbacks = {
+      onAudioChunk: (data) => {
+        // Resolve the player at delivery time so a replaced or cleared turn
+        // can never receive PCM through a stale captured reference.
+        playerRef.current?.addChunk(data)
+        setStatus('speaking')
+      },
+      onText: (text) => {
+        textBufferRef.current += text
+        // console.log('[AI Text]', text)
+      },
+      onTurnComplete: () => {
+        const modelText = textBufferRef.current.trim()
+        if (modelText.length > 0) {
+          addTranscript('model', modelText)
+          textBufferRef.current = ''
+          if (webClosingRef.current || (!session.interactionInProgress && isWebConversationFarewell(modelText, liveConfig.offTopicCloseMessage))) {
+            stopAfterPlayback()
+            return
+          }
+        } else if (webClosingRef.current) {
+          stopAfterPlayback()
+          return
+        }
+        if (session.interactionInProgress) {
+          setStatus('thinking')
+          return
+        }
+        setStatus('listening')
+        if (!webWarningPendingRef.current && !webClosingRef.current) {
+          scheduleWebSilenceTimer(
+            Math.max(5, liveConfig.callSilenceTimeout ?? 30),
+            Math.max(5, liveConfig.callSilenceCloseTimeout ?? 15),
+          )
+        }
+      },
+      onConnectionChange: (connected) => {
+        if (!connected && sessionRef.current) {
+          clearWebTimers()
+          micRef.current?.stop()
+          micRef.current = null
+          playerRef.current?.stop()
+          playerRef.current = null
+          sessionRef.current = null
+          setStatus('idle')
+        }
+      },
+      onError: (err) => {
+        clearWebTimers()
+        micRef.current?.stop()
+        micRef.current = null
+        setStatus('error')
+        setErrorMsg(err)
+      },
+      onInterrupted: () => {
+        if (webClosingRef.current) return
+        textBufferRef.current = ''
+        setStatus('listening')
+        playerRef.current?.clear()
+      },
+      onInteractionStatus: (interactionStatus) => {
+        if (interactionStatus === 'IN_PROGRESS') {
+          clearWebSilenceTimers()
+          setStatus('thinking')
+          return
+        }
+        if (!playerRef.current?.isPlaying) setStatus('listening')
+        if (!webWarningPendingRef.current && !webClosingRef.current) {
+          scheduleWebSilenceTimer(
+            Math.max(5, liveConfig.callSilenceTimeout ?? 30),
+            Math.max(5, liveConfig.callSilenceCloseTimeout ?? 15),
+          )
+        }
+      },
+    }
+
+    const session = new AiLiveSession(callbacks)
+    sessionRef.current = session
+
+    try {
+      await session.connect(currentApiKey, liveConfig, mode)
+      if (!session.connected) {
+        throw new Error('Oturum hemen kapatıldı')
+      }
+
+      setStatus('listening')
+
+      const greetingPrompt = liveConfig.greeting
+        ? `Sistem bildirimi: Müşteri ${mode === 'audio' ? 'sesli' : 'yazılı'} görüşmeye bağlandı. Müşteriye tam olarak şu karşılama mesajını okuyarak konuşmayı başlat: "${liveConfig.greeting}" (Bu bir sistem bildirimidir, müşteri adı sanma.)`
+        : `Sistem bildirimi: Müşteri ${mode === 'audio' ? 'sesli' : 'yazılı'} görüşmeye bağlandı. Kısaca "Merhaba, size nasıl yardımcı olabilirim?" diyerek görüşmeyi başlat.`
+      session.sendText(greetingPrompt)
+
+      scheduleWebMaxDurationTimer(Math.max(180, liveConfig.callMaxDuration ?? 600))
+
+      if (mode === 'audio') {
+        const mic = new MicrophoneCapture({
+          noiseFilter: (liveConfig.noiseFilterMode ?? 'rnnoise') !== 'off',
+        })
+        micRef.current = mic
+        if (sessionRef.current !== session) return
+        await mic.start((pcm) => {
+          session.sendAudio(pcm)
+        }, (level) => {
+          if (level >= 0.02) {
+            markWebSpeech(
+              Math.max(5, liveConfig.callSilenceTimeout ?? 30),
+              Math.max(5, liveConfig.callSilenceCloseTimeout ?? 15),
+            )
+          }
+        })
+      }
+    } catch (err) {
+      player.stop()
+      if (playerRef.current === player) playerRef.current = null
+      setStatus('error')
+      setErrorMsg(err instanceof Error ? err.message : 'Bağlantı hatası')
+    }
+  }, [apiKey, sessionConfig, mode, addTranscript, stop, stopAfterPlayback, clearWebTimers, clearWebSilenceTimers, scheduleWebMaxDurationTimer, scheduleWebSilenceTimer, markWebSpeech])
+
+  useEffect(() => () => stop(), [stop])
+
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+    }}>
+      {/* Top Nav */}
+      <nav style={{
+        width: '100%',
+        padding: '0 2rem',
+        height: 64,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        background: 'var(--card-bg, #0b1329)',
+        borderBottom: '1px solid var(--border, rgba(255,255,255,0.06))',
+        position: 'sticky',
+        top: 0,
+        zIndex: 50,
+      }}>
+        {/* Logo */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          {sessionConfig?.branding?.logoUrl && !logoError ? (
+            <img
+              src={sessionConfig.branding.logoUrl}
+              alt="Logo"
+              onError={() => setLogoError(true)}
+              style={{ height: 24, width: 'auto', filter: 'var(--logo-filter)' }}
+            />
+          ) : (
+            <div style={{
+              width: 28,
+              height: 28,
+              borderRadius: '50%',
+              background: 'linear-gradient(135deg, #60a5fa, #a78bfa)',
+            }} />
+          )}
+          <div style={{
+            width: 1,
+            height: 20,
+            background: 'rgba(255,255,255,0.15)',
+          }} />
+          <span style={{ color: '#94a3b8', fontSize: '0.8rem', fontWeight: 500, letterSpacing: '0.05em' }}>
+            {sessionConfig?.branding?.title || 'Asistan'}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ThemeToggle />
+        </div>
+      </nav>
+
+      {/* Content */}
+      <div style={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '2rem',
+        gap: '2.5rem',
+        width: '100%',
+        maxWidth: 560,
+      }}>
+        {/* Header */}
+        <div style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          gap: '1.5rem', 
+          animation: 'fadeIn 0.6s ease',
+          marginBottom: '1rem'
+        }}>
+          {sessionConfig?.branding?.logoUrl && !logoError && (
+            <img 
+              src={sessionConfig.branding.logoUrl} 
+              alt="Logo" 
+              onError={() => setLogoError(true)}
+              style={{ width: 72, height: 72, objectFit: 'contain', filter: 'var(--logo-filter)' }}
+            />
+          )}
+          <div style={{ textAlign: sessionConfig?.branding?.logoUrl && !logoError ? 'left' : 'center' }}>
+            <h1 style={{
+              fontSize: '2rem',
+              fontWeight: 800,
+              background: 'linear-gradient(135deg, #60a5fa 0%, #a78bfa 50%, #60a5fa 100%)',
+              backgroundSize: '200% auto',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              marginBottom: '0.5rem',
+              letterSpacing: '-0.02em',
+            }}>
+              {sessionConfig?.branding?.title || 'Asistan'}
+            </h1>
+            <p style={{ color: '#64748b', fontSize: '0.9rem', fontWeight: 400 }}>
+              {sessionConfig?.branding?.subtitle || 'Randevu · Bilgi'}
+            </p>
+          </div>
+        </div>
+
+        {/* Mode Toggle */}
+        <div style={{ display: 'flex', gap: '1rem', marginBottom: '-1rem', zIndex: 10 }}>
+          <button
+            onClick={() => status === 'idle' && setMode('audio')}
+            style={{
+              padding: '0.5rem 1.5rem',
+              borderRadius: '20px',
+              border: `1px solid ${mode === 'audio' ? '#3b82f6' : '#475569'}`,
+              background: mode === 'audio' ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
+              color: mode === 'audio' ? '#60a5fa' : '#94a3b8',
+              cursor: status === 'idle' ? 'pointer' : 'not-allowed',
+              opacity: status === 'idle' ? 1 : 0.5,
+              transition: 'all 0.2s',
+            }}
+          >
+            🎙️ Sesli
+          </button>
+          <button
+            onClick={() => status === 'idle' && setMode('text')}
+            style={{
+              padding: '0.5rem 1.5rem',
+              borderRadius: '20px',
+              border: `1px solid ${mode === 'text' ? '#3b82f6' : '#475569'}`,
+              background: mode === 'text' ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
+              color: mode === 'text' ? '#60a5fa' : '#94a3b8',
+              cursor: status === 'idle' ? 'pointer' : 'not-allowed',
+              opacity: status === 'idle' ? 1 : 0.5,
+              transition: 'all 0.2s',
+            }}
+          >
+            💬 Yazılı
+          </button>
+        </div>
+
+        {mode === 'text' && (
+          <section
+            aria-label="Yazılı asistan kontrolü"
+            style={{
+              width: '100%',
+              padding: '1rem',
+              borderRadius: 14,
+              background: 'var(--card-bg)',
+              border: '1px solid var(--input-border)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '1rem',
+            }}
+          >
+            <div>
+              <div style={{ color: 'var(--foreground)', fontWeight: 700, fontSize: '0.95rem' }}>Yazılı Asistan</div>
+              <div style={{ color: 'var(--foreground-2)', fontSize: '0.8rem', marginTop: 4 }}>
+                {isTextAssistantOpen ? 'Asistan açık, mesajınızı yazabilirsiniz.' : 'Randevu ve klinik sorularınız için sohbeti başlatın.'}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={isTextAssistantOpen ? stop : start}
+              style={{
+                minWidth: 126,
+                padding: '0.65rem 0.85rem',
+                borderRadius: 9,
+                border: `1px solid ${isTextAssistantOpen ? 'var(--danger)' : 'var(--btn-clinic-primary-bg)'}`,
+                background: isTextAssistantOpen ? 'var(--card-bg)' : 'var(--btn-clinic-primary-bg)',
+                color: isTextAssistantOpen ? 'var(--danger)' : 'var(--btn-clinic-primary-fg)',
+                cursor: 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              {isTextAssistantOpen ? 'Sohbeti Kapat' : 'Asistanı Aç'}
+            </button>
+          </section>
+        )}
+
+        {/* Voice Button */}
+        {mode === 'audio' && <div style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {/* Pulse rings */}
+          {(status === 'listening' || status === 'speaking') && (
+            <>
+              <div style={{
+                position: 'absolute',
+                width: 180,
+                height: 180,
+                borderRadius: '50%',
+                border: `2px solid ${STATUS_COLOR[status]}`,
+                opacity: 0.3,
+                animation: 'ping 1.5s cubic-bezier(0,0,0.2,1) infinite',
+              }} />
+              <div style={{
+                position: 'absolute',
+                width: 155,
+                height: 155,
+                borderRadius: '50%',
+                border: `2px solid ${STATUS_COLOR[status]}`,
+                opacity: 0.15,
+                animation: 'ping 1.5s cubic-bezier(0,0,0.2,1) infinite 0.4s',
+              }} />
+            </>
+          )}
+
+          {/* Glow backdrop */}
+          <div style={{
+            position: 'absolute',
+            width: 140,
+            height: 140,
+            borderRadius: '50%',
+            background: isActive ? `${STATUS_COLOR[status]}18` : 'transparent',
+            filter: 'blur(24px)',
+            transition: 'all 0.4s ease',
+          }} />
+
+          {/* Main button */}
+          <button
+            id="voice-btn"
+            onClick={isActive ? stop : start}
+            style={{
+              width: 130,
+              height: 130,
+              borderRadius: '50%',
+              border: `2px solid ${STATUS_COLOR[status]}`,
+              background: status === 'idle'
+                ? 'radial-gradient(circle at 30% 30%, #1e293b, #0a1220)'
+                : `radial-gradient(circle at 30% 30%, ${STATUS_COLOR[status]}22, #0a1220)`,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.3s ease',
+              boxShadow: isActive
+                ? `0 0 40px ${STATUS_COLOR[status]}33, inset 0 0 20px ${STATUS_COLOR[status]}11`
+                : '0 8px 32px rgba(0,0,0,0.4)',
+              fontSize: '2.8rem',
+              outline: 'none',
+              position: 'relative',
+              zIndex: 1,
+            }}
+            aria-label={isActive ? 'Durdur' : 'Başlat'}
+          >
+            {STATUS_ICON[status]}
+          </button>
+        </div>}
+
+        {/* Status */}
+        <div style={{
+          fontSize: '0.95rem',
+          color: STATUS_COLOR[status],
+          fontWeight: 500,
+          minHeight: '1.5rem',
+          transition: 'color 0.3s',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          {status !== 'idle' && (
+            <span style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: STATUS_COLOR[status],
+              display: 'inline-block',
+              animation: isActive ? 'pulse-ring 1.5s ease infinite' : 'none',
+            }} />
+          )}
+          {STATUS_LABEL[status]}
+        </div>
+        {status === 'error' && errorMsg && (
+          <div style={{
+            fontSize: '0.8rem',
+            color: '#f87171',
+            textAlign: 'center',
+            maxWidth: '100%',
+            lineHeight: 1.45,
+            padding: '0 0.5rem',
+          }}>
+            {errorMsg}
+          </div>
+        )}
+
+        {/* Text Input */}
+        {mode === 'text' && isTextAssistantOpen && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!textInput.trim() || !sessionRef.current?.connected) return
+              sessionRef.current.sendText(textInput.trim())
+              addTranscript('user', textInput.trim())
+              setTextInput('')
+            }}
+            style={{ display: 'flex', gap: '0.5rem', width: '100%', marginTop: '0.5rem' }}
+          >
+            <input
+              type="text"
+              value={textInput}
+              onChange={e => setTextInput(e.target.value)}
+              placeholder="Mesajınızı yazın..."
+              style={{
+                flex: 1,
+                padding: '0.75rem 1rem',
+                borderRadius: '12px',
+                border: '1px solid var(--input-border)',
+                background: 'var(--input-bg)',
+                color: 'var(--foreground)',
+                outline: 'none',
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!textInput.trim() || status === 'connecting'}
+              style={{
+                padding: '0 1.25rem',
+                borderRadius: '12px',
+                background: textInput.trim() && status !== 'connecting' ? 'var(--btn-clinic-primary-bg)' : 'var(--card-inner)',
+                color: textInput.trim() && status !== 'connecting' ? 'var(--btn-clinic-primary-fg)' : 'var(--foreground-3)',
+                border: '1px solid var(--input-border)',
+                cursor: textInput.trim() && status !== 'connecting' ? 'pointer' : 'not-allowed',
+                fontWeight: 600,
+              }}
+            >
+              Gönder
+            </button>
+          </form>
+        )}
+
+        {/* Transcript */}
+        {(mode === 'text' || transcript.length > 0) && (
+          <div aria-live="polite" style={{
+            width: '100%',
+            maxHeight: mode === 'text' ? 360 : 300,
+            overflowY: 'auto',
+            padding: '1rem',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.6rem',
+            animation: 'fadeIn 0.3s ease',
+            background: 'var(--card-bg)',
+            border: '1px solid var(--input-border)',
+            borderRadius: 14,
+          }}>
+            {mode === 'text' && transcript.length === 0 && (
+              <div style={{ color: 'var(--foreground-2)', fontSize: '0.875rem', textAlign: 'center', padding: '1.25rem 0.5rem' }}>
+                {isTextAssistantOpen ? 'Asistanın karşılama mesajı hazırlanıyor…' : 'Sohbeti başlatmak için “Asistanı Aç” düğmesine basın.'}
+              </div>
+            )}
+            {transcript.map((entry) => (
+              <div
+                key={entry.id}
+                style={{
+                  textAlign: entry.role === 'model' ? 'left' : 'right',
+                  fontSize: '0.875rem',
+                  lineHeight: 1.6,
+                  animation: 'slideIn 0.2s ease',
+                }}
+              >
+                <span style={{
+                  display: 'inline-block',
+                  background: entry.role === 'model'
+                    ? 'var(--card-inner)'
+                    : 'var(--btn-clinic-primary-bg)',
+                  color: entry.role === 'model' ? 'var(--foreground)' : 'var(--btn-clinic-primary-fg)',
+                  padding: '0.45rem 0.85rem',
+                  borderRadius: entry.role === 'model' ? '4px 14px 14px 14px' : '14px 4px 14px 14px',
+                  maxWidth: '88%',
+                  border: `1px solid ${entry.role === 'model' ? 'var(--input-border)' : 'var(--btn-clinic-primary-bg)'}`,
+                }}>
+                  {entry.text}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Info cards */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gap: '0.75rem',
+          width: '100%',
+        }}>
+          {[
+            { icon: '📅', label: 'Randevu\nOluştur' },
+            { icon: '❓', label: 'Bilgi\nAl' },
+          ].map((item, i) => (
+            <div key={i} className="glass-card" style={{
+              padding: '1rem',
+              textAlign: 'center',
+              transition: 'all 0.2s',
+            }}>
+              <div style={{ fontSize: '1.5rem', marginBottom: '0.4rem' }}>{item.icon}</div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 500, whiteSpace: 'pre-line', lineHeight: 1.4 }}>
+                {item.label}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </main>
+  )
+}

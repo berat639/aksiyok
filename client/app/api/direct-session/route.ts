@@ -1,0 +1,11 @@
+import { NextResponse } from 'next/server'
+
+export const dynamic = 'force-dynamic'
+
+export async function GET() {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) {
+    return NextResponse.json({ error: 'Yapay zeka API anahtarı yapılandırılmamış' }, { status: 500 })
+  }
+  return NextResponse.json({ apiKey })
+}

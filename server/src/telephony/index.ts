@@ -1,0 +1,1278 @@
+/**
+ * Netgsm SIP Trunk ↔ Gemini Live köprüsü.
+ *
+ * Akış:
+ *   Asterisk → AudioSocket TCP (SLIN 8 kHz) → upsample 8→16 → Gemini Live
+ *   Gemini Live → 24 kHz PCM → downsample 24→8 → AudioSocket frame'leri → Asterisk
+ *
+ * Web istemcisindeki /ws akışıyla aynı `createLiveSession` kullanılır. Mevcut
+ * `sessions` Map'i, SSE bildirimleri ve stereo WAV kaydı yeniden kullanılır.
+ */
+
+import { randomUUID } from 'crypto'
+import { StartSensitivity, EndSensitivity, type GoogleGenAI } from '@google/genai'
+
+import { createLiveSession } from '../gemini'
+import { buildRagPrompt, getPreWarmEmbedding, getPreWarmedRagContext } from '../rag'
+import { retrieveTopK as retrieveDocsByEmbedding, findCustomerDocByPhone } from '../db/repositories/knowledge'
+import { getCustomerByPhone } from '../db/repositories/appointments'
+import { findVipByPhone } from '../db/repositories/vip'
+import { runWithTenantContext } from '../tenancy/context'
+import { AudioSocketParser, FrameChunker, encodeAudioFrame, AS_FRAME_BYTES, encodeHangupFrame } from './audiosocket'
+import { downsample24to8, upsample8to16 } from './resample'
+import { buildAutomaticTransferRules, type AutomaticTransferRule } from '../services/transfer-triggers'
+import { getGeminiClient } from '../services/gemini-client'
+import { buildOffTopicPromptRule, resolveVoiceSettings } from '../services/voice-settings'
+import {
+  analyzePcmFrameCharacteristics,
+  analyzeTurkishTurnCompleteness,
+  buildRealtimeDetectionConfig,
+  type NoiseFilterMode,
+  type TurnDetectionMode,
+} from '../services/turn-detector'
+import { getPromptTemplate, renderPromptTemplate } from '../prompts/registry'
+
+function isPhoneConversationFarewell(
+  text: string,
+  customCloseMessage?: string,
+  lastUserText?: string,
+): boolean {
+  const normalize = (value: string) =>
+    value
+      .toLocaleLowerCase('tr-TR')
+      .replace(/[.,!?;:()[\]{}"']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  const normalized = normalize(text)
+  if (!normalized) return false
+
+  if (customCloseMessage) {
+    const customNorm = normalize(customCloseMessage)
+    if (customNorm.length >= 10 && normalized.includes(customNorm)) {
+      return true
+    }
+  }
+
+  if ([
+    /\bgörüş(?:meyi|memizi)\s+sonlandır/,
+    /\bsüremiz\s+doldu.*sonlandır/,
+    /\bklinik\s+işleminiz\s+(?:yoksa|olmadığı\s+için).*sonlandır/,
+  ].some(pattern => pattern.test(normalized))) {
+    return true
+  }
+
+  // Karşı taraf teşekkür/veda ettiyse ve asistan soru sormadan veda cümlesi kurduysa
+  const hasQuestion =
+    text.includes('?') ||
+    /\b(?:var\s+mı|miyim|misiniz|mısınız|musunuz|müsünüz|ister\s+misiniz|nasıl\s+yardımcı)\b/iu.test(normalized)
+
+  if (!hasQuestion && lastUserText) {
+    const normUser = normalize(lastUserText)
+    const userSaidDoneOrThanks =
+      /\b(?:teşekkür\w*|sağ\s*ol\w*|iyi\s+günler|iyi\s+akşamlar|hoşça\s*kal\w*|görüşürüz|başka\s+(?:bir\s+)?(?:şey|konu|sorum|isteğim)\s+yok|yok\s+teşekkür\w*|bu\s+kadar|kolay\s+gelsin)\b/iu.test(normUser)
+    const aiSaidGoodbye =
+      /\b(?:sağlıklı\s+günler\s+diler\w*|iyi\s+günler\s+diler\w*|iyi\s+akşamlar\s+diler\w*|hoşça\s*kalın|görüşmek\s+üzere)\b/iu.test(normalized)
+    if (userSaidDoneOrThanks && aiSaidGoodbye) {
+      return true
+    }
+  }
+
+  return false
+}
+
+// ── Noise gate (telefon kanalı) ──────────────────────────────────────────────
+//
+// Asterisk → Gemini akışında arka plan gürültüsünün (TV, müzik, ikinci konuşma)
+// Gemini VAD'i yanlış tetiklemesini engeller.
+//
+// Tasarım: 3 koruma katmanı
+//   1. Düşük threshold (default 0 = devre dışı, env ile aktive) — fısıltı bile
+//      eşik üstünde kalmalı; line noise altında kalmalı.
+//   2. Pre-roll buffer — gate açıldığı an, gate kapalıyken yakalanmış son
+//      birkaç frame önce gönderilir → konuşmanın ilk hecesi kaybolmaz.
+//   3. Trailing — gate açıldıktan sonra RMS eşiğin altına düşse bile bir süre
+//      daha açık kalır → cümle sonu kesilmez.
+//
+// Gemini'ye gönderilen toplam audio süresi her zaman gerçek zamanla eşleşir
+// (gerçek audio yerine sessizlik frame'i geçer); böylece Gemini'nin VAD timing'i
+// bozulmaz.
+const PHONE_FRAME_MS = 20
+const RAG_BOOTSTRAP_TIMEOUT_MS = 350
+const SESSION_CONNECT_TIMEOUT_MS = 20_000
+const DEFAULT_OUTPUT_START_BUFFER_MS = 120
+const DEFAULT_OUTPUT_REBUFFER_MS = 200
+const MIN_OUTPUT_BUFFER_MS = 80
+const MAX_OUTPUT_START_BUFFER_MS = 240
+const MAX_OUTPUT_REBUFFER_MS = 360
+const GREETING_HARD_TIMEOUT_MS = 30_000
+const GREETING_TRANSCRIPT_IDLE_COMPLETE_MS = 1_800
+
+function clampOutputBufferMs(value: number, fallback: number, maxMs: number): number {
+  return Number.isFinite(value)
+    ? Math.min(maxMs, Math.max(MIN_OUTPUT_BUFFER_MS, value))
+    : fallback
+}
+
+function readOutputBufferFrames(): { start: number; rebuffer: number } {
+  const rawStart = Number.parseInt(process.env.PHONE_OUTPUT_START_BUFFER_MS || '', 10)
+  const rawRebuffer = Number.parseInt(process.env.PHONE_OUTPUT_BUFFER_MS || '', 10)
+  // Eski 700ms / 1200ms varsayılanları yüksek gecikmeye yol açtığı için yeni düşük gecikmeli varsayılana çekilir
+  const effectiveStart = rawStart === 700 ? DEFAULT_OUTPUT_START_BUFFER_MS : rawStart
+  const effectiveRebuffer = rawRebuffer === 1200 ? DEFAULT_OUTPUT_REBUFFER_MS : rawRebuffer
+
+  const startMs = clampOutputBufferMs(
+    effectiveStart,
+    DEFAULT_OUTPUT_START_BUFFER_MS,
+    MAX_OUTPUT_START_BUFFER_MS,
+  )
+  const rebufferMs = Math.max(startMs, clampOutputBufferMs(
+    effectiveRebuffer,
+    DEFAULT_OUTPUT_REBUFFER_MS,
+    MAX_OUTPUT_REBUFFER_MS,
+  ))
+  return {
+    start: Math.ceil(startMs / PHONE_FRAME_MS),
+    rebuffer: Math.ceil(rebufferMs / PHONE_FRAME_MS),
+  }
+}
+
+function readVadSilenceDurationMs(): number {
+  const configured = Number.parseInt(process.env.PHONE_VAD_SILENCE_MS || '', 10)
+  if (!Number.isFinite(configured) || configured === 300) return 260
+  return Math.min(800, Math.max(200, configured))
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} (${timeoutMs}ms)`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function computeRmsInt16(pcm: Buffer): number {
+  const samples = pcm.length >> 1
+  if (samples === 0) return 0
+  let sumSq = 0
+  for (let i = 0; i < pcm.length; i += 2) {
+    const s = pcm.readInt16LE(i)
+    sumSq += s * s
+  }
+  return Math.sqrt(sumSq / samples)
+}
+
+class NoiseGate {
+  private preRoll: Buffer[] = []
+  private trailingFrames = 0
+  private wasOpen = false
+  private highStreak = 0
+  private totalFrames = 0
+  private highFrames = 0
+  private rmsSum = 0
+  private rmsMax = 0
+  private lastLogAtFrame = 0
+  private filterMode: NoiseFilterMode = 'rnnoise'
+  private suppressedImpulses = 0
+  private noiseFloor = 140
+
+  constructor(
+    readonly threshold: number,
+    private readonly trailingFramesMax: number,
+    private readonly preRollMax: number,
+    private readonly shortId: string,
+    private readonly logIntervalFrames = 500,
+  ) { }
+
+  setFilterMode(mode: NoiseFilterMode): void {
+    this.filterMode = mode
+  }
+
+  /** Son process() çağrısında gate açık mıydı (konuşma algılandı mı). */
+  get isOpen(): boolean { return this.wasOpen }
+
+  /** 8 kHz Int16 LE frame'i (320 byte / 20 ms) işle; konuşma varsa frame'leri ve kapanış bilgisini döndür. */
+  process(frame: Buffer): { frames: Buffer[]; justClosed: boolean; speechStarted: boolean } {
+    this.totalFrames++
+    const chars = analyzePcmFrameCharacteristics(frame)
+    const rms = chars.rms
+    this.rmsSum += rms
+    if (rms > this.rmsMax) this.rmsMax = rms
+
+    // Gürültü ve öksürük süzgeci açıkken anlık darbe/öksürük/tıklama patlamalarını süz
+    if (this.filterMode === 'rnnoise' && chars.isImpulseLike && this.highStreak < 5) {
+      this.suppressedImpulses++
+      const silence = Buffer.alloc(frame.length, 0)
+      this.pushPreRoll(silence)
+      return { frames: [], justClosed: false, speechStarted: false }
+    }
+
+    // threshold === 0 iken adaptif konuşma eşiği kullan:
+    // Böylece hat dip gürültüsü (RMS ~100-180) AI konuşurken kesinti (barge-in) yaratmaz
+    // ve kullanıcı konuşmayı bitirdiğinde justClosed -> audioStreamEnd tetiklenerek
+    // Gemini'nin saniyelerce beklemeden anında yanıt vermesi sağlanır.
+    const openThreshold = this.threshold > 0
+      ? this.threshold
+      : Math.max(280, Math.min(460, Math.round(this.noiseFloor * 2.2)))
+    const sustainThreshold = Math.max(185, Math.round(openThreshold * 0.65))
+    const activeThreshold = this.wasOpen ? sustainThreshold : openThreshold
+
+    const isHigh = rms >= activeThreshold
+    if (isHigh) this.highFrames++
+
+    this.maybeLog()
+
+    if (isHigh) {
+      this.highStreak++
+      // 3 ardışık 20 ms karesi (60 ms) gerçek ses başlangıcı için yeterlidir;
+      // preRoll (120 ms) sayesinde ilk hece hiç kaybolmaz.
+      const requiredStreak = 3
+      if (!this.wasOpen && this.highStreak < requiredStreak) {
+        this.pushPreRoll(frame)
+        return { frames: [], justClosed: false, speechStarted: false }
+      }
+      this.trailingFrames = Math.max(8, this.trailingFramesMax)
+      if (!this.wasOpen) {
+        const flushed = this.preRoll
+        this.preRoll = []
+        this.wasOpen = true
+        return { frames: [...flushed, frame], justClosed: false, speechStarted: true }
+      }
+      this.wasOpen = true
+      return { frames: [frame], justClosed: false, speechStarted: false }
+    }
+
+    this.highStreak = 0
+    if (rms < 340) {
+      this.noiseFloor = 0.97 * this.noiseFloor + 0.03 * rms
+    }
+
+    if (this.trailingFrames > 0) {
+      this.trailingFrames--
+      if (this.trailingFrames === 0) {
+        this.pushPreRoll(frame)
+        this.wasOpen = false
+        // Konuşma bitti (trailing sonu) -> Hybrid VAD audioStreamEnd tetikler
+        return { frames: [frame], justClosed: true, speechStarted: false }
+      }
+      this.wasOpen = true
+      return { frames: [frame], justClosed: false, speechStarted: false }
+    }
+
+    this.pushPreRoll(frame)
+    this.wasOpen = false
+    return { frames: [], justClosed: false, speechStarted: false }
+  }
+
+  private pushPreRoll(frame: Buffer): void {
+    const maxFrames = Math.max(6, this.preRollMax)
+    this.preRoll.push(frame)
+    if (this.preRoll.length > maxFrames) this.preRoll.shift()
+  }
+
+  private maybeLog(): void {
+    const elapsed = this.totalFrames - this.lastLogAtFrame
+    if (elapsed < this.logIntervalFrames) return
+    const avg = Math.round(this.rmsSum / elapsed)
+    const pct = Math.round((this.highFrames / elapsed) * 100)
+    console.log(
+      `[${this.shortId}] NoiseGate: ${elapsed}fr | avg=${avg} max=${Math.round(this.rmsMax)} high=${pct}% | thresh=${this.threshold}`,
+    )
+    this.lastLogAtFrame = this.totalFrames
+    this.rmsSum = 0
+    this.highFrames = 0
+    this.rmsMax = 0
+  }
+}
+
+function readGateConfig(): { threshold: number; trailingFrames: number; preRollFrames: number } {
+  const envVal = process.env.PHONE_NOISE_GATE_RMS
+  const parsedThreshold = Number.parseInt(envVal || '', 10)
+  const threshold = Number.isFinite(parsedThreshold) ? Math.max(0, parsedThreshold) : 0
+  const rawTrailingMs = parseInt(process.env.PHONE_NOISE_GATE_TRAILING_MS || '220', 10) || 220
+  const trailingMs = rawTrailingMs === 300 ? 220 : Math.max(160, Math.min(400, rawTrailingMs))
+  const preRollMs = Math.max(120, parseInt(process.env.PHONE_NOISE_GATE_PREROLL_MS || '120', 10) || 120)
+  return {
+    threshold,
+    trailingFrames: Math.round(trailingMs / PHONE_FRAME_MS),
+    preRollFrames: Math.round(preRollMs / PHONE_FRAME_MS),
+  }
+}
+
+function getTodayTurkish(): string {
+  const now = new Date()
+  const days = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi']
+  const months = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
+  return `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()} ${days[now.getDay()]}`
+}
+
+// SessionInfo arayüzü server/src/index.ts ile birebir uyumlu (referansla geçilir).
+interface TimedChunk {
+  buffer: Buffer
+  offsetMs: number
+}
+
+interface SharedSessionInfo {
+  session: Awaited<ReturnType<typeof createLiveSession>>
+  startedAt: Date
+  startedAtMs: number
+  audioChunks: TimedChunk[]
+  userAudioChunks: TimedChunk[]
+  shortId: string
+  clinicId: string
+  hostname: string
+}
+
+export interface TelephonyDeps {
+  ai: GoogleGenAI
+  port: number
+  buildSystemPrompt: (direction?: string) => Promise<string>
+  resolveLiveModel: () => Promise<string>
+  sessions: Map<string, SharedSessionInfo>
+  notifyAdmins: (event: string, payload: unknown) => void
+  callerRegistry: Map<string, { phone: string; channel?: string; direction?: string; clinicId: string; hostname: string }>
+}
+
+// Müşteri sessizlik timeout'u — AI soru sorup cevap beklerken müşteri
+// bu kadar süre ses vermezse AI uyarır, sonra kapatır.
+const SILENCE_WARN_MS = 30_000   // 30s: "Ses almıyorum..." uyarısı
+const SILENCE_CLOSE_MS = 20_000   // +20s daha bekler, yoksa kapar
+// Çağrı max süresi admin panelinden klinik bazında 3–15 dakika seçilir.
+const DEFAULT_MAX_CALL_SECONDS = 10 * 60
+const MIN_MAX_CALL_SECONDS = 3 * 60
+const MAX_MAX_CALL_SECONDS = 15 * 60
+
+/** Tek bir AudioSocket bağlantısı için durum. */
+interface CallState {
+  shortId: string
+  info: SharedSessionInfo
+  parser: AudioSocketParser
+  outChunker: FrameChunker
+  downsampleState: { history: number[]; phase: number }
+  closed: boolean
+  hangupPending: boolean
+  callerId?: string
+  callerPhone?: string
+  callerChannel?: string
+  callerDirection?: string
+  clinicId?: string
+  hostname?: string
+  audioQueue: Buffer[]
+  noiseGate: NoiseGate
+  // Zaman aşımı timer'ları
+  silenceTimer?: ReturnType<typeof setTimeout>
+  closeTimer?: ReturnType<typeof setTimeout>
+  silenceClosePending: boolean
+  maxCallTimer?: ReturnType<typeof setTimeout>
+  maxCloseTimer?: ReturnType<typeof setTimeout>
+  maxLimitReached: boolean
+  micEnabled: boolean
+  userSpeechEndTime?: number
+  micBuffer: Buffer[]
+  firstAudioSent: boolean
+  silenceWarnMs: number
+  silenceCloseMs: number
+  voiceName: string
+  aiSpeaking: boolean
+  outputTurnActive: boolean
+  outputTurnComplete: boolean
+  interactionInProgress: boolean
+  playbackReady: boolean
+  outputUnderruns: number
+  outputTranscript: string
+  lastCompletedAiTranscript: string
+  userTranscript: string
+  lastUserTranscript: string
+  turnDetectionMode: TurnDetectionMode
+  semanticTurnHoldTimer?: ReturnType<typeof setTimeout>
+  lastAiAudioAt: number
+  lastAudioFrameAt: number
+  hangupRequestedAt: number
+  greetingAudioStarted: boolean
+  greetingCompleted: boolean
+  startWaitMs: number
+  micOpenTimer?: ReturnType<typeof setTimeout>
+  greetingTimeoutTimer?: ReturnType<typeof setTimeout>
+}
+
+/** Timer'ları temizle. */
+function clearSilenceTimers(state: CallState) {
+  if (state.silenceTimer) { clearTimeout(state.silenceTimer); state.silenceTimer = undefined }
+  if (state.closeTimer) { clearTimeout(state.closeTimer); state.closeTimer = undefined }
+  state.silenceClosePending = false
+}
+
+/**
+ * AI konuşmasını bitirip cevap beklemeye başladığında çağrılır.
+ * silenceWarnMs sonra sesli uyarı verir; silenceCloseMs daha geçerse
+ * görüşmeyi kapatır. Müşteri konuşursa timer sıfırlanır.
+ */
+function startSilenceWatch(state: CallState, socket: { end: () => void }) {
+  // Uyarı gönderildikten sonra AI'nin turnComplete olayı kapanış sayacını
+  // sıfırlamamalı. Kullanıcı gerçekten konuşursa clearSilenceTimers bunu iptal
+  // eder; aksi halde closeTimer kesintisiz çalışır.
+  if (state.silenceClosePending) return
+  clearSilenceTimers(state)
+  if (state.closed || state.hangupPending || state.interactionInProgress) return
+
+  const warnMs = state.silenceWarnMs || 25_000
+  const closeMs = state.silenceCloseMs || 15_000
+
+  state.silenceTimer = setTimeout(() => {
+    if (state.closed || state.hangupPending || !state.info.session) return
+    console.log(`[${state.shortId}] Sessizlik uyarısı — müşteriden ses yok (${Math.round(warnMs / 1000)}s)`)
+    // AI üzerinden sesli uyarı gönder.
+    try {
+      state.info.session.sendClientContent({
+        turns: [{
+          role: 'user',
+          parts: [{ text: `Sistem: Müşteriden ${Math.round(warnMs / 1000)} saniyedir ses alınamıyor. Kısa ve nazikçe "Sizi duyamıyorum, hattınızda bir sorun mu var?" diye sor.` }],
+        }],
+        turnComplete: true,
+      })
+    } catch { }
+
+    // Uyarıdan sonra closeMs daha bekle, hâlâ sessizse kapat.
+    state.silenceClosePending = true
+    state.closeTimer = setTimeout(() => {
+      state.silenceClosePending = false
+      if (state.closed || state.hangupPending || !state.info.session) return
+      console.log(`[${state.shortId}] Sessizlik timeout — görüşme sonlandırılıyor`)
+      state.micEnabled = false
+      state.micBuffer = []
+      try {
+        state.info.session.beginClosing?.()
+        state.info.session.sendClientContent({
+          turns: [{
+            role: 'user',
+            parts: [{ text: 'Sistem: Hattan ses alınamıyor. Kısa bir veda söyle ve cagriySonlandir aracını çağır.' }],
+          }],
+          turnComplete: true,
+        })
+      } catch { }
+      // AI veda cümlesini ve ses kuyruğunu tamamlamadan hattı yarıda kesme; en geç 12sn içinde kapat.
+      const notBefore = Date.now() + 4_500
+      const deadline = Date.now() + 12_000
+      const closeWhenQuiet = () => {
+        if (state.closed) return
+        const rtpDraining = state.lastAudioFrameAt > 0 && Date.now() - state.lastAudioFrameAt < 650
+        if ((Date.now() < notBefore || state.aiSpeaking || state.outputTurnActive || state.audioQueue.length > 0 || rtpDraining) && Date.now() < deadline) {
+          setTimeout(closeWhenQuiet, 250)
+          return
+        }
+        state.closed = true
+        try { state.info.session?.close() } catch { }
+        try { socket.end() } catch { }
+      }
+      setTimeout(closeWhenQuiet, 1_000)
+    }, closeMs)
+  }, warnMs)
+}
+
+export async function startTelephony(deps: TelephonyDeps): Promise<{ stop: () => void }> {
+  const { ai, port, buildSystemPrompt, resolveLiveModel, sessions, notifyAdmins, callerRegistry } = deps
+
+  const gateCfg = readGateConfig()
+  const outputBufferFrames = readOutputBufferFrames()
+  const vadSilenceDurationMs = readVadSilenceDurationMs()
+  console.log(
+    `   NoiseGate: thresh=${gateCfg.threshold} trailing=${gateCfg.trailingFrames}fr preRoll=${gateCfg.preRollFrames}fr`,
+  )
+  console.log(`   Telefon ses tamponu: başlangıç=${outputBufferFrames.start * PHONE_FRAME_MS}ms yeniden=${outputBufferFrames.rebuffer * PHONE_FRAME_MS}ms`)
+  console.log(`   Gemini VAD konuşma sonu: ${vadSilenceDurationMs}ms`)
+
+  const server = Bun.listen<CallState>({
+    hostname: '0.0.0.0',
+    port,
+    socket: {
+      async open(socket) {
+        const shortId = `tel_${randomUUID().slice(0, 8)}`
+        const startedAt = new Date()
+        const startedAtMs = Date.now()
+
+        console.log(`[${shortId}] AudioSocket bağlantısı açıldı (${socket.remoteAddress})`)
+
+        const info: SharedSessionInfo = {
+          session: null as any,
+          startedAt,
+          startedAtMs,
+          audioChunks: [],
+          userAudioChunks: [],
+          shortId,
+          clinicId: '',
+          hostname: '',
+        }
+
+        const state: CallState = {
+          shortId,
+          info,
+          parser: new AudioSocketParser(),
+          outChunker: new FrameChunker(),
+          downsampleState: { history: new Array(14).fill(0), phase: 0 },
+          closed: false,
+          hangupPending: false,
+          audioQueue: [],
+          noiseGate: new NoiseGate(gateCfg.threshold, gateCfg.trailingFrames, gateCfg.preRollFrames, shortId),
+          micEnabled: false,
+          micBuffer: [],
+          firstAudioSent: false,
+          silenceWarnMs: 30_000,
+          silenceCloseMs: 20_000,
+          silenceClosePending: false,
+          maxLimitReached: false,
+          voiceName: 'Aoede',
+          aiSpeaking: false,
+          outputTurnActive: false,
+          outputTurnComplete: false,
+          interactionInProgress: false,
+          playbackReady: false,
+          outputUnderruns: 0,
+          outputTranscript: '',
+          lastCompletedAiTranscript: '',
+          userTranscript: '',
+          lastUserTranscript: '',
+          turnDetectionMode: 'semantic',
+          lastAiAudioAt: 0,
+          lastAudioFrameAt: 0,
+          hangupRequestedAt: 0,
+          greetingAudioStarted: false,
+          greetingCompleted: false,
+          startWaitMs: 400,
+        }
+        socket.data = state
+
+        const openMicrophoneAfterGreeting = (reason: string) => {
+          if (state.closed || state.hangupPending || state.maxLimitReached || state.greetingCompleted || state.micEnabled || state.micOpenTimer) return
+          if (state.greetingTimeoutTimer) {
+            clearTimeout(state.greetingTimeoutTimer)
+            state.greetingTimeoutTimer = undefined
+          }
+
+          const enableMicrophone = () => {
+            state.micOpenTimer = undefined
+            if (state.closed || state.hangupPending || state.maxLimitReached || state.greetingCompleted || state.micEnabled) return
+            state.greetingCompleted = true
+            state.micEnabled = true
+            console.log(`[${shortId}] ${reason} — mikrofon açıldı`)
+            startSilenceWatch(state, socket)
+          }
+
+          if (state.startWaitMs > 0) {
+            state.micOpenTimer = setTimeout(enableMicrophone, state.startWaitMs)
+          } else {
+            enableMicrophone()
+          }
+        }
+
+        const finishOutputTurn = () => {
+          if (!state.outputTurnActive) return
+          if (state.outputTranscript.trim()) {
+            state.lastCompletedAiTranscript = state.outputTranscript.trim()
+          }
+          state.outputTurnActive = false
+          state.outputTurnComplete = false
+          state.playbackReady = false
+          state.aiSpeaking = false
+          state.outputTranscript = ''
+          state.lastAiAudioAt = 0
+          if (state.hangupPending || state.maxLimitReached) {
+            state.interactionInProgress = false
+            return
+          }
+          if (!state.greetingCompleted && !state.micEnabled) {
+            openMicrophoneAfterGreeting('Greeting sesi tamamen oynatıldı')
+          } else if (state.micEnabled) {
+            startSilenceWatch(state, socket)
+          }
+        }
+
+        // 20ms'de bir frame gönder. Gemini'nin değişken aralıklı ses
+        // paketlerini doğrudan oynatmak yerine kısa bir jitter tamponunda tut;
+        // kuyruk tur ortasında tükenirse yeniden dolana kadar sessizce bekle.
+        const silenceFrame = encodeAudioFrame(Buffer.alloc(AS_FRAME_BYTES, 0))
+        let nextFrameAt = Date.now() + 20
+        function scheduleFrame() {
+          const now = Date.now()
+          if (nextFrameAt < now - 60) nextFrameAt = now
+          const delay = Math.max(0, nextFrameAt - now)
+          setTimeout(() => {
+            if (state.closed) return
+            nextFrameAt += 20
+
+            // Gemini bazen son ses paketinden sonra turnComplete olayını
+            // geciktirebiliyor. Yalnızca ilk greeting'de, tamamlanmış cümle ve
+            // gerçek ses sessizliği birlikte varsa turu güvenle tamamla.
+            const greetingSentenceComplete = /[.!?…]["')\]]?\s*$/u.test(state.outputTranscript)
+            if (!state.micEnabled && state.outputTurnActive && !state.outputTurnComplete &&
+                state.audioQueue.length === 0 && greetingSentenceComplete && state.lastAiAudioAt > 0 &&
+                Date.now() - state.lastAiAudioAt >= GREETING_TRANSCRIPT_IDLE_COMPLETE_MS) {
+              state.outputTurnComplete = true
+              console.warn(
+                `[${shortId}] Greeting turnComplete gecikti — ${GREETING_TRANSCRIPT_IDLE_COMPLETE_MS}ms ses sessizliği sonrası tamamlandı`,
+              )
+            }
+
+            const requiredBufferFrames = state.outputUnderruns > 0
+              ? outputBufferFrames.rebuffer
+              : outputBufferFrames.start
+            if (!state.playbackReady && state.audioQueue.length > 0 &&
+                (state.outputTurnComplete || state.audioQueue.length >= requiredBufferFrames)) {
+              state.playbackReady = true
+              console.log(
+                `[${shortId}] AI ses oynatma başladı (${state.audioQueue.length * PHONE_FRAME_MS}ms tampon${state.outputUnderruns > 0 ? `, ${state.outputUnderruns}. yeniden tamponlama` : ''})`,
+              )
+            }
+
+            const frame = state.playbackReady ? state.audioQueue.shift() : undefined
+            if (frame) {
+              state.lastAudioFrameAt = Date.now()
+              try { socket.write(frame); scheduleFrame() } catch { }
+            } else if (state.outputTurnActive && state.outputTurnComplete) {
+              finishOutputTurn()
+              try { socket.write(silenceFrame); scheduleFrame() } catch { }
+            } else if (state.playbackReady && state.outputTurnActive) {
+              state.playbackReady = false
+              state.outputUnderruns++
+              console.warn(`[${shortId}] Gemini ses akışı gecikti — ${outputBufferFrames.rebuffer * PHONE_FRAME_MS}ms yeniden tamponlanıyor`)
+              try { socket.write(silenceFrame); scheduleFrame() } catch { }
+            } else if (state.hangupPending && !state.outputTurnActive) {
+              const sinceHangupMs = state.hangupRequestedAt > 0 ? Date.now() - state.hangupRequestedAt : 9999
+              const sinceLastAudioMs = state.lastAudioFrameAt > 0 ? Date.now() - state.lastAudioFrameAt : 9999
+              // cagriySonlandir sonrasındaki olası veda sesinin başlaması için en az 700ms
+              // ve son ses karesinin Asterisk RTP tamponundan çıkması için 550ms sessizlik karesi bekle.
+              if (sinceHangupMs < 700 || sinceLastAudioMs < 550) {
+                try { socket.write(silenceFrame); scheduleFrame() } catch { }
+              } else {
+                console.log(`[${shortId}] Ses kuyruğu ve RTP tamponu boşaldı, bağlantı kapatılıyor`)
+                try { socket.write(encodeHangupFrame()) } catch { }
+                state.closed = true
+                try { socket.end() } catch { }
+              }
+            } else {
+              try { socket.write(silenceFrame); scheduleFrame() } catch { }
+            }
+          }, delay)
+        }
+        scheduleFrame()
+
+        try {
+          // UUID, CallerPhone ve CallerChannel gelmesini bekle (AudioSocket ilk paketinde gelir, genelde < 50ms)
+          let waitCount = 0
+          while ((!state.callerId || !state.callerPhone || !state.callerChannel) && waitCount < 100) {
+            await new Promise(r => setTimeout(r, 10))
+            waitCount++
+          }
+          if (!state.clinicId || !state.hostname) throw new Error('Çağrı için klinik domaini eşleştirilemedi')
+          const { recordCallConnected } = await import('../integrations/managed/routing')
+          await recordCallConnected(state.callerChannel || '', state.clinicId)
+          info.clinicId = state.clinicId
+          info.hostname = state.hostname
+          await runWithTenantContext({ clinicId: state.clinicId, hostname: state.hostname }, async () => {
+            const direction = state.callerDirection || 'inbound'
+            console.log(`[${shortId}] Arama yönü: ${direction}, arayan: ${state.callerPhone || 'bilinmiyor'}, kanal: ${state.callerChannel || 'bilinmiyor'}, clinicId: ${state.clinicId}, hostname: ${state.hostname}`)
+
+            // VIP Arayan Kontrolü
+            const vipRecord = state.callerPhone ? await findVipByPhone(state.callerPhone) : null
+            const isVip = Boolean(vipRecord && vipRecord.active)
+            if (isVip && vipRecord) {
+              console.log(`[${shortId}] 🌟 VIP Arayan algılandı: ${state.callerPhone} (${vipRecord.contactName || 'Özel Kişi'})`)
+            }
+
+            // RAG + prompt + model + ses ayarlarını paralel çözümle
+            const todayStr = getTodayTurkish()
+            const callerName = vipRecord?.contactName || 'Misafirimiz'
+
+            const initPromptKey = isVip
+              ? 'prompt.vip_call_init'
+              : direction === 'outbound'
+                ? 'prompt.outbound_call_init'
+                : 'prompt.phone_call_init'
+
+            const [
+              ragContext,
+              systemPromptBase,
+              voiceSettings,
+              activeGreeting,
+              phoneRulesTpl,
+              flowPriorityTpl,
+              callInitTpl,
+              clinicAi,
+            ] = await Promise.all([
+              (async () => {
+                try {
+                  return await getPreWarmedRagContext(state.clinicId, direction, RAG_BOOTSTRAP_TIMEOUT_MS)
+                } catch (e) {
+                  console.error(`[${shortId}] RAG hatası:`, e)
+                }
+                return ''
+              })(),
+              isVip
+                ? (async () => {
+                  if (vipRecord?.customPrompt?.trim()) return vipRecord.customPrompt.trim()
+                  const vipTpl = await getPromptTemplate('prompt.vip_default', state.clinicId).catch(() => '')
+                  if (!vipTpl.trim()) return ''
+                  return renderPromptTemplate(vipTpl, {
+                    callerName,
+                    callerPhone: state.callerPhone || 'Bilinmiyor',
+                  })
+                })()
+                : buildSystemPrompt(direction),
+              resolveVoiceSettings(state.clinicId),
+              (async () => {
+                if (isVip && vipRecord?.greeting) {
+                  return vipRecord.greeting
+                }
+                const { getGreeting: fetchGreeting } = await import('../db/repositories/settings')
+                return (await fetchGreeting(direction, state.clinicId)) || (direction === 'outbound' ? 'Merhaba, ben klinik asistanınızım.' : 'Merhaba, hoş geldiniz!')
+              })(),
+              getPromptTemplate('prompt.phone_channel_rules', state.clinicId).catch(() => ''),
+              getPromptTemplate('prompt.flow_priority_rules', state.clinicId).catch(() => ''),
+              getPromptTemplate(initPromptKey, state.clinicId).catch(() => ''),
+              getGeminiClient(state.clinicId).catch(() => ai),
+            ])
+
+            const resolvedPhoneRules = renderPromptTemplate(phoneRulesTpl, {})
+            const phoneInstructions = `\n\nBUGÜNÜN TARİHİ: ${todayStr}.\n\n${resolvedPhoneRules}`
+            const model = voiceSettings.model
+            const voiceName = voiceSettings.voiceName
+            const silenceTimeoutSec = voiceSettings.callSilenceTimeout
+            const silenceCloseSec = voiceSettings.callSilenceCloseTimeout
+            const maxCallDurationSec = voiceSettings.callMaxDuration
+            const startWaitSec = voiceSettings.startWaitSeconds
+            const thinkingLevel = voiceSettings.thinkingLevel
+
+            state.voiceName = voiceName
+            state.turnDetectionMode = voiceSettings.turnDetectionMode
+            state.noiseGate.setFilterMode(voiceSettings.noiseFilterMode)
+            const silenceWarnSeconds = Math.min(120, Math.max(5, silenceTimeoutSec))
+            const silenceCloseSeconds = Math.min(120, Math.max(5, silenceCloseSec))
+            state.silenceWarnMs = silenceWarnSeconds * 1000
+            state.silenceCloseMs = silenceCloseSeconds * 1000
+            state.startWaitMs = Math.max(0, Math.round(startWaitSec * 1_000))
+            const maxCallSeconds = Math.min(MAX_MAX_CALL_SECONDS, Math.max(MIN_MAX_CALL_SECONDS, maxCallDurationSec))
+            const maxCallMs = maxCallSeconds * 1000
+
+            // Flow Builder'da yalnızca Karşılama → Bitti varsa bu minimal akış
+            // maksimum görüşme süresine tabi değildir. Sessizlik koruması yine
+            // aktif kalır; böylece sessiz hat sonsuza kadar açık kalmaz.
+            let minimalGreetingEndFlow = false
+            let automaticTransferRules: AutomaticTransferRule[] = []
+            try {
+              const { getActiveFlow, isMinimalGreetingEndFlow } = await import('../db/repositories/flows')
+              const activeFlow = await getActiveFlow(direction)
+              minimalGreetingEndFlow = Boolean(activeFlow && isMinimalGreetingEndFlow(activeFlow))
+              automaticTransferRules = buildAutomaticTransferRules(activeFlow?.nodes)
+              if (automaticTransferRules.length > 0) {
+                console.log(`[${shortId}] Otomatik aktarım kuralı: ${automaticTransferRules.length}`)
+              }
+            } catch (e) {
+              console.warn(`[${shortId}] Flow durumu okunamadı; maksimum görüşme süresi korunuyor`, e)
+            }
+
+            const flowPriorityInstructions = `\n\n${renderPromptTemplate(flowPriorityTpl, {})}\n\n${buildOffTopicPromptRule(voiceSettings.offTopicMaxStrikes, voiceSettings.offTopicCloseMessage)}`
+            const systemPrompt = systemPromptBase + ragContext + phoneInstructions + flowPriorityInstructions
+            console.log(`[${shortId}] , voice: ${voiceName}, isVip: ${isVip}, silenceWarn: ${state.silenceWarnMs}ms, silenceClose: ${state.silenceCloseMs}ms, maxCall: ${maxCallSeconds}s, offTopicStrikes: ${voiceSettings.offTopicMaxStrikes}, minimalFlow: ${minimalGreetingEndFlow}, wait: ${startWaitSec}s`)
+
+            const pendingSession = createLiveSession(
+                clinicAi,
+                {
+                  onReady: () => {
+                    console.log(`[${shortId}] Gemini Live ready (phone)`)
+                  },
+
+                  onAudio: (pcm) => {
+                    if (state.closed) return
+                    if (!state.outputTurnActive) {
+                      clearSilenceTimers(state)
+                      state.outputTurnActive = true
+                      state.outputTurnComplete = false
+                      state.playbackReady = false
+                      state.outputUnderruns = 0
+                      state.outputTranscript = ''
+                    }
+                    state.aiSpeaking = true
+                    state.lastAiAudioAt = Date.now()
+                    if (!state.micEnabled) state.greetingAudioStarted = true
+                    if (state.userSpeechEndTime) {
+                      const responseTime = Date.now() - state.userSpeechEndTime
+                      console.log(`[${shortId}] (PERF) AI Yanıt Süresi (Audio): ${responseTime}ms`)
+                      state.userSpeechEndTime = undefined
+                    }
+                    const { pcm: pcm8, state: nextState } = downsample24to8(pcm, state.downsampleState)
+                    state.downsampleState = nextState
+                    const frames = state.outChunker.chunk(pcm8)
+                    for (const f of frames) state.audioQueue.push(f)
+                  },
+                  onTranscript: (role, text) => {
+                    const trimmed = text.trim()
+                    if (!trimmed) return
+                    const label = role === 'user' ? 'USER' : 'AI'
+                    // Sessizlik sayacı yalnızca Gemini'nin gerçek kullanıcı
+                    // konuşmasını metne çevirdiği anda sıfırlanır. NoiseGate'in
+                    // açılması tek başına yeterli değildir; hat paraziti veya
+                    // AI sesinin mikrofona sızması sayaç davranışını değiştiremez.
+                    if (role === 'user') {
+                      clearSilenceTimers(state)
+                      state.userTranscript = `${state.userTranscript} ${trimmed}`.trim().slice(-500)
+                      state.lastUserTranscript = state.userTranscript
+                    }
+                    if (role === 'model' && state.userSpeechEndTime) {
+                      const responseTime = Date.now() - state.userSpeechEndTime
+                      console.log(`[${shortId}] (PERF) AI Yanıt Süresi: ${responseTime}ms`)
+                      state.userSpeechEndTime = undefined
+                    }
+                    if (role === 'model') {
+                      state.userTranscript = ''
+                      state.outputTranscript = `${state.outputTranscript}${text}`.slice(-1_000)
+                    }
+                    console.log(`[${shortId}] ${label}: ${trimmed}`)
+                  },
+                  onInterrupted: () => {
+                    // Kapanış aşamasında (maksimum süre dolduğunda veya veda edilirken)
+                    // arayanın konuşması veda cümlesini kesmemelidir.
+                    if (state.hangupPending || (state.maxLimitReached && !state.micEnabled)) return
+                    // Barge-in: müşteri konuştu, Gemini'nin önceki dönüş sesini temizle
+                    state.aiSpeaking = false
+                    state.outputTurnActive = false
+                    state.outputTurnComplete = false
+                    state.playbackReady = false
+                    state.outputTranscript = ''
+                    state.lastAiAudioAt = 0
+                    state.audioQueue.length = 0
+                    state.outChunker = new FrameChunker()
+                  },
+                  onInteractionStatus: (status) => {
+                    state.interactionInProgress = status === 'IN_PROGRESS'
+                    if (state.interactionInProgress) {
+                      clearSilenceTimers(state)
+                    } else if (!state.outputTurnActive && state.micEnabled) {
+                      startSilenceWatch(state, socket)
+                    }
+                  },
+                  onHangup: () => {
+                    console.log(`[${shortId}] Gemini görüşmeyi sonlandırıyor (ses kuyruğu boşalınca kapanacak)`)
+                    if (state.closed || state.hangupPending) return
+                    state.hangupPending = true
+                    state.hangupRequestedAt = Date.now()
+                    state.micEnabled = false
+                    state.micBuffer = []
+                    if (state.micOpenTimer) {
+                      clearTimeout(state.micOpenTimer)
+                      state.micOpenTimer = undefined
+                    }
+                    clearSilenceTimers(state)
+                  },
+                  onTurnComplete: () => {
+                    const tailFrame = state.outChunker.flush()
+                    if (tailFrame) state.audioQueue.push(tailFrame)
+                    state.outChunker = new FrameChunker()
+                    state.outputTurnComplete = true
+                    if (
+                      !state.hangupPending &&
+                      isPhoneConversationFarewell(
+                        state.outputTranscript,
+                        voiceSettings.offTopicCloseMessage,
+                        state.lastUserTranscript,
+                      )
+                    ) {
+                      console.log(`[${shortId}] Kapanış / veda cümlesi algılandı — ses kuyruğu bitince hat kapatılacak`)
+                      state.hangupPending = true
+                      state.hangupRequestedAt = state.hangupRequestedAt || Date.now()
+                      state.micEnabled = false
+                      state.micBuffer = []
+                      state.info.session?.beginClosing?.()
+                      clearSilenceTimers(state)
+                    }
+                    if (state.greetingTimeoutTimer) {
+                      clearTimeout(state.greetingTimeoutTimer)
+                      state.greetingTimeoutTimer = undefined
+                    }
+                    // Hiç ses üretilmeyen bir turda oynatma kuyruğu yoktur.
+                    if (!state.outputTurnActive) {
+                      if (!state.greetingCompleted && !state.micEnabled && !state.hangupPending) {
+                        openMicrophoneAfterGreeting('Greeting turn sessiz tamamlandı')
+                      } else if (state.micEnabled && !state.hangupPending) {
+                        startSilenceWatch(state, socket)
+                      }
+                    }
+                  },
+                  onError: (e) => console.error(`[${shortId}] Gemini error:`, e),
+                  onClose: () => {
+                    console.log(`[${shortId}] Gemini session closed (phone)`)
+                    sessions.delete(shortId)
+                    notifyAdmins('session_end', {
+                      id: shortId,
+                      channel: 'phone',
+                      activeSessions: sessions.size,
+                    })
+                  },
+                },
+                {
+                  dbSessionId: shortId,
+                  systemPrompt,
+                  model,
+                  voiceName,
+                  thinkingLevel: thinkingLevel as any,
+                  turnDetectionMode: voiceSettings.turnDetectionMode,
+                  realtimeInputConfig: buildRealtimeDetectionConfig(
+                    voiceSettings.turnDetectionMode,
+                    'phone',
+                    vadSilenceDurationMs,
+                  ),
+                  clinicId: state.clinicId,
+                  hostname: state.hostname,
+                  telephonyChannel: state.callerChannel,
+                  callerPhone: state.callerPhone,
+                  direction: direction,
+                  enableGoogleSearch: isVip ? Boolean(vipRecord?.groundingEnabled) : false,
+                  automaticTransferRules,
+                  enforceConfiguredTransferRules: true,
+                },
+              )
+            let sessionConnectTimer: ReturnType<typeof setTimeout> | undefined
+            let session: Awaited<ReturnType<typeof createLiveSession>>
+            try {
+              session = await Promise.race([
+                pendingSession,
+                new Promise<never>((_, reject) => {
+                  sessionConnectTimer = setTimeout(
+                    () => reject(new Error(`Gemini session timeout (${SESSION_CONNECT_TIMEOUT_MS}ms)`)),
+                    SESSION_CONNECT_TIMEOUT_MS,
+                  )
+                }),
+              ])
+            } catch (error) {
+              // Timeout'tan sonra geç kurulan bağlantıyı sahipsiz bırakma;
+              // aksi halde eşzamanlı Live session kotasını tüketmeye devam eder.
+              void pendingSession.then((lateSession) => {
+                console.warn(`[${shortId}] Geç kurulan Gemini session kapatılıyor`)
+                lateSession.close()
+              }).catch(() => {})
+              throw error
+            } finally {
+              if (sessionConnectTimer) clearTimeout(sessionConnectTimer)
+            }
+
+            info.session = session
+            sessions.set(shortId, info)
+            notifyAdmins('session_start', {
+              id: shortId,
+              channel: 'phone',
+              activeSessions: sessions.size,
+            })
+
+            // Tüm başlangıç context'ini TEK bir sendClientContent'te birleştir.
+            // Birden fazla turnComplete: true göndermek modelin her birine ayrı
+            // greeting üretmesine neden olur.
+            const initParts: string[] = []
+
+            if (isVip) {
+              const fallbackVipInit = `Sistem bildirimi: Özel VIP hattı arandı. Karşı taraf telefonu açtı. İLK OLARAK KESİNLİKLE şu karşılama mesajını harfiyen söyleyerek söze başla: "{{greeting}}"\n\nKESİN KURAL: Asla telefon numarası veya kayıt sorma. Tamamen samimi, neşeli ve doğal bir şekilde özel kişisel asistan olarak konuşmaya başla.`
+              const renderedVipInit = renderPromptTemplate(callInitTpl.trim() || fallbackVipInit, { greeting: activeGreeting }).trim()
+              initParts.push(
+                renderedVipInit || `Sistem bildirimi: Özel VIP hattı arandı. Karşı taraf telefonu açtı. İLK OLARAK KESİNLİKLE şu karşılama mesajını harfiyen söyleyerek söze başla: "${activeGreeting}"\n\nKESİN KURAL: Asla telefon numarası veya kayıt sorma. Tamamen samimi, neşeli ve doğal bir şekilde özel kişisel asistan olarak konuşmaya başla.`
+              )
+            } else {
+              const fallbackCallInit = direction === 'outbound'
+                ? `Sistem bildirimi: Dış arama (outbound call) yapıldı ve karşı taraf telefonu açtı. İLK OLARAK KESİNLİKLE şu giden arama karşılama mesajını söyleyerek söze başla: "{{greeting}}"`
+                : `Sistem bildirimi: Müşteri TELEFON üzerinden sesli görüşmeye bağlandı. İLK OLARAK KESİNLİKLE şu karşılama mesajını söyleyerek söze başla: "{{greeting}}"`
+              const renderedCallInit = renderPromptTemplate(callInitTpl.trim() || fallbackCallInit, { greeting: activeGreeting }).trim()
+              initParts.push(
+                renderedCallInit || (direction === 'outbound'
+                  ? `Sistem bildirimi: Dış arama (outbound call) yapıldı ve karşı taraf telefonu açtı. İLK OLARAK KESİNLİKLE şu giden arama karşılama mesajını söyleyerek söze başla: "${activeGreeting}"`
+                  : `Sistem bildirimi: Müşteri TELEFON üzerinden sesli görüşmeye bağlandı. İLK OLARAK KESİNLİKLE şu karşılama mesajını söyleyerek söze başla: "${activeGreeting}"`)
+              )
+
+              // Müşteri tanıma: UUID frame open() async await'leri sırasında gelir,
+              // session hazır olduğunda callerPhone zaten set olmuş olur.
+              if (state.callerPhone) {
+                try {
+                  const customerCtx = await getCustomerByPhone(state.callerPhone, state.clinicId)
+                  if (customerCtx) {
+                    const TYPE_LABELS: Record<string, string> = {
+                      service: 'Tedavi', test_drive: 'Muayene',
+                      gallery_visit: 'Kontrol', other: 'Randevu',
+                    }
+                    const upcoming = customerCtx.appointmentHistory.filter(a => !a.isPast)
+                    const past = customerCtx.appointmentHistory.filter(a => a.isPast)
+
+                    let ctxMsg = `Arayan müşteri sistemde kayıtlı.\n`
+                    ctxMsg += `Müşteri Adı: ${customerCtx.name}\n`
+                    ctxMsg += `Telefon: ${customerCtx.phone}\n`
+
+                    if (upcoming.length > 0) {
+                      ctxMsg += `\nYaklaşan Randevular (${upcoming.length} adet):\n`
+                      upcoming.slice(0, 3).forEach(a => {
+                        ctxMsg += `- ${a.date} ${a.time}: ${TYPE_LABELS[a.type] || a.type || 'Randevu'}\n`
+                      })
+                    }
+
+                    if (past.length > 0) {
+                      ctxMsg += `\nGeçmiş Randevu Sayısı: ${past.length}\n`
+                    }
+
+                    ctxMsg += `\nBu bilgiyi yalnızca müşteri kimliğini doğrular veya randevusunu sorarsa kullan. Kendiliğinden randevu, şikayet, tarih veya saat sorusu başlatma; aktif konuşma akışının dışına çıkma.`
+                    initParts.push(ctxMsg)
+                    console.log(`[${shortId}] Müşteri tanındı: ${customerCtx.name} (yaklaşan: ${upcoming.length}, geçmiş: ${past.length})`)
+                  } else {
+                    // Bilgi tabanında müşteri kaydı ara (admin panelden eklenen)
+                    const knowledgeCustomer = await findCustomerDocByPhone(state.callerPhone)
+                    if (knowledgeCustomer) {
+                      let ctxMsg = `Arayan müşteri bilgi tabanında kayıtlı.\n`
+                      ctxMsg += `Müşteri Adı: ${knowledgeCustomer.name}\n`
+                      ctxMsg += `${knowledgeCustomer.content}\n`
+                      ctxMsg += `\nBu bilgiyi yalnızca müşteri kimliğini doğrular veya randevusunu sorarsa kullan. Kendiliğinden yeni soru başlatma; aktif konuşma akışının dışına çıkma.`
+                      initParts.push(ctxMsg)
+                      console.log(`[${shortId}] Müşteri bilgi tabanından tanındı: ${knowledgeCustomer.name}`)
+                    }
+                  }
+                } catch (e) {
+                  console.error(`[${shortId}] Müşteri context hatası:`, e)
+                }
+              }
+            }
+
+            // Tek seferde gönder — model yalnızca BİR greeting üretir.
+            console.log(`[${shortId}] Greeting sendClientContent gönderiliyor (${initParts.join('').length} karakter)`)
+            session.sendClientContent({
+              turns: [
+                {
+                  role: 'user',
+                  parts: [{ text: initParts.join('\n\n') }],
+                },
+              ],
+              turnComplete: true,
+            })
+
+            // Süre karşılama gönderildikten sonra başlar; bağlantı kurulma
+            // gecikmesi klinik yöneticisinin seçtiği konuşma süresinden düşmez.
+            // Gelen, giden ve minimal akışlı tüm aramalarda maksimum süre KESİN olarak uygulanır.
+            const warnBeforeMs = 20_000
+            const warnAtMs = Math.max(10_000, maxCallMs - warnBeforeMs)
+            state.maxCallTimer = setTimeout(() => {
+              if (state.closed || state.hangupPending || !state.info.session) return
+              state.maxLimitReached = true
+              console.log(`[${shortId}] Maksimum çağrı süresine 20sn kaldı (${Math.round(maxCallSeconds / 60)}dk limit) — toparlama uyarısı veriliyor`)
+              try {
+                state.info.session.sendClientContent({
+                  turns: [{
+                    role: 'user',
+                    parts: [{ text: 'Sistem: Maksimum görüşme süresinin dolmasına 20 saniye kaldı. Kullanıcıya nazikçe: "Görüşme süremiz dolmak üzere, randevu veya klinik işleminizi hemen tamamlayalım; farklı bir konu varsa görüşmeyi sonlandırmam gerekecek." de ve işlemi hızla toparla.' }],
+                  }],
+                  turnComplete: true,
+                })
+              } catch { }
+            }, warnAtMs)
+
+            state.maxCloseTimer = setTimeout(() => {
+              if (state.closed || state.hangupPending || !state.info.session) return
+              state.maxLimitReached = true
+              // Mikrofonu kapat ki arayan konuşmaya devam edip veda cümlesini (barge-in ile) kesemesin
+              state.micEnabled = false
+              state.micBuffer = []
+              clearSilenceTimers(state)
+              console.log(`[${shortId}] Maksimum çağrı süresi (${maxCallSeconds}sn) doldu — görüşme sonlandırılıyor`)
+              try {
+                state.info.session.beginClosing?.()
+                state.info.session.sendClientContent({
+                  turns: [{
+                    role: 'user',
+                    parts: [{ text: 'Sistem: Maksimum görüşme süresi kesin olarak doldu. Şimdi "Üzgünüm, görüşme süremiz doldu. Görüşmeyi sonlandırıyorum, sağlıklı günler dilerim." de; yeni soru sorma ve cagriySonlandir aracını çağır.' }],
+                  }],
+                  turnComplete: true,
+                })
+              } catch { }
+
+              // AI cümlesini ve ses kuyruğunu tamamlamadan hattı kapatma; ancak en geç 12sn içinde kesin kapat.
+              const notBefore = Date.now() + 4_500
+              const deadline = Date.now() + 12_000
+              const closeWhenQuiet = () => {
+                if (state.closed) return
+                const rtpDraining = state.lastAudioFrameAt > 0 && Date.now() - state.lastAudioFrameAt < 650
+                if ((Date.now() < notBefore || state.aiSpeaking || state.outputTurnActive || state.audioQueue.length > 0 || rtpDraining) && Date.now() < deadline) {
+                  setTimeout(closeWhenQuiet, 250)
+                  return
+                }
+                state.closed = true
+                try { state.info.session?.close() } catch { }
+                try { socket.end() } catch { }
+              }
+              setTimeout(closeWhenQuiet, 1_000)
+            }, maxCallMs)
+
+            // Güvenlik zamanlayıcısı: Gemini turnComplete göndermese bile çağrı kilitlenmesin.
+            // Normal akışta mikrofon yalnızca greeting turnComplete sonrasında açılır;
+            // bu uzun geri dönüş süresi AI'ın kendi sesini müşteri sesi sanıp peş peşe
+            // sorular üretmesini ve barge-in döngüsünü önler.
+            const greetingFallbackMs = Math.max(8_000, Math.round((startWaitSec + 5) * 1_000))
+            const greetingFallbackStartedAt = Date.now()
+            const checkGreetingTimeout = () => {
+              if (state.closed || state.micEnabled) return
+              const elapsedMs = Date.now() - greetingFallbackStartedAt
+              const outputInProgress = state.greetingAudioStarted || state.outputTurnActive || state.audioQueue.length > 0
+
+              if (outputInProgress && elapsedMs < GREETING_HARD_TIMEOUT_MS) {
+                console.warn(`[${shortId}] Greeting yanıtı devam ediyor; mikrofon kapalı tutuluyor (${elapsedMs}ms)`)
+                state.greetingTimeoutTimer = setTimeout(checkGreetingTimeout, 2_000)
+                return
+              }
+
+              if (outputInProgress) {
+                console.warn(`[${shortId}] Greeting hard timeout (${GREETING_HARD_TIMEOUT_MS}ms) — bekleyen ses tamamlanmış kabul ediliyor`)
+                state.outputTurnComplete = true
+                if (state.audioQueue.length > 0) return
+                state.outputTurnActive = false
+                state.playbackReady = false
+                state.aiSpeaking = false
+              } else {
+                console.warn(`[${shortId}] Greeting yanıtı başlamadı (${elapsedMs}ms) — fallback devrede`)
+              }
+              openMicrophoneAfterGreeting('Greeting fallback')
+            }
+            state.greetingTimeoutTimer = setTimeout(checkGreetingTimeout, greetingFallbackMs)
+          })
+        } catch (err) {
+          console.error(`[${shortId}] Telephony session başlatılamadı:`, err)
+          state.closed = true
+          try { socket.end() } catch { }
+        }
+      },
+
+      data(socket, chunk) {
+        const state = socket.data
+        if (!state || state.closed) return
+        const events = state.parser.push(chunk)
+        for (const ev of events) {
+          if (ev.type === 'uuid') {
+            const channelUuid = ev.uuid
+            state.callerId = channelUuid
+            const reg = callerRegistry.get(channelUuid)
+            if (reg) {
+              state.callerPhone = reg.phone
+              state.callerChannel = reg.channel
+              state.callerDirection = reg.direction || 'inbound'
+              state.clinicId = reg.clinicId
+              state.hostname = reg.hostname
+              callerRegistry.delete(channelUuid)
+            }
+            console.log(`[${state.shortId}] Asterisk UUID: ${ev.uuid}${state.callerPhone ? `, arayan: ${state.callerPhone}` : ''}${state.callerChannel ? `, kanal: ${state.callerChannel}` : ''}${state.callerDirection ? `, yon: ${state.callerDirection}` : ''}`)
+          } else if (ev.type === 'audio') {
+            const { info } = state
+            // Mikrofon henüz açılmadıysa veya kapanış bekleniyorsa sesi gönderme (yankı loop'unu engellemek için)
+            if (!info.session || !state.micEnabled || state.hangupPending) continue
+
+            const { frames, justClosed } = state.noiseGate.process(ev.pcm)
+
+            // AI konuşurken: Eğer kullanıcı GERÇEKTEN konuşmuyorsa (NoiseGate kapalı / sadece dip gürültüsü),
+            // Gemini'ye paket gönderme (Gemini'nin kendi sesini veya sessizliği kesinti olarak algılamasını önle).
+            if (state.aiSpeaking && !state.noiseGate.isOpen) {
+              state.micBuffer = []
+              continue
+            }
+
+            if (frames.length > 0) {
+              if (state.semanticTurnHoldTimer && state.noiseGate.isOpen) {
+                clearTimeout(state.semanticTurnHoldTimer)
+                state.semanticTurnHoldTimer = undefined
+              }
+              for (const f8k of frames) {
+                state.micBuffer.push(upsample8to16(f8k))
+              }
+            }
+
+            // 3 frame (60ms) biriktirince veya konuşma bittiğinde bekleyen sesi hemen gönder
+            if (state.micBuffer.length >= 3 || (justClosed && state.micBuffer.length > 0)) {
+              const combined = Buffer.concat(state.micBuffer)
+              state.micBuffer = []
+              if (!state.firstAudioSent) {
+                state.firstAudioSent = true
+                console.log(`[${state.shortId}] İlk audio chunk Gemini'ye gönderiliyor`)
+              }
+              info.session.sendRealtimeInput({
+                audio: {
+                  mimeType: 'audio/pcm;rate=16000',
+                  data: combined.toString('base64'),
+                },
+              })
+            }
+
+            // Konuşma bittiğinde Gemini'ye audioStreamEnd sinyali ver -> Gemini anında cevap üretir.
+            // Semantic modda cümle bağlaç veya yarım numara ile bittiyse düşünme payı tanı.
+            if (justClosed) {
+              const sendStreamEnd = () => {
+                state.semanticTurnHoldTimer = undefined
+                if (state.closed || state.hangupPending || !info.session) return
+                state.userSpeechEndTime = Date.now()
+                info.session.sendRealtimeInput({
+                  audioStreamEnd: true,
+                })
+              }
+              if (state.turnDetectionMode === 'semantic') {
+                const analysis = analyzeTurkishTurnCompleteness(
+                  state.userTranscript,
+                  state.lastCompletedAiTranscript,
+                )
+                if (analysis.status === 'incomplete') {
+                  const holdMs = Math.min(450, Math.max(220, analysis.recommendedSilenceMs - 350))
+                  if (state.semanticTurnHoldTimer) clearTimeout(state.semanticTurnHoldTimer)
+                  state.semanticTurnHoldTimer = setTimeout(sendStreamEnd, holdMs)
+                } else {
+                  sendStreamEnd()
+                }
+              } else {
+                sendStreamEnd()
+              }
+            }
+          } else if (ev.type === 'hangup') {
+            console.log(`[${state.shortId}] AudioSocket hangup`)
+            try { socket.end() } catch { }
+          } else if (ev.type === 'error') {
+            console.error(`[${state.shortId}] AudioSocket error code=${ev.code}`)
+            try { socket.end() } catch { }
+          }
+        }
+      },
+
+      close(socket) {
+        finalize(socket.data, deps)
+      },
+
+      error(socket, error) {
+        console.error(`[${socket.data?.shortId ?? 'tel:?'}] socket error:`, error)
+        finalize(socket.data, deps)
+      },
+    },
+  })
+
+  console.log(`   AudioSocket: tcp://0.0.0.0:${port}`)
+  return {
+    stop() {
+      try { server.stop() } catch { }
+    },
+  }
+}
+
+function finalize(state: CallState | undefined, deps: TelephonyDeps): void {
+  if (!state || state.closed) return
+  state.closed = true
+  const { info, shortId } = state
+  const { sessions } = deps
+
+  // Tüm timeout timer'larını temizle — bellek sızıntısı / geç tetiklenme olmasın.
+  clearSilenceTimers(state)
+  if (state.greetingTimeoutTimer) { clearTimeout(state.greetingTimeoutTimer); state.greetingTimeoutTimer = undefined }
+  if (state.micOpenTimer) { clearTimeout(state.micOpenTimer); state.micOpenTimer = undefined }
+  if (state.semanticTurnHoldTimer) { clearTimeout(state.semanticTurnHoldTimer); state.semanticTurnHoldTimer = undefined }
+  if (state.maxCallTimer) { clearTimeout(state.maxCallTimer); state.maxCallTimer = undefined }
+  if (state.maxCloseTimer) { clearTimeout(state.maxCloseTimer); state.maxCloseTimer = undefined }
+
+  try { info.session?.close() } catch { }
+  sessions.delete(shortId)
+  console.log(`[${shortId}] AudioSocket disconnected`)
+}

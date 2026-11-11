@@ -1,0 +1,47 @@
+{
+  "id": "voiceaiMetaWaStat01",
+  "name": "VoiceAI — Meta WhatsApp Delivery Status Bridge",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meta-whatsapp-status",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "meta-status-webhook",
+      "name": "Meta Status Webhook (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 260],
+      "webhookId": "voiceai-meta-wa-status"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst baseUrl = ($env.VOICEAI_BASE_URL || 'http://voiceai-server:3001').replace(/\\/+$/, '');\nconst defaultClinicId = $env.VOICEAI_CLINIC_ID || 'auto';\nconst secret = $env.VOICEAI_N8N_SECRET || '';\n\nconst res = await fetch(`${baseUrl}/api/whatsapp/n8n-webhook/${encodeURIComponent(defaultClinicId)}`, {\n  method: 'POST',\n  headers: {\n    'Content-Type': 'application/json',\n    ...(secret ? { 'X-Webhook-Secret': secret } : {})\n  },\n  body: JSON.stringify(body)\n});\nconst data = await res.json().catch(() => ({}));\nreturn [{ json: { status: res.status, response: data } }];"
+      },
+      "id": "forward-status-voiceai",
+      "name": "Forward Status to VoiceAI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 260]
+    }
+  ],
+  "connections": {
+    "Meta Status Webhook (POST)": {
+      "main": [
+        [
+          {
+            "node": "Forward Status to VoiceAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

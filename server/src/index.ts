@@ -1,0 +1,3175 @@
+import { platformIntegrations } from './api/platform-integrations'
+import { whatsappPlugin } from './api/whatsapp'
+import { knowledgePlugin } from './api/knowledge'
+import { ALLOWED_LIVE_MODELS, DEFAULT_LIVE_MODEL, resolveLiveModel, buildSystemPrompt } from './services/assistant-config'
+import { Elysia } from 'elysia'
+import { cors } from '@elysiajs/cors'
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto'
+import { createReadStream, writeFileSync, mkdirSync } from 'fs'
+import { resolve } from 'path'
+import { GoogleGenAI } from '@google/genai'
+import { eq } from 'drizzle-orm'
+import { createLiveSession, validateLiveCustomerIdentity } from './gemini'
+import {
+  readAppointments,
+  deleteAppointment,
+  createAppointment,
+  getCustomerByPhone,
+  getAppointmentsByDateRange,
+} from './db/repositories/appointments'
+import {
+  listRecordings,
+  getRecordingByFilename,
+  saveRecording,
+  deleteRecording,
+  RECORDINGS_DIR,
+} from './db/repositories/recordings'
+import {
+  listDocs,
+  createDoc,
+  updateDoc,
+  deleteDoc,
+  toggleDoc,
+  updateDocEmbedding,
+  countEmbedded,
+  retrieveTopK as retrieveDocsByEmbedding,
+  findCustomerDocByPhone,
+} from './db/repositories/knowledge'
+import {
+  listVipAssistants,
+  createVipAssistant,
+  updateVipAssistant,
+  deleteVipAssistant,
+} from './db/repositories/vip'
+import {
+  getCalendarSettings,
+  setCalendarSettings,
+  disconnectCalendar,
+  getAiModel,
+  setAiModel,
+  getGreeting,
+  setGreeting,
+  getConnectionMode,
+  setConnectionMode,
+  getAllPromptSections,
+  setPromptSection,
+  resetPromptSection,
+  getBranding,
+  setBranding,
+  getSetting,
+  setSetting,
+} from './db/repositories/settings'
+import { embedText, getPreWarmEmbedding, getPreWarmedRagContext, buildRagPrompt, PRE_WARM_QUERY, getEmbeddingModel, getEmbeddingDimensions } from './rag'
+import { PROMPT_SECTIONS, PROMPT_SECTION_KEYS, getDefaultPromptValue } from './data/default-prompts'
+
+const PUBLIC_DIR = resolve(import.meta.dir, '../public')
+// Ensure public/uploads/dcm directory exists at startup
+mkdirSync(resolve(PUBLIC_DIR, 'uploads/dcm'), { recursive: true })
+import { listCategories, createCategory, updateCategory, deleteCategory, seedCategoriesForClinic } from './db/repositories/categories'
+import { authPlugin } from './api/auth'
+import { shiftsPlugin } from './api/shifts'
+import { notificationsPlugin } from './api/notifications'
+import { yoneticiPlugin } from './api/yonetici'
+import { financePlugin } from './api/finance'
+import { platformPlugin } from './api/platform'
+import { startReminderCron } from './cron/reminders'
+import { bindRequestContext, currentClinicId, currentTenant, enterTenantContext, findTenantByHostname, requireClinicId, resolveTenantFromRequest, runWithTenantContext, setRequestTenant } from './tenancy/context'
+import { authenticateRequest } from './middleware/auth'
+
+const callerRegistry = new Map<string, { phone: string; channel?: string; direction?: string; clinicId: string; hostname: string }>()
+
+const PORT = Number(process.env.PORT) || 3001
+
+function getTodayTurkish(): string {
+  const now = new Date()
+  const days = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi']
+  const months = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
+  return `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()} ${days[now.getDay()]}`
+}
+
+// ── GoogleGenAI client ────────────────────────────────────────────────────────
+function createAI(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) throw new Error('GEMINI_API_KEY tanımlı değil')
+  console.log('[AI] Gemini API key modu')
+  return new GoogleGenAI({ apiKey })
+}
+
+let aiClient: GoogleGenAI | null = null
+
+function getAI(): GoogleGenAI {
+  aiClient ??= createAI()
+  return aiClient
+}
+
+// ── SYSTEM_PROMPT ─────────────────────────────────────────────────────────────
+const DEFAULT_GREETING = 'Merhaba, hoş geldiniz! Ben Pine Clinic asistanınızım. Size daha iyi yardımcı olabilmem için telefon numaranızı öğrenebilir miyim?'
+
+function signOAuthState(payload: { clinicId: string; hostname: string; returnOrigin: string }): string {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const signature = createHmac('sha256', process.env.JWT_SECRET || 'voiceai-dev-secret-change-me').update(encoded).digest('base64url')
+  return `${encoded}.${signature}`
+}
+
+function verifyOAuthState(state: string | undefined): { clinicId: string; hostname: string; returnOrigin: string } | null {
+  if (!state) return null
+  const [encoded, signature] = state.split('.')
+  if (!encoded || !signature) return null
+  const expected = createHmac('sha256', process.env.JWT_SECRET || 'voiceai-dev-secret-change-me').update(encoded).digest('base64url')
+  const actualBuffer = Buffer.from(signature)
+  const expectedBuffer = Buffer.from(expected)
+  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString())
+    return typeof parsed.clinicId === 'string' && typeof parsed.hostname === 'string' && typeof parsed.returnOrigin === 'string' ? parsed : null
+  } catch { return null }
+}
+
+/**
+ * Build system prompt dynamically from DB sections.
+ * No cache — always reads fresh from DB for instant updates.
+ */
+// ── Session tracking ──────────────────────────────────────────────────────────
+interface TimedChunk {
+  buffer: Buffer
+  offsetMs: number
+}
+
+interface SessionInfo {
+  session: Awaited<ReturnType<typeof createLiveSession>>
+  startedAt: Date
+  startedAtMs: number
+  audioChunks: TimedChunk[]      // AI (24 kHz)
+  userAudioChunks: TimedChunk[]  // User (16 kHz)
+  shortId: string
+  clinicId: string
+  hostname: string
+}
+
+const sessions = new Map<string, SessionInfo>()
+
+// ── SSE: Admin real-time notifications ───────────────────────────────────────
+import { sseClients as sharedSseClients } from './events'
+type SseClient = { id: string; clinicId: string; send: (data: string) => void }
+const sseClients = new Set<SseClient>()
+
+function notifyAdmins(event: string, payload: unknown) {
+  const clinicId = currentClinicId()
+  if (!clinicId) return
+  const data = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
+  for (const client of sseClients) {
+    if (client.clinicId !== clinicId) continue
+    try { client.send(data) } catch { sseClients.delete(client) }
+  }
+}
+
+// Bridge events.ts broadcastSSE → actual SSE clients
+sharedSseClients.add((event: string, data: unknown) => {
+  notifyAdmins(event, data)
+})
+
+// ── WAV helper: time-aligned stereo (user=L, AI=R) ──────────────────────────
+/**
+ * 16 kHz → 24 kHz linear-interpolation upsampling.
+ */
+function upsample16to24(buf: Buffer): Buffer {
+  const inSamples = buf.length / 2
+  const outSamples = Math.ceil(inSamples * 24000 / 16000)
+  const out = Buffer.alloc(outSamples * 2)
+  for (let i = 0; i < outSamples; i++) {
+    const srcF = i * 16000 / 24000
+    const srcI = Math.floor(srcF)
+    const frac = srcF - srcI
+    const s0 = buf.readInt16LE(Math.min(srcI, inSamples - 1) * 2)
+    const s1 = buf.readInt16LE(Math.min(srcI + 1, inSamples - 1) * 2)
+    out.writeInt16LE(Math.round(s0 + (s1 - s0) * frac), i * 2)
+  }
+  return out
+}
+
+/**
+ * Build a stereo WAV (user=L, AI=R) at 24 kHz using offset-based placement.
+ * Each chunk is written at its real time offset; silences are zero-filled.
+ * This keeps the user/AI tracks SYNCHRONIZED with the actual conversation timeline,
+ * so playback reflects when each side actually spoke.
+ */
+function buildStereoWav(aiChunks: TimedChunk[], userChunks: TimedChunk[], totalDurationMs: number): Buffer {
+  const sampleRate = 24000
+  const numChannels = 2
+  const bitsPerSample = 16
+  const totalSamples = Math.ceil(totalDurationMs / 1000 * sampleRate)
+  const dataSize = totalSamples * numChannels * 2
+  const byteRate = sampleRate * numChannels * bitsPerSample / 8
+  const blockAlign = numChannels * bitsPerSample / 8
+
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0); header.writeUInt32LE(36 + dataSize, 4)
+  header.write('WAVE', 8); header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20)
+  header.writeUInt16LE(numChannels, 22); header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(byteRate, 28); header.writeUInt16LE(blockAlign, 32)
+  header.writeUInt16LE(bitsPerSample, 34); header.write('data', 36)
+  header.writeUInt32LE(dataSize, 40)
+
+  const data = Buffer.alloc(dataSize, 0)
+
+  // Place user chunks on left channel (offset 0 in each frame)
+  // User audio is 16 kHz PCM — upsample each chunk to 24 kHz before placing
+  for (const ch of userChunks) {
+    const pcm24 = upsample16to24(ch.buffer)
+    const startSample = Math.round(ch.offsetMs / 1000 * sampleRate)
+    const samples = pcm24.length / 2
+    for (let i = 0; i < samples; i++) {
+      const frame = startSample + i
+      if (frame >= totalSamples) break
+      const byteOffset = frame * 4 // 2 channels * 2 bytes
+      const s = pcm24.readInt16LE(i * 2)
+      data.writeInt16LE(s, byteOffset)
+    }
+  }
+
+  // Place AI chunks on right channel (offset 2 in each frame)
+  // AI audio is already 24 kHz PCM
+  for (const ch of aiChunks) {
+    const startSample = Math.round(ch.offsetMs / 1000 * sampleRate)
+    const samples = ch.buffer.length / 2
+    for (let i = 0; i < samples; i++) {
+      const frame = startSample + i
+      if (frame >= totalSamples) break
+      const byteOffset = frame * 4 + 2 // right channel
+      const s = ch.buffer.readInt16LE(i * 2)
+      data.writeInt16LE(s, byteOffset)
+    }
+  }
+
+  return Buffer.concat([header, data])
+}
+
+// ── Elysia app ────────────────────────────────────────────────────────────────
+const defaultCorsOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:3002',
+  'https://pineclinic.thinpine.com',
+  'http://pineclinic.thinpine.com',
+]
+const corsFromEnv = process.env.CORS_ORIGIN?.split(/[\s,]+/).map(s => s.trim()).filter(Boolean) ?? []
+const corsOrigins = [...new Set([...defaultCorsOrigins, ...corsFromEnv])]
+
+const app = new Elysia()
+  .onRequest(async ({ request }) => {
+    bindRequestContext(request)
+    setRequestTenant(request, await resolveTenantFromRequest(request))
+  })
+  .onBeforeHandle(async ({ request, cookie, set }) => {
+    // Elysia may resume a lifecycle hook on a different async resource after
+    // the database lookup in onRequest. Resolve and enter the tenant again at
+    // the last lifecycle boundary so route handlers and repositories always
+    // see the request's clinic context.
+    setRequestTenant(request, await resolveTenantFromRequest(request))
+    const pathname = new URL(request.url).pathname
+    const protectedPrefixes = [
+      '/api/admin', '/api/dental', '/api/yonetici', '/api/finance', '/api/shifts',
+      '/api/notifications', '/api/recordings', '/api/patient-notes', '/api/platform',
+      '/api/knowledge', '/api/appointments',
+    ]
+    if (!protectedPrefixes.some(prefix => pathname.startsWith(prefix))) return
+    if (pathname === '/api/admin/settings/calendar/callback') return
+    const tenant = currentTenant()
+    if (!tenant) {
+      set.status = 404
+      return { error: 'Bu domain için aktif klinik bulunamadı' }
+    }
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    if (tenant.isActive === false && !user.isPlatformAdmin && !pathname.startsWith('/api/platform')) {
+      set.status = 403
+      return { error: 'Bu klinik şu anda dondurulmuştur (askıya alınmıştır). Lütfen satış ekibi ile iletişime geçiniz.' }
+    }
+  })
+  .use(cors({ origin: corsOrigins }))
+  .use(platformIntegrations)
+  .get('/uploads/*', async ({ params, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) {
+      set.status = 404
+      return { error: 'Bu domain için aktif klinik bulunamadı' }
+    }
+    const rawPath = (params as Record<string, string>)['*'] || ''
+    const safeParts = rawPath.split('/').map(p => p.replace(/[^a-zA-Z0-9._-]/g, '')).filter(Boolean)
+    if (safeParts.length === 0) {
+      set.status = 404
+      return { error: 'Dosya bulunamadı' }
+    }
+    const { getSetting } = await import('./db/repositories/settings')
+    const expectedLogoUrl = await getSetting('branding.logo_url')
+    if (expectedLogoUrl !== `/uploads/${safeParts.join('/')}`) {
+      set.status = 404
+      return { error: 'Dosya bulunamadı' }
+    }
+    const filePath = resolve(PUBLIC_DIR, 'uploads', ...safeParts)
+    const file = Bun.file(filePath)
+    if (await file.exists()) {
+      const fileName = safeParts[safeParts.length - 1] || ''
+      const ext = fileName.split('.').pop()?.toLowerCase()
+      if (ext === 'png') set.headers['content-type'] = 'image/png'
+      else if (ext === 'jpg' || ext === 'jpeg') set.headers['content-type'] = 'image/jpeg'
+      else if (ext === 'svg') set.headers['content-type'] = 'image/svg+xml'
+      else if (ext === 'webp') set.headers['content-type'] = 'image/webp'
+      set.headers['cache-control'] = 'public, max-age=86400'
+      return file
+    }
+    // Check database if it's a logo and restore
+    const fileName = safeParts[safeParts.length - 1] || ''
+    if (fileName.startsWith('logo_')) {
+      const logoData = await getSetting('branding.logo_data')
+      if (logoData) {
+        const parts = logoData.split(',')
+        const base64 = parts.length > 1 ? parts[1] : parts[0]
+        const mime = parts.length > 1 ? (parts[0]?.match(/:(.*?);/)?.[1] || 'image/png') : 'image/png'
+        const buf = Buffer.from(base64, 'base64')
+        try {
+          mkdirSync(resolve(PUBLIC_DIR, 'uploads'), { recursive: true })
+          const { writeFileSync } = await import('fs')
+          writeFileSync(filePath, buf)
+        } catch { }
+        set.headers['content-type'] = mime
+        set.headers['cache-control'] = 'public, max-age=86400'
+        return new Response(buf)
+      }
+    }
+    set.status = 404
+    return { error: 'Dosya bulunamadı' }
+  })
+  .get('/api/branding/logo/:filename', async ({ params, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) {
+      set.status = 404
+      return { error: 'Bu domain için aktif klinik bulunamadı' }
+    }
+    const safeName = params.filename.replace(/[^a-zA-Z0-9._-]/g, '')
+    if (!safeName || safeName !== params.filename) {
+      set.status = 400
+      return { error: 'Geçersiz dosya adı' }
+    }
+
+    const clinicDirectory = resolve(PUBLIC_DIR, 'tenant-assets', clinicId, 'branding')
+    const filePath = resolve(clinicDirectory, safeName)
+    if (!filePath.startsWith(`${clinicDirectory}/`)) {
+      set.status = 403
+      return { error: 'Erişim reddedildi' }
+    }
+
+    let file = Bun.file(filePath)
+    if (!(await file.exists())) {
+      const { getSetting } = await import('./db/repositories/settings')
+      const logoData = await getSetting('branding.logo_data')
+      if (!logoData) {
+        set.status = 404
+        return { error: 'Logo bulunamadı' }
+      }
+      const parts = logoData.split(',')
+      const base64 = parts.length > 1 ? parts[1] : parts[0]
+      mkdirSync(clinicDirectory, { recursive: true })
+      writeFileSync(filePath, Buffer.from(base64, 'base64'))
+      file = Bun.file(filePath)
+    }
+
+    const ext = safeName.split('.').pop()?.toLowerCase()
+    if (ext === 'png') set.headers['content-type'] = 'image/png'
+    else if (ext === 'jpg' || ext === 'jpeg') set.headers['content-type'] = 'image/jpeg'
+    else if (ext === 'webp') set.headers['content-type'] = 'image/webp'
+    else {
+      set.status = 415
+      return { error: 'Desteklenmeyen logo biçimi' }
+    }
+    set.headers['cache-control'] = 'public, max-age=31536000, immutable'
+    return file
+  })
+  .use(authPlugin)
+  .use(shiftsPlugin)
+  .use(notificationsPlugin)
+  .use(yoneticiPlugin)
+  .use(financePlugin)
+  .use(platformPlugin)
+  .use(knowledgePlugin)
+
+  // ── Public Opt-out API ─────────────────────────────────────────────────────
+  .get('/api/public/optout/:id', async ({ params, set }: any) => {
+    try {
+      const { db } = await import('./db/client')
+      const { patients } = await import('./db/schema')
+      const { eq, and } = await import('drizzle-orm')
+
+      const patientId = params.id
+      const patient = await db.query.patients.findFirst({
+        where: and(eq(patients.id, patientId), eq(patients.clinicId, requireClinicId()))
+      })
+      if (!patient) {
+        set.status = 404
+        return { error: 'Hasta bulunamadı' }
+      }
+      return {
+        id: patient.id,
+        smsOptOut: patient.smsOptOut,
+        emailOptOut: patient.emailOptOut,
+        whatsappOptOut: patient.whatsappOptOut
+      }
+    } catch (e: any) {
+      set.status = 500
+      return { error: 'Sunucu hatası' }
+    }
+  })
+  .post('/api/public/optout/:id', async ({ params, body, set }: any) => {
+    try {
+      const { db } = await import('./db/client')
+      const { patients } = await import('./db/schema')
+      const { eq, and } = await import('drizzle-orm')
+
+      const patientId = params.id
+      const b = body as any
+
+      const update: { smsOptOut?: boolean; emailOptOut?: boolean; whatsappOptOut?: boolean } = {}
+      if (b.smsOptOut === true) update.smsOptOut = true
+      if (b.emailOptOut === true) update.emailOptOut = true
+      if (b.whatsappOptOut === true) update.whatsappOptOut = true
+      const channels: ('sms' | 'email' | 'whatsapp')[] = []
+      if (update.smsOptOut) channels.push('sms')
+      if (update.emailOptOut) channels.push('email')
+      if (update.whatsappOptOut) channels.push('whatsapp')
+      if (channels.length) {
+        const [patient] = await db.update(patients).set(update).where(and(eq(patients.id, patientId), eq(patients.clinicId, requireClinicId()))).returning({ id: patients.id })
+        if (!patient) { set.status = 404; return { error: 'Hasta bulunamadı' } }
+        const { revokePatientConsent } = await import('./services/patient-consent')
+        await revokePatientConsent(requireClinicId(), patientId, channels)
+      }
+
+      return { success: true }
+    } catch (e: any) {
+      set.status = 500
+      return { error: 'Sunucu hatası' }
+    }
+  })
+
+  .get('/api/public/patient-consent/:token', async ({ params, set }) => {
+    const { getConsentForm } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    set.headers['cache-control'] = 'no-store'
+    try { return await getConsentForm(params.token, requireClinicId()) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/public/patient-consent/:token', async ({ params, body, set }) => {
+    const { submitConsentForm } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    set.headers['cache-control'] = 'no-store'
+    try { return await submitConsentForm(params.token, requireClinicId(), (body as any)?.answers) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/public/appointment/:token', async ({ params, set }) => {
+    const { getPublicAppointmentByToken } = await import('./services/appointment-notifications')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    set.headers['cache-control'] = 'no-store'
+    try { return await getPublicAppointmentByToken(params.token) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/public/appointment/:token', async ({ params, body, set }) => {
+    const { submitPublicAppointmentResponse } = await import('./services/appointment-notifications')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    set.headers['cache-control'] = 'no-store'
+    try { return await submitPublicAppointmentResponse(params.token, (body || {}) as Record<string, unknown>) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/public/staff-invite/:token', async ({ params, set }) => {
+    const { getPublicStaffInvite } = await import('./services/staff-invitations')
+    set.headers['cache-control'] = 'no-store'
+    try {
+      return await getPublicStaffInvite(params.token)
+    } catch (error: any) {
+      set.status = 404
+      return { error: error?.message || 'Davet bağlantısı geçersiz veya süresi dolmuş.' }
+    }
+  })
+  .post('/api/public/staff-invite/:token/accept', async ({ params, body, set, request }) => {
+    const { acceptPublicStaffInvite } = await import('./services/staff-invitations')
+    set.headers['cache-control'] = 'no-store'
+    const b = (body || {}) as any
+    const ipAddress = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || null
+    try {
+      return await acceptPublicStaffInvite(params.token, {
+        name: b.name,
+        phone: b.phone,
+        password: b.password,
+        kvkkAccepted: Boolean(b.kvkkAccepted),
+        ipAddress: ipAddress || undefined,
+      })
+    } catch (error: any) {
+      set.status = 400
+      return { error: error?.message || 'Hesap oluşturulamadı.' }
+    }
+  })
+
+  .use(whatsappPlugin)
+
+  // ── Users API (admin) ──────────────────────────────────────────────────────
+  .get('/api/admin/users', async () => {
+    const { listUsers } = await import('./db/repositories/users')
+    return await listUsers()
+  })
+
+  // ── Dental Calendar API ────────────────────────────────────────────────────
+  .get('/api/dental/doctors', async () => {
+    const { listDoctors } = await import('./db/repositories/dental')
+    return listDoctors()
+  })
+  .post('/api/dental/doctors', async ({ body, set }) => {
+    const { createDoctor } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.name || !b.specialty) { set.status = 400; return { error: 'Name and specialty required' } }
+    return createDoctor({ name: b.name, specialty: b.specialty, color: b.color })
+  })
+  .get('/api/dental/doctors/leaves', async ({ query }) => {
+    const { getDoctorLeaves } = await import('./db/repositories/dental')
+    return await getDoctorLeaves({
+      doctorId: query.doctorId as string | undefined,
+      date: query.date as string | undefined,
+      startDate: query.startDate as string | undefined,
+      endDate: query.endDate as string | undefined,
+    })
+  })
+  .post('/api/dental/doctors/leaves', async ({ body, set, cookie }) => {
+    const { authenticateRequest } = await import('./middleware/auth')
+    const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
+    const { createDoctorLeave } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.doctorId || !b.date || !b.startTime || !b.endTime) {
+      set.status = 400; return { error: 'Hekim, tarih ve saat aralığı zorunludur' }
+    }
+    return await createDoctorLeave({
+      doctorId: b.doctorId,
+      substituteDoctorId: b.substituteDoctorId || null,
+      unassignAppointments: Boolean(b.unassignAppointments),
+      cancelAppointments: Boolean(b.cancelAppointments),
+      appointmentIds: Array.isArray(b.appointmentIds) ? b.appointmentIds : undefined,
+      date: b.date,
+      startTime: b.startTime,
+      endTime: b.endTime,
+      isFullDay: Boolean(b.isFullDay),
+      reason: b.reason,
+      notes: b.notes,
+      createdBy: user?.id,
+    })
+  })
+  .delete('/api/dental/doctors/leaves/:id', async ({ params, set }) => {
+    const { deleteDoctorLeave } = await import('./db/repositories/dental')
+    const ok = await deleteDoctorLeave(params.id)
+    if (!ok) { set.status = 404; return { error: 'İzin bulunamadı' } }
+    return { success: true }
+  })
+  .get('/api/dental/appointments', async ({ query }) => {
+    const { listDentalAppointments } = await import('./db/repositories/dental')
+    return await listDentalAppointments(query.date as string | undefined)
+  })
+  .post('/api/dental/appointments', async ({ body, set, cookie }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined).catch(() => null)
+    const actor = user
+      ? { actorType: user.role === 'hekim' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
+      : undefined
+    const { createDentalAppointment } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.patientId || !b.title || !b.startTime || !b.endTime) {
+      set.status = 400; return { error: 'Missing required fields' }
+    }
+    try {
+      return await createDentalAppointment({
+        patientId: b.patientId, doctorId: b.doctorId || null, title: b.title,
+        startTime: new Date(b.startTime), endTime: new Date(b.endTime),
+        status: b.status, type: b.type, notes: b.notes,
+      }, actor)
+    } catch (err: any) {
+      set.status = 400; return { error: err.message || 'Randevu oluşturulamadı' }
+    }
+  })
+  .delete('/api/dental/appointments/:id', async ({ params, set }) => {
+    const { deleteDentalAppointment } = await import('./db/repositories/dental')
+    const ok = await deleteDentalAppointment(params.id)
+    if (!ok) { set.status = 404; return { error: 'Not found' } }
+    return { success: true }
+  })
+  .put('/api/dental/appointments/:id', async ({ params, body, set, cookie }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined).catch(() => null)
+    const actor = user
+      ? { actorType: user.role === 'hekim' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
+      : undefined
+    const { updateDentalAppointment } = await import('./db/repositories/dental')
+    const b = body as Record<string, unknown>
+    try {
+      const updated = await updateDentalAppointment(params.id, {
+        patientId: b.patientId !== undefined ? (b.patientId as string | null) : undefined,
+        doctorId: b.doctorId !== undefined ? (b.doctorId as string | null) : undefined,
+        timeConfirmed: b.timeConfirmed !== undefined ? (b.timeConfirmed as boolean) : undefined,
+        status: b.status as string | undefined,
+        startTime: b.startTime ? new Date(b.startTime as string) : undefined,
+        endTime: b.endTime ? new Date(b.endTime as string) : undefined,
+        type: b.type as string | undefined,
+        complaint: b.complaint as string | undefined,
+        notes: b.notes as string | undefined,
+        title: b.title as string | undefined,
+      }, actor)
+      if (!updated) { set.status = 404; return { error: 'Not found' } }
+      return updated
+    } catch (err: any) {
+      set.status = 400; return { error: err.message || 'Randevu güncellenemedi' }
+    }
+  })
+  .post('/api/dental/appointments/:id/approve-ai', async ({ params, body, set, cookie }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined)
+    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
+    const b = body as any
+    try {
+      const { approveAiAppointment } = await import('./db/repositories/dental')
+      return await approveAiAppointment(params.id, {
+        patientId: b.patientId || undefined,
+        patient: b.newPatient ? { name: String(b.newPatient.name || ''), phone: b.newPatient.phone ? String(b.newPatient.phone) : undefined } : undefined,
+        patientUpdate: b.patientUpdate ? { name: String(b.patientUpdate.name || ''), phone: b.patientUpdate.phone === undefined ? undefined : String(b.patientUpdate.phone) } : undefined,
+        doctorId: b.doctorId || null,
+        startTime: new Date(b.startTime), endTime: new Date(b.endTime),
+        complaint: typeof b.complaint === 'string' ? b.complaint : undefined,
+        reviewedBy: user.id,
+      })
+    } catch (err: any) {
+      set.status = 400; return { error: err.message || 'AI randevusu onaylanamadı' }
+    }
+  })
+  .post('/api/dental/appointments/:id/reject-ai', async ({ params, body, set, cookie }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined)
+    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
+    try {
+      const { rejectAiAppointment } = await import('./db/repositories/dental')
+      return await rejectAiAppointment(params.id, String((body as any)?.reason || ''), user.id)
+    } catch (err: any) {
+      set.status = 400; return { error: err.message || 'AI randevusu iptal edilemedi' }
+    }
+  })
+  .post('/api/dental/appointments/:id/patient-response', async ({ params, body, set }) => {
+    const b = (body || {}) as Record<string, unknown>
+    const action = String(b.action || '') as 'confirm' | 'postpone' | 'cancel'
+    if (!['confirm', 'postpone', 'cancel'].includes(action)) {
+      set.status = 400; return { error: 'Geçersiz işlem (confirm | postpone | cancel)' }
+    }
+    try {
+      const { applyPatientAppointmentResponse } = await import('./services/appointment-notifications')
+      return await applyPatientAppointmentResponse({
+        clinicId: requireClinicId(),
+        appointmentId: params.id,
+        action,
+        note: typeof b.note === 'string' ? b.note : null,
+        preferredDate: typeof b.preferredDate === 'string' ? b.preferredDate : null,
+        channel: 'link',
+      })
+    } catch (err: any) {
+      set.status = err.status || 400
+      return { error: err.message || 'Yanıt kaydedilemedi' }
+    }
+  })
+  .get('/api/dental/appointments/:id/treatments', async ({ params }) => {
+    const { getAppointmentTreatments } = await import('./db/repositories/dental')
+    return await getAppointmentTreatments(params.id)
+  })
+  .post('/api/dental/appointments/:id/treatments', async ({ params, body }) => {
+    const { linkTreatmentToAppointment } = await import('./db/repositories/dental')
+    const b = body as any
+    return await linkTreatmentToAppointment(params.id, b.treatmentPlanId, b.sessionNumber, b.notes)
+  })
+  .delete('/api/dental/appointments/:id/treatments/:tpId', async ({ params, set }) => {
+    const { unlinkTreatmentFromAppointment } = await import('./db/repositories/dental')
+    const ok = await unlinkTreatmentFromAppointment(params.id, params.tpId)
+    if (!ok) { set.status = 404; return { error: 'Not found' } }
+    return { success: true }
+  })
+  .patch('/api/dental/appointments/:id/treatments/:atId', async ({ params, body, set }) => {
+    const { updateAppointmentTreatmentSession } = await import('./db/repositories/dental')
+    const b = body as any
+    const updated = await updateAppointmentTreatmentSession(params.atId, { sessionStatus: b.sessionStatus, notes: b.notes })
+    if (!updated) { set.status = 404; return { error: 'Not found' } }
+    return updated
+  })
+  .get('/api/dental/payments', async ({ query }) => {
+    const { listAllPayments } = await import('./db/repositories/dental')
+    return await listAllPayments({
+      page: Number((query as any).page || 1),
+      pageSize: Number((query as any).pageSize || 25),
+      status: (query as any).status,
+      search: (query as any).search,
+    })
+  })
+  .put('/api/dental/payments/:id', async ({ params, body, set }) => {
+    const { updatePayment } = await import('./db/repositories/dental')
+    const b = body as Record<string, unknown>
+    const updated = await updatePayment(params.id, {
+      date: b.date as string | undefined,
+      amount: b.amount !== undefined && !isNaN(Number(b.amount)) ? Math.round(Number(b.amount)) : undefined,
+      method: b.method as string | undefined,
+      notes: b.notes as string | undefined,
+      status: b.status as string | undefined,
+      dueDate: b.dueDate !== undefined ? (b.dueDate as string | null) : undefined,
+      treatmentPlanId: b.treatmentPlanId !== undefined ? (b.treatmentPlanId as string | null) : undefined,
+    })
+    if (!updated) { set.status = 404; return { error: 'Not found' } }
+    return updated
+  })
+  .delete('/api/dental/payments/:id', async ({ params, set }) => {
+    const { deletePayment } = await import('./db/repositories/dental')
+    const ok = await deletePayment(params.id)
+    if (!ok) { set.status = 404; return { error: 'Not found' } }
+    return { success: true }
+  })
+  .get('/api/dental/patients', async () => {
+    const { listPatients } = await import('./db/repositories/dental')
+    return await listPatients()
+  })
+  .post('/api/dental/patients', async ({ body, set }) => {
+    const { createPatient } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.name) { set.status = 400; return { error: 'Name required' } }
+    const birthYear = b.birthYear === undefined || b.birthYear === null ? undefined : Number(b.birthYear)
+    if (birthYear !== undefined && (!Number.isInteger(birthYear) || birthYear < 1900 || birthYear > new Date().getFullYear())) {
+      set.status = 400
+      return { error: 'Geçersiz doğum yılı' }
+    }
+    return await createPatient({
+      name: b.name,
+      phone: b.phone,
+      email: b.email,
+      tcIdentity: b.tcIdentity,
+      gender: b.gender,
+      birthDate: b.birthDate,
+      birthYear,
+      balance: b.balance
+    })
+  })
+  .post("/api/dental/patients/bulk", async ({ body, set }) => {
+    const { createPatientsBulk } = await import("./db/repositories/dental")
+    const b = body as any
+    if (!b.patients || !Array.isArray(b.patients)) { set.status = 400; return { error: "Geçersiz veri" } }
+    return await createPatientsBulk(b.patients)
+  })
+  .get('/api/dental/patients/:id', async ({ params, set }) => {
+    const { getPatient } = await import('./db/repositories/dental')
+    const p = await getPatient(params.id)
+    if (!p) { set.status = 404; return { error: 'Patient not found' } }
+    return p
+  })
+  .get('/api/dental/patients/:id/profile', async ({ params, set }) => {
+    const { getPatientFullProfile } = await import('./db/repositories/dental')
+    const p = await getPatientFullProfile(params.id)
+    if (!p) { set.status = 404; return { error: 'Patient not found' } }
+    return p
+  })
+  .put('/api/dental/patients/:id', async ({ params, body, set }) => {
+    const { db } = await import('./db/client')
+    const { patients } = await import('./db/schema')
+    const { and, eq } = await import('drizzle-orm')
+    const b = body as any
+    const updateData: any = {}
+    if (b.name !== undefined && b.name.trim() !== '') updateData.name = b.name.trim()
+    if (b.phone !== undefined) updateData.phone = b.phone ? b.phone.trim() : null
+    if (b.email !== undefined) updateData.email = b.email ? b.email.trim() : null
+    if (b.tcIdentity !== undefined) updateData.tcIdentity = b.tcIdentity ? b.tcIdentity.trim() : null
+    if (b.gender !== undefined) updateData.gender = b.gender || null
+    if (b.birthDate !== undefined) {
+      updateData.birthDate = b.birthDate ? new Date(b.birthDate) : null
+      if (b.birthDate) updateData.birthYear = null
+    }
+    if (b.birthYear !== undefined) {
+      const birthYear = Number(b.birthYear)
+      if (Number.isInteger(birthYear) && birthYear >= 1900 && birthYear <= new Date().getFullYear()) {
+        updateData.birthYear = birthYear
+        updateData.birthDate = null
+      }
+    }
+    if (b.whatsappOptOut !== undefined) updateData.whatsappOptOut = Boolean(b.whatsappOptOut)
+    if (b.smsOptOut !== undefined) updateData.smsOptOut = Boolean(b.smsOptOut)
+    if (b.emailOptOut !== undefined) updateData.emailOptOut = Boolean(b.emailOptOut)
+
+    if (Object.keys(updateData).length === 0) return { success: true }
+
+    const [patient] = await db.update(patients).set(updateData).where(and(eq(patients.id, params.id), eq(patients.clinicId, requireClinicId()))).returning({ id: patients.id })
+    if (!patient) { set.status = 404; return { error: 'Hasta bulunamadı' } }
+    const revoked: ('sms' | 'email' | 'whatsapp')[] = []
+    if (updateData.smsOptOut === true) revoked.push('sms')
+    if (updateData.emailOptOut === true) revoked.push('email')
+    if (updateData.whatsappOptOut === true) revoked.push('whatsapp')
+    if (revoked.length) {
+      const { revokePatientConsent } = await import('./services/patient-consent')
+      await revokePatientConsent(requireClinicId(), params.id, revoked)
+    }
+    return { success: true }
+  })
+  .delete('/api/dental/patients/:id', async ({ params, query, set }) => {
+    try {
+      const { deletePatient } = await import('./db/repositories/dental')
+      const force = (query as any)?.force === 'true'
+      const res = await deletePatient(params.id, { force })
+      return res
+    } catch (e: any) {
+      if (e?.code === 'PATIENT_ARCHIVE_REQUIRED') { set.status = 409; return { error: e.message, code: e.code, patientIds: e.patientIds } }
+      set.status = 500
+      return { error: e.message || 'Hasta silinemedi' }
+    }
+  })
+  .post('/api/dental/patients/archive', async ({ body, set }) => {
+    try {
+      const { patientIds } = body as { patientIds?: string[] }
+      if (!patientIds || !Array.isArray(patientIds) || patientIds.length === 0) {
+        set.status = 400
+        return { error: 'Arşivlenecek hasta ID listesi boş olamaz' }
+      }
+      const { archivePatients } = await import('./db/repositories/dental')
+      return await archivePatients(patientIds)
+    } catch (e: any) {
+      set.status = 500
+      return { error: e.message || 'Hasta arşivlenemedi' }
+    }
+  })
+  .post('/api/dental/patients/restore', async ({ body, set }) => {
+    try {
+      const { patientIds } = body as { patientIds?: string[] }
+      if (!patientIds || !Array.isArray(patientIds) || patientIds.length === 0) {
+        set.status = 400
+        return { error: 'Aktifleştirilecek hasta ID listesi boş olamaz' }
+      }
+      const { restorePatients } = await import('./db/repositories/dental')
+      return await restorePatients(patientIds)
+    } catch (e: any) {
+      set.status = 500
+      return { error: e.message || 'Hasta aktifleştirilemedi' }
+    }
+  })
+  .post('/api/dental/patients/bulk-delete', async ({ body, set }) => {
+    try {
+      const { patientIds, force } = body as { patientIds?: string[]; force?: boolean }
+      if (!patientIds || !Array.isArray(patientIds) || patientIds.length === 0) {
+        set.status = 400
+        return { error: 'Silinecek hasta ID listesi boş olamaz' }
+      }
+      const { deletePatientsBulk } = await import('./db/repositories/dental')
+      const res = await deletePatientsBulk(patientIds, { force: Boolean(force) })
+      return res
+    } catch (e: any) {
+      if (e?.code === 'PATIENT_ARCHIVE_REQUIRED' && Array.isArray(e.patientIds)) {
+        set.status = 409
+        return { error: e.message, code: e.code, patientIds: e.patientIds }
+      }
+      set.status = 500
+      return { error: e.message || 'Hastalar silinemedi' }
+    }
+  })
+  .get('/api/dental/patients/:id/treatment-groups', async ({ params }) => {
+    const { getPatientTreatmentGroups } = await import('./db/repositories/dental')
+    return await getPatientTreatmentGroups(params.id)
+  })
+  .get('/api/dental/treatment-catalog', async () => {
+    const { listTreatmentCatalog } = await import('./services/treatment-catalog')
+    return listTreatmentCatalog(requireClinicId())
+  })
+  .get('/api/dental/consent-settings', async ({ cookie, request }) => {
+    const { consentSettings, getConsentChannelStatuses } = await import('./services/patient-consent')
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    const clinicId = requireClinicId()
+    const [settings, integrations] = await Promise.all([
+      consentSettings(clinicId),
+      getConsentChannelStatuses(clinicId),
+    ])
+    return {
+      ...settings,
+      integrations,
+      canEdit: !!user && ['yonetici', 'moderator'].includes(user.role),
+      canManageConsent: !!user && ['yonetici', 'moderator', 'hekim', 'host'].includes(user.role),
+    }
+  })
+  .put('/api/dental/consent-settings', async ({ body, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator'].includes(user.role)) { set.status = 403; return { error: 'Onam metnini düzenleme yetkisi yok' } }
+    const { saveConsentSettings, getConsentChannelStatuses } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      const clinicId = requireClinicId()
+      const settings = await saveConsentSettings(clinicId, (body as any)?.text)
+      const integrations = await getConsentChannelStatuses(clinicId)
+      return { ...settings, integrations }
+    }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/dental/patients/:id/consent', async ({ params, set }) => {
+    const { getPatientConsent } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await getPatientConsent(params.id, requireClinicId()) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/dental/patients/:id/notification-deliveries', async ({ params, set }) => {
+    const { getPatientConsent } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    const { db } = await import('./db/client')
+    const { sql } = await import('drizzle-orm')
+    try {
+      const clinicId = requireClinicId()
+      await getPatientConsent(params.id, clinicId)
+      return await db.execute(sql`SELECT treatment_id, due_date, channel, status, updated_at FROM patient_notification_deliveries
+        WHERE clinic_id = ${clinicId} AND patient_id = ${params.id} ORDER BY updated_at DESC LIMIT 20`)
+    } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/dental/patients/:id/consent-requests', async ({ params, body, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator', 'hekim', 'host'].includes(user.role)) { set.status = 403; return { error: 'Yetki yok' } }
+    const { requestPatientConsent } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    const b = (body || {}) as { deliveryChannel: 'sms' | 'whatsapp' | 'email'; requestKey: string }
+    const tenantHost = currentTenant()?.hostname || ''
+    const hostname = tenantHost === 'localhost' || tenantHost === '127.0.0.1' ? `${tenantHost}:3000` : tenantHost
+    try { return await requestPatientConsent({ patientId: params.id, clinicId: requireClinicId(), userId: user.id, deliveryChannel: b.deliveryChannel, requestKey: b.requestKey, hostname }) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/dental/patients/:id/consent-in-clinic', async ({ params, body, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator', 'hekim', 'host'].includes(user.role)) { set.status = 403; return { error: 'Yetki yok' } }
+    const { grantInClinicPatientConsent } = await import('./services/patient-consent')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    const b = (body || {}) as { channels?: Array<'sms' | 'whatsapp' | 'email' | 'assistant_call'> }
+    try { return await grantInClinicPatientConsent({ patientId: params.id, clinicId: requireClinicId(), userId: user.id, channels: b.channels }) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/dental/treatment-catalog', async ({ body, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
+    const { saveTreatmentCatalog } = await import('./services/treatment-catalog')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await saveTreatmentCatalog(requireClinicId(), body as any) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .put('/api/dental/treatment-catalog/:id', async ({ params, body, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
+    const { saveTreatmentCatalog } = await import('./services/treatment-catalog')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await saveTreatmentCatalog(requireClinicId(), body as any, params.id) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .delete('/api/dental/treatment-catalog/:id', async ({ params, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
+    const { archiveTreatmentCatalog } = await import('./services/treatment-catalog')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      if (!await archiveTreatmentCatalog(requireClinicId(), params.id)) { set.status = 404; return { error: 'Katalog kaydı bulunamadı' } }
+      return { success: true }
+    } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/dental/patients/:id/treatment-groups', async ({ params, body, set, cookie }) => {
+    const { authenticateRequest } = await import('./middleware/auth')
+    const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
+    const { createTreatmentGroup } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.name) { set.status = 400; return { error: 'name gerekli' } }
+    return await createTreatmentGroup({ patientId: params.id, name: b.name, description: b.description, createdById: user?.id })
+  })
+  .get('/api/dental/treatment-groups/:id', async ({ params, set }) => {
+    const { getTreatmentPlan, TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      const plan = await getTreatmentPlan(params.id, requireClinicId())
+      if (!plan) { set.status = 404; return { error: 'Plan bulunamadı' } }
+      return plan
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .put('/api/dental/treatment-groups/:id/full', async ({ params, body, set, cookie, request }) => {
+    const { saveTreatmentPlan, TreatmentPlanError } = await import('./services/treatment-planning')
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
+    try {
+      return await saveTreatmentPlan(body as any, requireClinicId(), user.id, params.id)
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .put('/api/dental/treatment-groups/:id', async ({ params, body, cookie }) => {
+    const { authenticateRequest } = await import('./middleware/auth')
+    const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
+    const { updateTreatmentGroup } = await import('./db/repositories/dental')
+    const b = body as any
+    return await updateTreatmentGroup(params.id, { name: b.name, description: b.description, status: b.status, updatedById: user?.id })
+  })
+  .delete('/api/dental/treatment-groups/:id', async ({ params, set }) => {
+    const { cancelTreatmentGroup, TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      const success = await cancelTreatmentGroup(params.id, requireClinicId())
+      if (!success) { set.status = 404; return { error: 'Plan bulunamadı' } }
+      return { success: true }
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .get('/api/dental/patients/:id/treatments', async ({ params }) => {
+    const { getPatientTreatments, getPatientTreatmentGroups } = await import('./db/repositories/dental')
+    const treatments = await getPatientTreatments(params.id)
+    const groups = await getPatientTreatmentGroups(params.id)
+    return { treatments, groups: groups.groups }
+  })
+  .post('/api/dental/patients/:id/treatments/bulk', async ({ params, body, set, cookie, request }) => {
+    const { saveTreatmentPlan, TreatmentPlanError } = await import('./services/treatment-planning')
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
+    const b = body as Record<string, unknown>
+    try {
+      const plan = await saveTreatmentPlan({ ...b, patientId: params.id, name: b.name || b.groupName } as any, requireClinicId(), user.id)
+      return { success: true, groupId: plan?.id, count: plan?.treatments.length, treatments: plan?.treatments, plan }
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .post('/api/dental/patients/:id/treatments', async ({ params, body, set }) => {
+    const { createStandaloneTreatment, TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      return await createStandaloneTreatment(params.id, body as any, requireClinicId())
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .get('/api/dental/inventory', async () => {
+    const { db } = await import('./db/client')
+    const { inventoryItems } = await import('./db/schema')
+    return db.select().from(inventoryItems).where(eq(inventoryItems.clinicId, requireClinicId())).orderBy(inventoryItems.name)
+  })
+  .get('/api/dental/attachment-settings', async ({ cookie, request }) => {
+    const { attachmentLimits } = await import('./services/plan-attachments')
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    return { ...(await attachmentLimits(requireClinicId())), canEdit: !!user && ['yonetici', 'moderator'].includes(user.role) }
+  })
+  .put('/api/dental/attachment-settings', async ({ body, set, cookie, request }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator'].includes(user.role)) { set.status = 403; return { error: 'Dosya ayarlarını düzenleme yetkisi yok' } }
+    const { saveAttachmentLimits } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await saveAttachmentLimits(requireClinicId(), body) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/dental/patients/:id/attachments', async ({ params, set }) => {
+    const { listPatientAttachments } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await listPatientAttachments(requireClinicId(), params.id) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/dental/patients/:id/attachments', async ({ params, body, set }) => {
+    const { createPlanAttachment } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await createPlanAttachment(requireClinicId(), params.id, body as any) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/dental/patients/:id/attachments/:attachmentId', async ({ params, set }) => {
+    const { getPlanAttachment } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await getPlanAttachment(requireClinicId(), params.id, params.attachmentId) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .delete('/api/dental/patients/:id/attachments/:attachmentId', async ({ params, set }) => {
+    const { deletePlanAttachment } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await deletePlanAttachment(requireClinicId(), params.id, params.attachmentId) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .put('/api/dental/patients/:id/attachments/:attachmentId/files/:fileIndex', async ({ params, query, request, set }) => {
+    const { uploadPlanChunk, readLimitedChunk } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      if (!/^\d+$/.test(params.fileIndex) || typeof query.offset !== 'string' || !/^\d+$/.test(query.offset)) throw new TreatmentPlanError('Dosya konumu geçersiz')
+      const chunk = await readLimitedChunk(request)
+      return await uploadPlanChunk(requireClinicId(), params.id, params.attachmentId, Number(params.fileIndex), Number(query.offset), chunk)
+    } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .post('/api/dental/patients/:id/attachments/:attachmentId/finish', async ({ params, body, set }) => {
+    const { finishPlanAttachment } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try { return await finishPlanAttachment(requireClinicId(), params.id, params.attachmentId, (body as any)?.groupId) }
+    catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/dental/patients/:id/attachments/:attachmentId/files/:fileIndex', async ({ params, set }) => {
+    const { getPlanAttachmentFile } = await import('./services/plan-attachments')
+    const { TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      if (!/^\d+$/.test(params.fileIndex)) throw new TreatmentPlanError('Dosya kimliği geçersiz')
+      const file = await getPlanAttachmentFile(requireClinicId(), params.id, params.attachmentId, Number(params.fileIndex))
+      set.headers['content-type'] = file.contentType
+      set.headers['cache-control'] = 'no-store'
+      set.headers['x-content-type-options'] = 'nosniff'
+      return Bun.file(file.path)
+    } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
+  })
+  .get('/api/dental/patients/:id/consultations', async ({ params }) => {
+    const { getPatientConsultations } = await import('./db/repositories/dental')
+    return await getPatientConsultations(params.id)
+  })
+  .post('/api/dental/patients/:id/consultations', async ({ params, body, set }) => {
+    const { createConsultation } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.consultationNote && !b.diseaseNote) { set.status = 400; return { error: 'Missing fields' } }
+    return await createConsultation({
+      patientId: params.id,
+      clinicId: requireClinicId(),
+      doctorId: b.doctorId || undefined,
+      consultationNote: b.consultationNote || "",
+      diseaseNote: b.diseaseNote || undefined
+    })
+  })
+  .put('/api/dental/consultations/:id', async ({ params, body }) => {
+    const { db } = await import('./db/client')
+    const { consultations } = await import('./db/schema')
+    const { and, eq } = await import('drizzle-orm')
+    const b = body as any
+    const updateData: any = {}
+    if (b.consultationNote !== undefined) updateData.consultationNote = b.consultationNote || ""
+    if (b.diseaseNote !== undefined) updateData.diseaseNote = b.diseaseNote
+    if (Object.keys(updateData).length === 0) return { success: true }
+    await db.update(consultations).set(updateData).where(and(eq(consultations.id, params.id), eq(consultations.clinicId, requireClinicId())))
+    return { success: true }
+  })
+  .get('/api/dental/clinics/:id/consultations/autocomplete', async ({ params }) => {
+    const { getClinicConsultationAutocomplete } = await import('./db/repositories/dental')
+    return await getClinicConsultationAutocomplete(params.id)
+  })
+  .post('/api/dental/upload-dcm', async ({ body, set }) => {
+    const MAX_DCM_SIZE = 20 * 1024 * 1024; // 20 MB
+    const b = body as any
+    if (!b.file) {
+      set.status = 400;
+      return { error: 'No file uploaded' };
+    }
+    const file = b.file as File;
+    if (!file.name.toLowerCase().endsWith('.dcm')) {
+      set.status = 400;
+      return { error: 'Only .dcm files are allowed' };
+    }
+    if (file.size > MAX_DCM_SIZE) {
+      set.status = 413;
+      return { error: `Dosya boyutu çok büyük (maks ${MAX_DCM_SIZE / 1024 / 1024} MB)` };
+    }
+
+    const uuid = crypto.randomUUID();
+    const fileName = `${uuid}_${file.name}.gz`;
+    const clinicDirectory = resolve(PUBLIC_DIR, 'uploads/dcm', requireClinicId());
+    mkdirSync(clinicDirectory, { recursive: true });
+    const filePath = resolve(clinicDirectory, fileName);
+
+    const raw = new Uint8Array(await file.arrayBuffer());
+    const compressed = Bun.gzipSync(raw);
+    await Bun.write(filePath, compressed);
+
+    const savedKB = ((raw.byteLength - compressed.byteLength) / 1024).toFixed(0);
+    return { url: `/api/dental/dcm/${fileName}`, originalSize: raw.byteLength, compressedSize: compressed.byteLength, savedKB };
+  })
+  .get('/api/dental/dcm/:filename', async ({ params, set }) => {
+    const safeName = params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
+    const clinicDirectory = resolve(PUBLIC_DIR, 'uploads/dcm', requireClinicId());
+    const filePath = resolve(clinicDirectory, safeName);
+    if (!filePath.startsWith(`${clinicDirectory}/`)) {
+      set.status = 403;
+      return { error: 'Forbidden' };
+    }
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) {
+      set.status = 404;
+      return { error: 'Dosya bulunamadı' };
+    }
+    const compressed = new Uint8Array(await file.arrayBuffer());
+    const raw = safeName.endsWith('.gz') ? Bun.gunzipSync(compressed) : compressed;
+    set.headers['content-type'] = 'application/dicom';
+    set.headers['content-disposition'] = `inline; filename="${safeName.replace('.gz', '')}"`;
+    return new Response(raw);
+  })
+  .put('/api/dental/treatments/:id', async ({ params, body, set, cookie }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined).catch(() => null)
+    const actor = user
+      ? { actorType: user.role === 'hekim' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
+      : undefined
+    const { completeTreatmentItem, TreatmentPlanError } = await import('./services/treatment-planning')
+    const { logPatientActivity } = await import('./db/repositories/dental')
+    const { db } = await import('./db/client')
+    const { treatmentPlans } = await import('./db/schema')
+    const { eq, and } = await import('drizzle-orm')
+    const b = body as any
+    const clinicId = requireClinicId()
+
+    const [existingPlan] = await db
+      .select({
+        id: treatmentPlans.id,
+        patientId: treatmentPlans.patientId,
+        procedureName: treatmentPlans.procedureName,
+        toothNumber: treatmentPlans.toothNumber,
+        status: treatmentPlans.status,
+      })
+      .from(treatmentPlans)
+      .where(and(eq(treatmentPlans.id, params.id), eq(treatmentPlans.clinicId, clinicId)))
+      .limit(1)
+
+    try {
+      const updated = await completeTreatmentItem(params.id, clinicId, { status: b.status, groupId: b.groupId, doctorId: b.doctorId, doctorIds: b.doctorIds })
+      if (updated && b.status !== undefined && existingPlan && existingPlan.status !== b.status && existingPlan.patientId) {
+        const toothPrefix = existingPlan.toothNumber && /^[1-4][1-8]$/.test(existingPlan.toothNumber)
+          ? `#${existingPlan.toothNumber} `
+          : ''
+        void logPatientActivity({
+          clinicId,
+          patientId: existingPlan.patientId,
+          treatmentId: existingPlan.id,
+          category: 'treatment',
+          event_type: 'treatment_status_changed',
+          title: `${toothPrefix}${existingPlan.procedureName}`,
+          old_value: existingPlan.status,
+          new_value: b.status,
+          actor_type: actor?.actorType || 'desk',
+          actor_name: actor?.actorName || null,
+        })
+      }
+      return updated
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .delete('/api/dental/treatments/:id', async ({ params, set }) => {
+    const { cancelTreatmentItem, TreatmentPlanError } = await import('./services/treatment-planning')
+    try {
+      const success = await cancelTreatmentItem(params.id, requireClinicId())
+      if (!success) { set.status = 404; return { error: 'Tedavi bulunamadı' } }
+      return { success: true }
+    } catch (error) {
+      if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }
+      throw error
+    }
+  })
+  .get('/api/dental/patients/:id/payments', async ({ params }) => {
+    const { getPatientPayments } = await import('./db/repositories/dental')
+    return await getPatientPayments(params.id)
+  })
+  .post('/api/dental/patients/:id/payments', async ({ params, body, set }) => {
+    const { createPayment } = await import('./db/repositories/dental')
+    const b = body as any
+    const numAmount = Number(b.amount)
+    if (!b.date || isNaN(numAmount) || numAmount <= 0) {
+      set.status = 400
+      return { error: 'Geçerli bir ödeme tarihi ve tutar girilmelidir.' }
+    }
+    return await createPayment({
+      patientId: params.id,
+      date: b.date,
+      amount: Math.round(numAmount),
+      method: b.method || 'Nakit',
+      notes: b.notes || null,
+      status: b.status || 'completed',
+      dueDate: b.dueDate || null,
+      treatmentPlanId: b.treatmentPlanId || null
+    })
+  })
+  .get('/api/dental/patients/:id/works', async ({ params }) => {
+    const { getPatientCompletedWorks } = await import('./db/repositories/dental')
+    return await getPatientCompletedWorks(params.id)
+  })
+  .post('/api/dental/patients/:id/works', async ({ params, body, set }) => {
+    const { createCompletedWork } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.doctorId || !b.date || !b.description) { set.status = 400; return { error: 'Missing fields' } }
+    return await createCompletedWork({ patientId: params.id, doctorId: b.doctorId, date: b.date, description: b.description })
+  })
+  .get('/api/dental/patients/:id/consultations', async ({ params }) => {
+    const { getPatientConsultations } = await import('./db/repositories/dental')
+    return await getPatientConsultations(params.id)
+  })
+  .post('/api/dental/patients/:id/consultations', async ({ params, body, set }) => {
+    const { createConsultation } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.consultationNote && !b.diseaseNote) { set.status = 400; return { error: 'Missing fields' } }
+    return await createConsultation({
+      patientId: params.id,
+      doctorId: b.doctorId || undefined,
+      clinicId: requireClinicId(),
+      consultationNote: b.consultationNote || "",
+      diseaseNote: b.diseaseNote || undefined
+    })
+  })
+  .delete('/api/dental/consultations/:id', async ({ params, set }) => {
+    const { deleteConsultation } = await import('./db/repositories/dental')
+    const success = await deleteConsultation(params.id)
+    if (!success) { set.status = 404; return { error: 'Not found' } }
+    return { success: true }
+  })
+  .get('/api/dental/patients/:id/diseases', async ({ params }) => {
+    const { getPatientDiseases } = await import('./db/repositories/dental')
+    return await getPatientDiseases(params.id)
+  })
+  .post('/api/dental/patients/:id/diseases', async ({ params, body, set }) => {
+    const { createPatientDisease } = await import('./db/repositories/dental')
+    const b = body as any
+    if (!b.name) { set.status = 400; return { error: 'Missing fields' } }
+    return await createPatientDisease({ patientId: params.id, name: b.name, notes: b.notes })
+  })
+  .delete('/api/dental/diseases/:id', async ({ params, set }) => {
+    const { deletePatientDisease } = await import('./db/repositories/dental')
+    const success = await deletePatientDisease(params.id)
+    if (!success) { set.status = 404; return { error: 'Not found' } }
+    return { success: true }
+  })
+
+  // ── Patient Notes ──────────────────────────────────────────────────────────
+  .get('/api/patient-notes', async ({ query }) => {
+    const { listPatientNotes } = await import('./db/repositories/dental')
+    return await listPatientNotes(query.status as string | undefined)
+  })
+
+  .post('/api/patient-notes', async ({ body, set }) => {
+    const b = (body ?? {}) as { phone?: string; content?: string; patientId?: string; source?: string }
+    if (!b.content || !b.content.trim()) {
+      set.status = 400
+      return { error: 'Not içeriği zorunludur' }
+    }
+    const { createPatientNote } = await import('./db/repositories/dental')
+    return await createPatientNote({
+      phone: b.phone || '',
+      content: b.content.trim(),
+      patientId: b.patientId,
+      source: b.source || 'manual',
+    })
+  })
+
+  .patch('/api/patient-notes/:id/read', async ({ params, set }) => {
+    const { markPatientNoteRead } = await import('./db/repositories/dental')
+    const updated = await markPatientNoteRead(params.id)
+    if (!updated) { set.status = 404; return { error: 'Not bulunamadı' } }
+    return { success: true, note: updated }
+  })
+
+  .get('/api/appointments', async () => await readAppointments())
+
+  .delete('/api/appointments/:id', async ({ params, set }) => {
+    const deleted = await deleteAppointment(params.id)
+    if (!deleted) { set.status = 404; return { error: 'Appointment not found' } }
+    return { success: true, id: params.id }
+  })
+
+  .get('/api/stats', async () => ({
+    activeSessions: sessions.size,
+    totalAppointments: (await readAppointments()).length,
+    totalRecordings: (await listRecordings()).length,
+  }))
+
+  // ── /api/admin/* aliases ─────────────────────────────────────────────────
+  .get('/api/admin/stats', async () => {
+    const clinicId = currentClinicId()
+    const clinicActiveSessions = clinicId
+      ? Array.from(sessions.values()).filter(s => s.clinicId === clinicId).length
+      : sessions.size
+    const [{ getClinicTokenStats }, { resolveClinicGeminiKeyInfo }] = await Promise.all([
+      import('./db/repositories/ai-usage'),
+      import('./services/gemini-client'),
+    ])
+    const [tokenStats, keyInfo] = await Promise.all([
+      getClinicTokenStats(clinicId),
+      resolveClinicGeminiKeyInfo(clinicId ?? undefined),
+    ])
+    return {
+      concurrent: { active: clinicActiveSessions },
+      accounts: { active: keyInfo.source === 'missing' ? 0 : 1 },
+      keySource: keyInfo.source,
+      tokens: tokenStats,
+      costTry: tokenStats.costTry,
+      appointments: (await readAppointments()).length,
+      recordings: (await listRecordings()).length,
+    }
+  })
+
+  // ── VIP Personal Assistant Management ─────────────────────────────────────
+  .get('/api/admin/vip-assistants', async () => {
+    const list = await listVipAssistants()
+    return { success: true, list }
+  })
+
+  .post('/api/admin/vip-assistants', async ({ body, set }) => {
+    const { phone, contactName, greeting, customPrompt, groundingEnabled, active } = (body ?? {}) as any
+    if (!phone || typeof phone !== 'string') {
+      set.status = 400
+      return { error: 'Telefon numarası zorunludur' }
+    }
+    try {
+      const item = await createVipAssistant({ phone, contactName, greeting, customPrompt, groundingEnabled, active })
+      return { success: true, item }
+    } catch (e: any) {
+      set.status = 400
+      return { error: e.message || 'Kayıt oluşturulamadı' }
+    }
+  })
+
+  .put('/api/admin/vip-assistants/:id', async ({ params, body, set }) => {
+    const data = (body ?? {}) as any
+    try {
+      const updated = await updateVipAssistant(params.id, data)
+      if (!updated) { set.status = 404; return { error: 'Kayıt bulunamadı' } }
+      return { success: true, item: updated }
+    } catch (e: any) {
+      set.status = 400
+      return { error: e.message || 'Güncelleme başarısız' }
+    }
+  })
+
+  .delete('/api/admin/vip-assistants/:id', async ({ params, set }) => {
+    const deleted = await deleteVipAssistant(params.id)
+    if (!deleted) { set.status = 404; return { error: 'Kayıt bulunamadı' } }
+    return { success: true }
+  })
+
+  .get('/api/telephony/transfer-result', async ({ query, set }) => {
+    const { verifyCallSignature } = await import('./integrations/managed/routing')
+    if (!verifyCallSignature(query)) { set.status = 403; return { ok: false } }
+    if (query.did === 'ANSWER') {
+      const { recordCallConnected } = await import('./integrations/managed/routing')
+      await recordCallConnected(String(query.channel || ''), String(query.clinicId || ''), true)
+    }
+    return { ok: true }
+  })
+
+  .get('/api/telephony/register', async ({ query, set }) => {
+    const { resolveCall } = await import('./integrations/managed/routing')
+    let resolved
+    try { resolved = await resolveCall(query) }
+    catch (err) {
+      console.error('[Telephony] /api/telephony/register reddedildi:', err instanceof Error ? err.message : err, { caller: query.caller, did: query.did, direction: query.direction, endpoint: query.endpoint })
+      set.status = 403
+      return { ok: false, error: 'Çağrı yetkilendirilemedi' }
+    }
+    const uuid = String(query.uuid)
+    const caller = resolved.caller
+    const channel = String(query.channel || '')
+    const direction = query.direction === 'outbound' ? 'outbound' : 'inbound'
+    const tenant = { clinicId: resolved.clinicId, hostname: resolved.hostname }
+    if (resolved.testId) {
+      const { db } = await import('./db/client')
+      const { sql } = await import('drizzle-orm')
+      await db.execute(sql`UPDATE integration_tests SET evidence=evidence || ${JSON.stringify({ channel })}::jsonb WHERE id=${resolved.testId}`)
+    }
+    let maxActiveCalls = 3
+    let queueGroup = 'clinic_default'
+    if (tenant) {
+      const { getSetting } = await import('./db/repositories/settings')
+      await runWithTenantContext(tenant, async () => {
+        const rawConfigured = await getSetting('ai.max_active_phone_calls')
+        const configured = rawConfigured === null ? Number.NaN : Number(rawConfigured)
+        maxActiveCalls = Number.isFinite(configured) ? Math.min(5, Math.max(2, configured)) : 3
+      })
+      queueGroup = `clinic_${tenant.clinicId.replace(/[^a-zA-Z0-9_]/g, '')}`
+    }
+    if (uuid && caller && tenant) {
+      callerRegistry.set(uuid, { phone: caller, channel, direction, clinicId: tenant.clinicId, hostname: tenant.hostname })
+      setTimeout(() => callerRegistry.delete(uuid), 5 * 60 * 1000)
+    }
+    return tenant
+      ? { ok: true, maxActiveCalls, queueGroup, clinicId: tenant.clinicId }
+      : { ok: false, error: 'Klinik domaini tanımlı değil', maxActiveCalls: 3, queueGroup }
+  })
+
+  // ── Outbound Calls ─────────────────────────────────────────────────────────
+  .post('/api/admin/calls/outbound', async ({ body, cookie, request, set }) => {
+    const b = (body ?? {}) as { phone?: string; to?: string; target?: string; patientId?: string }
+    const phone = b.phone || b.to || b.target
+    if (!phone && !b.patientId) { set.status = 400; return { error: 'phone numarası zorunludur' } }
+    const clinicId = requireClinicId()
+    const { db } = await import('./db/client')
+    const { patients, patientConsentPreferences } = await import('./db/schema')
+    const { and, eq, sql } = await import('drizzle-orm')
+    const { hasPatientConsent, grantInClinicPatientConsent } = await import('./services/patient-consent')
+    const digits = String(phone || '').replace(/\D/g, '')
+    const last10 = digits.length >= 10 ? digits.slice(-10) : ''
+
+    let matchedPatient: { id: string; phone: string | null } | undefined
+    try {
+      if (b.patientId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b.patientId)) {
+        const rows = await db.select({ id: patients.id, phone: patients.phone }).from(patients).where(and(eq(patients.clinicId, clinicId), eq(patients.id, b.patientId))).limit(1)
+        matchedPatient = rows[0]
+      }
+      if (!matchedPatient && last10.length === 10) {
+        const rows = await db.select({ id: patients.id, phone: patients.phone }).from(patients).where(
+          and(
+            eq(patients.clinicId, clinicId),
+            sql`right(regexp_replace(coalesce(${patients.phone}, ''), '\\D', '', 'g'), 10) = ${last10}`
+          )
+        ).limit(1)
+        matchedPatient = rows[0]
+      }
+    } catch {
+      set.status = 400
+      return { error: 'Telefon numarası geçersiz' }
+    }
+
+    const dialPhone = phone || matchedPatient?.phone || ''
+    if (dialPhone.replace(/\D/g, '').length < 10) {
+      set.status = 400
+      return { error: 'Telefon numarası geçersiz' }
+    }
+
+    if (matchedPatient) {
+      const [pref] = await db.select({ status: patientConsentPreferences.status })
+        .from(patientConsentPreferences)
+        .where(and(
+          eq(patientConsentPreferences.clinicId, clinicId),
+          eq(patientConsentPreferences.patientId, matchedPatient.id),
+          eq(patientConsentPreferences.channel, 'assistant_call'),
+        ))
+        .limit(1)
+      if (pref && (pref.status === 'refused' || pref.status === 'revoked')) {
+        set.status = 403
+        return { error: 'Hasta asistan arama iznini reddetmiş veya iptal etmiş' }
+      }
+      const hasConsent = await hasPatientConsent(clinicId, matchedPatient.id, 'assistant_call')
+      if (!hasConsent) {
+        const authUser = await authenticateRequest(cookie.token?.value as string | undefined, request).catch(() => null)
+        if (authUser?.id) {
+          await grantInClinicPatientConsent({
+            patientId: matchedPatient.id,
+            clinicId,
+            userId: authUser.id,
+          }).catch(() => {})
+        }
+      }
+    }
+
+    const { initiateOutboundCall } = await import('./services/asterisk-ami')
+    const res = await initiateOutboundCall(dialPhone, clinicId)
+    if (!res.success) { set.status = 500; return { error: res.message } }
+    return { success: true, message: 'Dış arama başlatıldı' }
+  })
+
+  .get('/api/events', ({ set }) => {
+    const clientId = randomUUID().slice(0, 8)
+    const clinicId = requireClinicId()
+    set.headers['Content-Type'] = 'text/event-stream'
+    set.headers['Cache-Control'] = 'no-cache'
+    set.headers['Connection'] = 'keep-alive'
+    set.headers['Access-Control-Allow-Origin'] = '*'
+    return new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder()
+        const send = (data: string) => controller.enqueue(enc.encode(data))
+        const client: SseClient = { id: clientId, clinicId, send }
+        sseClients.add(client)
+        send(`: connected ${clientId}\n\n`)
+        const hb = setInterval(() => {
+          try { send(`: ping\n\n`) } catch { clearInterval(hb); sseClients.delete(client) }
+        }, 20000)
+          ; (client as any).hb = hb
+      },
+      cancel() {
+        for (const c of sseClients) {
+          if (c.id === clientId) { clearInterval((c as any).hb); sseClients.delete(c); break }
+        }
+      },
+    })
+  })
+
+  // User-scoped SSE for notifications
+  .get('/api/notifications/stream', async ({ cookie, set }) => {
+    const { authenticateRequest } = await import('./middleware/auth')
+    const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
+    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
+
+    set.headers['Content-Type'] = 'text/event-stream'
+    set.headers['Cache-Control'] = 'no-cache'
+    set.headers['Connection'] = 'keep-alive'
+
+    const { registerSSEClient } = await import('./services/notification')
+    return new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder()
+        const send = (data: string) => { try { controller.enqueue(enc.encode(data)) } catch { } }
+        const unregister = registerSSEClient(user.id, send)
+        send(`: connected\n\n`)
+        const hb = setInterval(() => send(`: ping\n\n`), 25000)
+          ; (controller as any).__cleanup = () => { clearInterval(hb); unregister() }
+      },
+      cancel(controller: any) {
+        controller?.__cleanup?.()
+      },
+    })
+  })
+
+  .get('/api/recordings', async () => await listRecordings())
+
+  .get('/api/recordings/:filename', async ({ params, set }) => {
+    try {
+      const recording = await getRecordingByFilename(params.filename)
+      if (!recording) { set.status = 404; return 'Not found' }
+      const filePath = resolve(RECORDINGS_DIR, params.filename)
+      if (!filePath.startsWith(RECORDINGS_DIR)) { set.status = 403; return 'Forbidden' }
+      set.headers['Content-Type'] = 'audio/wav'
+      set.headers['Content-Disposition'] = `inline; filename="${params.filename}"`
+      return createReadStream(filePath)
+    } catch { set.status = 404; return 'Not found' }
+  })
+
+  .delete('/api/recordings/:id', async ({ params, set }) => {
+    const deleted = await deleteRecording(params.id)
+    if (!deleted) { set.status = 404; return { error: 'Recording not found' } }
+    return { success: true, id: params.id }
+  })
+
+  // ── Google Calendar OAuth ──────────────────────────────────────────────────
+  // Sabit callback URL (Google Console'a kayıtlı) + state parametresi ile
+  // dinamik geri dönüş orijini. Böylece kullanıcı localhost, ngrok-X, ngrok-Y
+  // gibi farklı kaynaklardan OAuth başlatsa bile flow tek bir kayıtlı URI ile
+  // çalışır ve sonunda geldiği yere döner.
+  .get('/api/admin/settings/calendar/auth', ({ request, set }) => {
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID
+    if (!clientId) {
+      set.status = 400
+      return { error: 'GOOGLE_OAUTH_CLIENT_ID tanımlı değil' }
+    }
+
+    const redirectUri =
+      process.env.OAUTH_REDIRECT_URI
+      || `${process.env.APP_URL || 'http://localhost:3001'}/api/admin/settings/calendar/callback`
+
+    // Kullanıcının geldiği orijini state'e koy (token alındıktan sonra dönüş için)
+    const referer = request.headers.get('referer') || request.headers.get('origin') || ''
+    let returnOrigin = process.env.CLIENT_APP_URL || 'http://localhost:3000'
+    try { if (referer) returnOrigin = new URL(referer).origin } catch { }
+    const tenant = currentTenant()!
+    const state = signOAuthState({ clinicId: tenant.clinicId, hostname: tenant.hostname, returnOrigin })
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: [
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/calendar.readonly',
+        'https://www.googleapis.com/auth/userinfo.email',
+      ].join(' '),
+      access_type: 'offline',
+      prompt: 'consent',
+      state,
+    })
+    return { url: `https://accounts.google.com/o/oauth2/v2/auth?${params}` }
+  })
+
+  .get('/api/admin/settings/calendar/callback', async ({ query, redirect, set }) => {
+    const code = query.code as string
+    const stateRaw = query.state as string | undefined
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID!
+    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET!
+
+    // state'ten dönüş orijinini çöz, fallback olarak env'i kullan
+    let clientUrl = process.env.CLIENT_APP_URL || 'http://localhost:3000'
+    const oauthState = verifyOAuthState(stateRaw)
+    if (!oauthState) {
+      set.status = 400
+      return { error: 'Geçersiz veya süresi geçmiş OAuth state' }
+    }
+    clientUrl = oauthState.returnOrigin
+
+    const redirectUri =
+      process.env.OAUTH_REDIRECT_URI
+      || `${process.env.APP_URL || 'http://localhost:3001'}/api/admin/settings/calendar/callback`
+
+    if (!code) {
+      set.status = 400
+      return redirect(`${clientUrl}/admin?calendar=error`)
+    }
+    try {
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code' }),
+      })
+      const tokens = await tokenRes.json() as { access_token: string; refresh_token?: string; error?: string; error_description?: string }
+      if (tokens.error) {
+        console.error('[Calendar] Token exchange hatası:', tokens.error, tokens.error_description)
+        return redirect(`${clientUrl}/admin?calendar=error&reason=${encodeURIComponent(tokens.error)}`)
+      }
+      const patch: { refreshToken?: string; email?: string } = {}
+      if (tokens.refresh_token) patch.refreshToken = tokens.refresh_token
+      try {
+        const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: { Authorization: `Bearer ${tokens.access_token}` },
+        })
+        const userInfo = await userRes.json() as { email?: string }
+        if (userInfo.email) patch.email = userInfo.email
+      } catch { }
+      await runWithTenantContext({ clinicId: oauthState.clinicId, hostname: oauthState.hostname }, () => setCalendarSettings(patch))
+      console.log('[Calendar] OAuth bağlantısı kuruldu:', patch.email)
+      return redirect(`${clientUrl}/admin?calendar=connected`)
+    } catch (e) {
+      console.error('[Calendar] OAuth callback hatası:', e)
+      return redirect(`${clientUrl}/admin?calendar=error`)
+    }
+  })
+
+  .get('/api/admin/settings/calendar/status', async () => {
+    const s = await getCalendarSettings()
+    return {
+      connected: !!s.refreshToken,
+      authType: s.refreshToken ? 'oauth2' : null,
+      email: s.email ?? null,
+      calendarId: s.calendarId ?? null,
+    }
+  })
+
+  .delete('/api/admin/settings/calendar/disconnect', async () => {
+    await disconnectCalendar()
+    return { success: true }
+  })
+
+  .post('/api/admin/settings/calendar', async ({ body }) => {
+    const { calendarId } = body as { calendarId: string }
+    await setCalendarSettings({ calendarId })
+    return { success: true }
+  })
+
+  .put('/api/admin/settings/calendar', async ({ body }) => {
+    const { calendarId } = body as { calendarId: string }
+    await setCalendarSettings({ calendarId })
+    return { success: true }
+  })
+
+  .get('/api/admin/settings/calendar/calendars', async () => {
+    try {
+      const s = await getCalendarSettings()
+      if (!s.refreshToken) return { calendars: [] }
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: s.refreshToken,
+          client_id: process.env.GOOGLE_OAUTH_CLIENT_ID!,
+          client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET!,
+        }),
+      })
+      const { access_token } = await tokenRes.json() as { access_token: string }
+      const calRes = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
+        headers: { Authorization: `Bearer ${access_token}` },
+      })
+      const data = await calRes.json() as { items?: Array<{ id: string; summary: string }> }
+      return { calendars: (data.items ?? []).map(c => ({ id: c.id, name: c.summary })) }
+    } catch { return { calendars: [] } }
+  })
+
+  // ── AI Model Settings ───────────────────────────────────────────────────────
+  .get('/api/admin/settings/ai', async () => {
+    const { LIVE_MODEL_OPTIONS } = await import('./services/live-model-profile')
+    return {
+      current: await resolveLiveModel(),
+      default: DEFAULT_LIVE_MODEL,
+      available: ALLOWED_LIVE_MODELS,
+      models: LIVE_MODEL_OPTIONS,
+    }
+  })
+
+  .put('/api/admin/settings/ai', async ({ body, set }) => {
+    const { model } = (body ?? {}) as { model?: string }
+    if (!model || !(ALLOWED_LIVE_MODELS as readonly string[]).includes(model)) {
+      set.status = 400
+      return { error: 'Geçersiz model. İzin verilen: ' + ALLOWED_LIVE_MODELS.join(', ') }
+    }
+    const saved = await setAiModel(model)
+    return { success: true, ...saved }
+  })
+
+  // ── Greeting Settings ─────────────────────────────────────────────────────
+  .get('/api/admin/settings/greeting', async () => {
+    const greeting = await getGreeting('inbound')
+    const greetingOutbound = await getGreeting('outbound')
+    return {
+      greeting: greeting ?? DEFAULT_GREETING,
+      greetingOutbound: greetingOutbound ?? DEFAULT_GREETING
+    }
+  })
+
+  // ── Clinic WhatsApp Location & Address Geocode Settings ──────────────────
+  .get('/api/admin/settings/whatsapp-location', async () => {
+    const [address, title, lat, lng, locationUrl, locationMessage] = await Promise.all([
+      getSetting('whatsapp.location_address'),
+      getSetting('whatsapp.location_title'),
+      getSetting('whatsapp.location_lat'),
+      getSetting('whatsapp.location_lng'),
+      getSetting('whatsapp.location_url'),
+      getSetting('whatsapp.location_message'),
+    ])
+    return {
+      address: address ?? '',
+      title: title ?? '',
+      lat: lat ?? '',
+      lng: lng ?? '',
+      locationUrl: locationUrl ?? '',
+      locationMessage: locationMessage ?? '📍 Kliniğimizin konumu ve açık adres bilgileri:',
+    }
+  })
+
+  .put('/api/admin/settings/whatsapp-location', async ({ body }) => {
+    const input = (body ?? {}) as {
+      address?: string
+      title?: string
+      lat?: string | number
+      lng?: string | number
+      locationUrl?: string
+      locationMessage?: string
+    }
+    const address = String(input.address ?? '').trim()
+    const title = String(input.title ?? '').trim()
+    const lat = input.lat !== undefined && input.lat !== null ? String(input.lat).trim() : ''
+    const lng = input.lng !== undefined && input.lng !== null ? String(input.lng).trim() : ''
+    let locationUrl = String(input.locationUrl ?? '').trim()
+    if (!locationUrl && lat && lng) {
+      locationUrl = `https://www.google.com/maps?q=${encodeURIComponent(`${lat},${lng}`)}`
+    } else if (!locationUrl && address) {
+      locationUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+    }
+    const locationMessage = String(input.locationMessage ?? '📍 Kliniğimizin konumu ve açık adres bilgileri:').trim()
+
+    await Promise.all([
+      setSetting('whatsapp.location_address', address),
+      setSetting('whatsapp.location_title', title),
+      setSetting('whatsapp.location_lat', lat),
+      setSetting('whatsapp.location_lng', lng),
+      setSetting('whatsapp.location_url', locationUrl),
+      setSetting('whatsapp.location_message', locationMessage),
+    ])
+
+    return {
+      success: true,
+      address,
+      title,
+      lat,
+      lng,
+      locationUrl,
+      locationMessage,
+    }
+  })
+
+  .get('/api/admin/geocode', async ({ query }) => {
+    const q = String((query as Record<string, unknown>)?.q ?? '').trim()
+    if (q.length < 2) return { results: [] }
+    const fetchNominatim = async (countryFilter: boolean) => {
+      const params = new URLSearchParams({
+        format: 'jsonv2',
+        addressdetails: '1',
+        limit: '6',
+        'accept-language': 'tr',
+        q,
+      })
+      if (countryFilter) params.set('countrycodes', 'tr')
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+        headers: {
+          'User-Agent': 'VoiceAIClinicPlatform/1.0 (contact@thinpine.com)',
+          'Accept-Language': 'tr-TR,tr;q=0.9',
+        },
+      })
+      if (!res.ok) return []
+      const data = await res.json().catch(() => [])
+      return Array.isArray(data) ? data : []
+    }
+    try {
+      let raw = await fetchNominatim(true)
+      if (raw.length === 0) {
+        raw = await fetchNominatim(false)
+      }
+      const results = raw.map((item: any) => {
+        const lat = String(item.lat ?? '')
+        const lon = String(item.lon ?? '')
+        const displayName = String(item.display_name ?? '')
+        const shortTitle = String(item.name || displayName.split(',')[0] || 'Klinik Konumu').trim()
+        return {
+          title: shortTitle,
+          address: displayName,
+          lat,
+          lng: lon,
+          locationUrl: lat && lon
+            ? `https://www.google.com/maps?q=${encodeURIComponent(`${lat},${lon}`)}`
+            : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(displayName)}`,
+        }
+      })
+      return { results }
+    } catch {
+      return { results: [] }
+    }
+  })
+
+  .put('/api/admin/settings/greeting', async ({ body, set }) => {
+    const { greeting, greetingOutbound } = (body ?? {}) as { greeting?: string; greetingOutbound?: string }
+    let updatedInbound = undefined
+    let updatedOutbound = undefined
+    if (greeting !== undefined) {
+      if (greeting.trim().length < 3) {
+        set.status = 400
+        return { error: 'Gelen Karşılama mesajı en az 3 karakter olmalıdır.' }
+      }
+      await setGreeting(greeting.trim(), 'inbound')
+      updatedInbound = greeting.trim()
+    }
+    if (greetingOutbound !== undefined) {
+      if (greetingOutbound.trim().length < 3) {
+        set.status = 400
+        return { error: 'Giden Karşılama mesajı en az 3 karakter olmalıdır.' }
+      }
+      await setGreeting(greetingOutbound.trim(), 'outbound')
+      updatedOutbound = greetingOutbound.trim()
+    }
+    return { success: true, greeting: updatedInbound, greetingOutbound: updatedOutbound }
+  })
+
+  // ── Outbound Caller ID Settings ──────────────────────────────────────────────
+  .get('/api/admin/settings/outbound-caller-id', async () => {
+    const clinicId = currentClinicId()
+    const { getSetting, getOutboundCallerId } = await import('./db/repositories/settings')
+    const savedSetting = await getSetting('outbound_caller_id')
+    const assignedNumbers: string[] = []
+    let providerCallerId = ''
+
+    const toLocalPhone = (raw: string): string => {
+      const digits = String(raw || '').replace(/\D/g, '')
+      if (digits.length === 12 && digits.startsWith('90')) return `0${digits.slice(2)}`
+      if (digits.length === 10 && digits.startsWith('5')) return `0${digits}`
+      if (digits.length === 10) return `0${digits}`
+      return digits || raw.trim()
+    }
+
+    if (clinicId) {
+      try {
+        const { getRow, decrypt } = await import('./integrations/managed/store')
+        const { db } = await import('./db/client')
+        const { sql } = await import('drizzle-orm')
+        const row = await getRow(clinicId, 'phone')
+        const activeCfg = row?.active ? decrypt(row.active as any) : null
+        const draftCfg = row?.draft ? decrypt(row.draft as any) : null
+        const cfg = activeCfg || draftCfg
+        if (cfg?.numbers && Array.isArray(cfg.numbers)) {
+          for (const n of cfg.numbers) {
+            const local = toLocalPhone(String(n))
+            if (local && !assignedNumbers.includes(local)) assignedNumbers.push(local)
+          }
+        }
+        if (cfg?.callerId) {
+          providerCallerId = toLocalPhone(String(cfg.callerId))
+          if (providerCallerId && !assignedNumbers.includes(providerCallerId)) {
+            assignedNumbers.unshift(providerCallerId)
+          }
+        }
+        const phoneRows = await db.execute(sql`SELECT phone_number, is_primary FROM clinic_phone_numbers WHERE clinic_id = ${clinicId} ORDER BY is_primary DESC`)
+        for (const pr of phoneRows as any[]) {
+          const local = toLocalPhone(String(pr.phone_number || ''))
+          if (local && !assignedNumbers.includes(local)) assignedNumbers.push(local)
+          if (!providerCallerId && pr.is_primary && local) providerCallerId = local
+        }
+      } catch {}
+    }
+
+    const effectiveCallerId =
+      (savedSetting && (!assignedNumbers.length || assignedNumbers.includes(savedSetting)) ? savedSetting : '') ||
+      providerCallerId ||
+      savedSetting ||
+      assignedNumbers[0] ||
+      (await getOutboundCallerId())
+    return { callerId: effectiveCallerId, assignedNumbers }
+  })
+
+  .put('/api/admin/settings/outbound-caller-id', async ({ body, set }) => {
+    const { callerId } = (body ?? {}) as { callerId?: string }
+    if (!callerId || !callerId.trim()) {
+      set.status = 400
+      return { error: 'Caller ID boş olamaz.' }
+    }
+    const cleanCallerId = callerId.trim()
+    const { setOutboundCallerId } = await import('./db/repositories/settings')
+    const saved = await setOutboundCallerId(cleanCallerId)
+
+    const clinicId = currentClinicId()
+    if (clinicId) {
+      try {
+        const { getRow, decrypt, encrypt } = await import('./integrations/managed/store')
+        const { phone: toE164 } = await import('./integrations/managed/model')
+        const { db } = await import('./db/client')
+        const { sql } = await import('drizzle-orm')
+        const e164CallerId = toE164(cleanCallerId)
+        const row = await getRow(clinicId, 'phone')
+        if (row) {
+          const draftCfg = row.draft ? decrypt(row.draft as any) : null
+          const activeCfg = row.active ? decrypt(row.active as any) : null
+          const nextDraft = draftCfg
+            ? encrypt({
+                ...draftCfg,
+                callerId: e164CallerId,
+                numbers: Array.isArray(draftCfg.numbers)
+                  ? (draftCfg.numbers.includes(e164CallerId) ? draftCfg.numbers : [...draftCfg.numbers, e164CallerId])
+                  : [e164CallerId],
+              })
+            : null
+          const nextActive = activeCfg
+            ? encrypt({
+                ...activeCfg,
+                callerId: e164CallerId,
+                numbers: Array.isArray(activeCfg.numbers)
+                  ? (activeCfg.numbers.includes(e164CallerId) ? activeCfg.numbers : [...activeCfg.numbers, e164CallerId])
+                  : [e164CallerId],
+              })
+            : null
+          await db.execute(sql`
+            UPDATE managed_integrations
+            SET draft = COALESCE(${nextDraft ? JSON.stringify(nextDraft) : null}::jsonb, draft),
+                active = CASE WHEN active IS NOT NULL AND ${nextActive ? JSON.stringify(nextActive) : null}::jsonb IS NOT NULL THEN ${nextActive ? JSON.stringify(nextActive) : null}::jsonb ELSE active END,
+                updated_at = now()
+            WHERE clinic_id = ${clinicId} AND service = 'phone'
+          `)
+          await db.execute(sql`UPDATE clinic_phone_numbers SET is_primary = (phone_number = ${e164CallerId}) WHERE clinic_id = ${clinicId}`)
+        }
+      } catch {}
+    }
+
+    return { success: true, ...saved }
+  })
+
+  // ── Clinic Integrations (/api/admin/integrations) ───────────────────────────
+  .get('/api/admin/integrations', async () => {
+    const { integrationView } = await import('./integrations/managed/store')
+    return integrationView(requireClinicId(), true)
+  })
+  .put('/api/admin/integrations/:service', async ({ params, body, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { saveConfig } = await import('./integrations/managed/store')
+      return await saveConfig(requireClinicId(), serviceOf(params.service), (body ?? {}) as Record<string, unknown>, user?.id || 'clinic-admin')
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Entegrasyon ayarları kaydedilemedi.' }
+    }
+  })
+  .post('/api/admin/integrations/:service/test', async ({ params, body, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { beginTest } = await import('./integrations/managed/workflow')
+      return await beginTest(requireClinicId(), serviceOf(params.service), (body ?? {}) as Record<string, unknown>, user?.id || 'clinic-admin')
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Bağlantı testi başlatılamadı.' }
+    }
+  })
+  .post('/api/admin/integrations/:service/tests/:testId/confirm', async ({ params, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { confirmTest } = await import('./integrations/managed/workflow')
+      return await confirmTest(requireClinicId(), serviceOf(params.service), params.testId, user?.id || 'clinic-admin')
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Test doğrulaması tamamlanamadı.' }
+    }
+  })
+  .post('/api/admin/integrations/:service/tests/:testId/cancel', async ({ params, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { cancelTest } = await import('./integrations/managed/workflow')
+      return await cancelTest(requireClinicId(), serviceOf(params.service), params.testId, user?.id || 'clinic-admin')
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Test iptal edilemedi.' }
+    }
+  })
+  .post('/api/admin/integrations/:service/activate', async ({ params, body, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { setEnabled } = await import('./integrations/managed/workflow')
+      const payload = (body ?? {}) as { revision?: number; force?: boolean }
+      return await setEnabled(requireClinicId(), serviceOf(params.service), true, Number(payload.revision || 0), user?.id || 'clinic-admin', payload.force !== false)
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Entegrasyon etkinleştirilemedi.' }
+    }
+  })
+  .post('/api/admin/integrations/:service/deactivate', async ({ params, body, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { setEnabled } = await import('./integrations/managed/workflow')
+      const payload = (body ?? {}) as { revision?: number }
+      return await setEnabled(requireClinicId(), serviceOf(params.service), false, Number(payload.revision || 0), user?.id || 'clinic-admin')
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Entegrasyon devre dışı bırakılamadı.' }
+    }
+  })
+  .delete('/api/admin/integrations/:service', async ({ params, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const { serviceOf } = await import('./integrations/managed/model')
+      const { removeConfig } = await import('./integrations/managed/store')
+      return await removeConfig(requireClinicId(), serviceOf(params.service), user?.id || 'clinic-admin')
+    } catch (err: any) {
+      set.status = err?.status || 400
+      return { error: err?.message || 'Entegrasyon kaldırılamadı.' }
+    }
+  })
+
+  // ── Connection Mode Settings ─────────────────────────────────────────────────
+  .get('/api/admin/settings/connection-mode', async () => {
+    const mode = await getConnectionMode()
+    return { mode }
+  })
+
+  .put('/api/admin/settings/connection-mode', async ({ body, set }) => {
+    const { mode } = (body ?? {}) as { mode?: string }
+    if (mode !== 'server' && mode !== 'direct') {
+      set.status = 400
+      return { error: 'Geçersiz mod. İzin verilen: server, direct' }
+    }
+    const saved = await setConnectionMode(mode)
+    return { success: true, ...saved }
+  })
+
+  // ── Branding Settings ──────────────────────────────────────────────────────
+  .get('/api/admin/settings/branding', async () => {
+    return getBranding()
+  })
+
+  .put('/api/admin/settings/branding', async ({ body, set }) => {
+    const { title, subtitle, logoUrl } = (body ?? {}) as { title?: string; subtitle?: string; logoUrl?: string }
+    if (!title && !subtitle && !logoUrl) {
+      set.status = 400
+      return { error: 'En az bir alan gerekli (title, subtitle, logoUrl)' }
+    }
+    const result = await setBranding({ title, subtitle, logoUrl })
+    return { success: true, ...result }
+  })
+
+  .post('/api/admin/settings/logo-upload', async ({ body, set }) => {
+    const { file } = body as { file?: File }
+    if (!file || file.size === 0) {
+      set.status = 400
+      return { error: 'Geçersiz dosya' }
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      set.status = 413
+      return { error: 'Logo en fazla 2 MB olabilir.' }
+    }
+    const allowedTypes: Record<string, string> = {
+      'image/png': 'png',
+      'image/jpeg': 'jpg',
+      'image/webp': 'webp',
+    }
+    const ext = allowedTypes[file.type]
+    if (!ext) {
+      set.status = 415
+      return { error: 'Yalnızca PNG, JPG ve WEBP logolar desteklenir.' }
+    }
+
+    const clinicId = requireClinicId()
+    const fileName = `logo_${randomUUID()}.${ext}`
+    const clinicDirectory = resolve(PUBLIC_DIR, 'tenant-assets', clinicId, 'branding')
+    mkdirSync(clinicDirectory, { recursive: true })
+    const dest = resolve(clinicDirectory, fileName)
+
+    const arrayBuffer = await file.arrayBuffer()
+    const buf = Buffer.from(arrayBuffer)
+    writeFileSync(dest, buf)
+
+    const base64Data = `data:${file.type};base64,${buf.toString('base64')}`
+    const logoUrl = `/api/branding/logo/${fileName}`
+    await setBranding({ logoUrl })
+    const { setSetting } = await import('./db/repositories/settings')
+    await setSetting('branding.logo_data', base64Data)
+
+    return { success: true, logoUrl }
+  })
+
+  // ── Prompt Section Settings ─────────────────────────────────────────────────
+  .get('/api/admin/settings/prompts', async () => {
+    const { getEffectivePromptSections } = await import('./prompts/registry')
+    const effective = await getEffectivePromptSections()
+    return PROMPT_SECTIONS.map(section => {
+      const value = effective[section.key] ?? section.defaultValue
+      return {
+        key: section.key,
+        label: section.label,
+        description: section.description,
+        sortOrder: section.sortOrder,
+        value,
+        isCustom: value !== section.defaultValue,
+        updatedAt: null,
+      }
+    })
+  })
+
+  .put('/api/admin/settings/prompts/:key', async ({ set }) => {
+    set.status = 403
+    return { error: 'Sistem talimatları yalnızca platform yöneticisi tarafından PineClinic panelinden değiştirilebilir.' }
+  })
+
+  .delete('/api/admin/settings/prompts/:key', async ({ set }) => {
+    set.status = 403
+    return { error: 'Sistem talimatları yalnızca platform yöneticisi tarafından PineClinic panelinden değiştirilebilir.' }
+  })
+
+  .post('/api/admin/settings/prompts/preview', async () => {
+    const greeting = await getGreeting() ?? DEFAULT_GREETING
+    const dateHeader = `BUGÜNÜN TARİHİ: ${getTodayTurkish()}. Randevu tarihlerini söylerken mutlaka bu tarihe göre gün hesapla — asla tahmin yapma.\n\n`
+    const prompt = await buildSystemPrompt(greeting)
+    return { prompt: dateHeader + prompt }
+  })
+
+  // ── Transfer Phonebook Settings ─────────────────────────────────────────────
+  .get('/api/admin/settings/transfer-phonebook', async () => {
+    const { getSetting } = await import('./db/repositories/settings')
+    const raw = await getSetting('transfer.phonebook')
+    if (!raw) {
+      // Default phonebook seeds if not configured yet
+      return [
+        { label: 'Resepsiyon', number: '08503096119' },
+        { label: 'Banko', number: '08503096119' },
+        { label: 'Acil Hat', number: '08503096119' }
+      ]
+    }
+    try { return JSON.parse(raw) } catch { return [] }
+  })
+
+  .put('/api/admin/settings/transfer-phonebook', async ({ body, set }) => {
+    const { phonebook } = (body ?? {}) as { phonebook?: Array<{ label: string; number: string }> }
+    if (!Array.isArray(phonebook)) {
+      set.status = 400
+      return { error: 'phonebook dizisi zorunludur' }
+    }
+    const { setSetting } = await import('./db/repositories/settings')
+    await setSetting('transfer.phonebook', JSON.stringify(phonebook))
+    return { success: true, phonebook }
+  })
+
+  // ── Tool Description Settings ───────────────────────────────────────────────
+  .get('/api/admin/settings/tools', async () => {
+    const { getToolDescriptions } = await import('./db/repositories/settings')
+    const { TOOL_DESCRIPTIONS, TOOL_PARAM_DESCRIPTIONS, getDefaultToolDescription } = await import('./data/default-tools')
+    const dbDescs = await getToolDescriptions()
+    const allItems = [
+      ...TOOL_DESCRIPTIONS.map(t => ({
+        key: t.key,
+        toolName: t.toolName,
+        label: t.label,
+        type: 'tool' as const,
+        value: dbDescs[t.key] ?? t.defaultDescription,
+        isCustom: !!dbDescs[t.key],
+      })),
+      ...TOOL_PARAM_DESCRIPTIONS.map(p => ({
+        key: p.key,
+        toolName: p.toolName,
+        label: `${p.toolName} → ${p.label}`,
+        type: 'param' as const,
+        value: dbDescs[p.key] ?? p.defaultDescription,
+        isCustom: !!dbDescs[p.key],
+      })),
+    ]
+    // Include custom_fields entry so frontend can load it
+    if (dbDescs['tools.custom_fields']) {
+      allItems.push({
+        key: 'tools.custom_fields',
+        toolName: 'randevuOlustur',
+        label: 'Özel Alanlar JSON',
+        type: 'param' as const,
+        value: dbDescs['tools.custom_fields'],
+        isCustom: true,
+      })
+    }
+    return allItems
+  })
+
+  .put('/api/admin/settings/tools/:key', async ({ params, body, set }) => {
+    const { key } = params
+    const { value } = (body ?? {}) as { value?: string }
+    if (!key.startsWith('tools.')) { set.status = 400; return { error: 'Geçersiz key' } }
+    if (!value) { set.status = 400; return { error: 'Değer boş olamaz' } }
+    // custom_fields can be "[]" (2 chars), other keys need 3+
+    if (key !== 'tools.custom_fields' && value.trim().length < 3) { set.status = 400; return { error: 'Değer en az 3 karakter olmalı' } }
+    const { setToolDescription } = await import('./db/repositories/settings')
+    await setToolDescription(key, value.trim())
+    return { success: true, key, updatedAt: new Date().toISOString() }
+  })
+
+  .delete('/api/admin/settings/tools/:key', async ({ params, set }) => {
+    const { key } = params
+    if (!key.startsWith('tools.')) { set.status = 400; return { error: 'Geçersiz key' } }
+    const { resetToolDescription } = await import('./db/repositories/settings')
+    const { getDefaultToolDescription } = await import('./data/default-tools')
+    await resetToolDescription(key)
+    return { success: true, key, value: getDefaultToolDescription(key) }
+  })
+
+  // ── Voice AI Settings ────────────────────────────────────────────────────────
+  .get('/api/admin/settings/voice', async () => {
+    const { resolveVoiceSettings } = await import('./services/voice-settings')
+    return resolveVoiceSettings()
+  })
+  .put('/api/admin/settings/voice', async ({ body, set }) => {
+    const { validateVoiceSettings, saveVoiceSettings } = await import('./services/voice-settings')
+    const config = (body ?? {}) as Record<string, unknown>
+    const validation = validateVoiceSettings(config)
+    if (!validation.valid) {
+      set.status = 400
+      return { error: validation.error || 'Geçersiz sesli AI ayarları', fieldErrors: validation.fieldErrors }
+    }
+    const saved = await saveVoiceSettings(config)
+    return { success: true, settings: saved }
+  })
+
+  .get('/api/admin/settings/roles', async () => {
+    const { getSetting } = await import('./db/repositories/settings')
+    let permsStr = await getSetting('role_tab_permissions')
+    let perms = {}
+    if (permsStr) {
+      try { perms = JSON.parse(permsStr) } catch (e) { }
+    } else {
+      // Default permissions if none exist
+      perms = {
+        hekim: ['calendar', 'patients', 'knowledge'],
+        sekreter: ['calendar', 'patients', 'payments'],
+        asistan: ['calendar', 'patients']
+      }
+    }
+    return perms
+  })
+  .put('/api/admin/settings/roles', async ({ body }) => {
+    const { setSetting } = await import('./db/repositories/settings')
+    await setSetting('role_tab_permissions', JSON.stringify(body))
+    return { success: true }
+  })
+  .get('/api/admin/settings/notification-policy', async () => {
+    const { getNotificationPolicy } = await import('./db/repositories/settings')
+    return await getNotificationPolicy()
+  })
+  .put('/api/admin/settings/notification-policy', async ({ body, set, cookie, request }) => {
+    const isAdmin = cookie.admin_auth?.value === 'true'
+    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator', 'host'].includes(user.role)) {
+      set.status = 403
+      return { error: 'Bildirim öncelik ayarlarını yalnızca yönetici değiştirebilir' }
+    }
+    const { setNotificationPolicy } = await import('./db/repositories/settings')
+    const policy = await setNotificationPolicy((body || {}) as Record<string, unknown>)
+    return { success: true, policy }
+  })
+  .get('/api/dental/working-hours', async () => {
+    const { getClinicWorkingHours } = await import('./db/repositories/settings')
+    return await getClinicWorkingHours()
+  })
+  .get('/api/admin/settings/working-hours', async () => {
+    const { getClinicWorkingHours } = await import('./db/repositories/settings')
+    return await getClinicWorkingHours()
+  })
+  .put('/api/admin/settings/working-hours', async ({ body, set, cookie, request }) => {
+    const isAdmin = cookie.admin_auth?.value === 'true'
+    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    const { hasClinicStaffPermission } = await import('./services/staff-invitations')
+    if (!user || !(await hasClinicStaffPermission(requireClinicId(), user.role, 'editClinicWorkingHours'))) {
+      set.status = 403
+      return { error: 'Klinik genel mesai saatlerini değiştirme yetkiniz bulunmuyor' }
+    }
+    const { setClinicWorkingHours } = await import('./db/repositories/settings')
+    const workingHours = await setClinicWorkingHours((body || {}) as Record<string, unknown>)
+    return { success: true, ...workingHours, workingHours }
+  })
+  .get('/api/dental/staff-permissions', async ({ cookie, request }) => {
+    const isAdmin = cookie.admin_auth?.value === 'true'
+    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    const { getClinicStaffPermissions } = await import('./services/staff-invitations')
+    const config = await getClinicStaffPermissions(requireClinicId())
+    const role = user?.role || 'yonetici'
+    const effective =
+      role === 'yonetici' || role === 'moderator'
+        ? {
+          viewShiftPlanner: true,
+          editShifts: true,
+          manageLeaves: true,
+          editClinicWorkingHours: true,
+          manageStaff: true,
+        }
+        : role === 'hekim'
+          ? config.hekim
+          : role === 'host'
+            ? config.host
+            : {
+              viewShiftPlanner: true,
+              editShifts: false,
+              manageLeaves: false,
+              editClinicWorkingHours: false,
+              manageStaff: false,
+            }
+    return { role, config, effective }
+  })
+  .get('/api/admin/settings/staff-permissions', async () => {
+    const { getClinicStaffPermissions } = await import('./services/staff-invitations')
+    return await getClinicStaffPermissions(requireClinicId())
+  })
+  .put('/api/admin/settings/staff-permissions', async ({ body, set, cookie, request }) => {
+    const isAdmin = cookie.admin_auth?.value === 'true'
+    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator'].includes(user.role)) {
+      set.status = 403
+      return { error: 'Klinik personeli rol yetkilerini yalnızca yönetici değiştirebilir' }
+    }
+    const { saveClinicStaffPermissions } = await import('./services/staff-invitations')
+    const config = await saveClinicStaffPermissions(requireClinicId(), body)
+    return { success: true, config }
+  })
+
+  // ── Knowledge Categories ────────────────────────────────────────────────────
+  .get('/api/admin/categories', async () => {
+    return await listCategories()
+  })
+
+  .post('/api/admin/categories', async ({ body, set }) => {
+    const { slug, label, icon, color, sortOrder } = (body ?? {}) as {
+      slug?: string; label?: string; icon?: string; color?: string; sortOrder?: number
+    }
+    if (!slug || !label) { set.status = 400; return { error: 'slug ve label zorunludur' } }
+    if (!/^[a-z0-9_-]+$/.test(slug)) { set.status = 400; return { error: 'slug sadece küçük harf, rakam, tire ve alt çizgi içerebilir' } }
+    try {
+      const cat = await createCategory({ slug, label, icon, color, sortOrder })
+      return cat
+    } catch (e: any) {
+      if (e?.message?.includes('unique') || e?.code === '23505') {
+        set.status = 409; return { error: 'Bu slug zaten mevcut' }
+      }
+      throw e
+    }
+  })
+
+  .put('/api/admin/categories/:id', async ({ params, body, set }) => {
+    const { label, icon, color, sortOrder } = (body ?? {}) as {
+      label?: string; icon?: string; color?: string; sortOrder?: number
+    }
+    const updated = await updateCategory(params.id, { label, icon, color, sortOrder })
+    if (!updated) { set.status = 404; return { error: 'Kategori bulunamadı' } }
+    return updated
+  })
+
+  .delete('/api/admin/categories/:id', async ({ params }) => {
+    return await deleteCategory(params.id)
+  })
+
+  // ── Conversation Flow API ─────────────────────────────────────────────────
+  .get('/api/admin/flow', async ({ query }) => {
+    const { getActiveFlow } = await import('./db/repositories/flows')
+    const direction = (query.direction as string) || 'inbound'
+    const flow = await getActiveFlow(direction)
+    return flow ?? { nodes: [], edges: [] }
+  })
+
+  .put('/api/admin/flow', async ({ body, query, set }) => {
+    const { nodes, edges } = (body ?? {}) as { nodes?: unknown[]; edges?: unknown[] }
+    const direction = (query.direction as string) || 'inbound'
+    if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+      set.status = 400
+      return { error: 'nodes ve edges array olmalı' }
+    }
+    const { saveFlow } = await import('./db/repositories/flows')
+    const flow = await saveFlow(nodes as any[], edges as any[], direction)
+    const { validateConversationFlow } = await import('./db/repositories/flows')
+    return { success: true, flow, issues: validateConversationFlow(flow.nodes, flow.edges) }
+  })
+
+  .get('/api/admin/flow/runtime', async () => {
+    const { getSetting } = await import('./db/repositories/settings')
+    const value = await getSetting('ai.flow_runtime_mode')
+    return { mode: value === 'active' || value === 'observe' ? value : 'legacy' }
+  })
+
+  .put('/api/admin/flow/runtime', async ({ body, set }) => {
+    const mode = (body as { mode?: string } | undefined)?.mode
+    if (!['legacy', 'observe', 'active'].includes(String(mode))) {
+      set.status = 400
+      return { error: 'Geçerli bir çalışma biçimi seçin.' }
+    }
+    const { setSetting } = await import('./db/repositories/settings')
+    await setSetting('ai.flow_runtime_mode', String(mode))
+    return { success: true, mode }
+  })
+
+  .post('/api/admin/flow/simulate', async ({ body, set }) => {
+    try {
+      const { runFlowSimulationStep } = await import('./services/flow-simulator')
+      return await runFlowSimulationStep((body || {}) as any)
+    } catch (error) {
+      set.status = 500
+      return { error: error instanceof Error ? error.message : 'Simülasyon çalıştırılamadı' }
+    }
+  })
+
+  .post('/api/admin/flow/explain-node', async ({ body, set }) => {
+    try {
+      const payload = (body ?? {}) as {
+        graphHash?: string
+        nodeId?: string
+        summary?: { does?: string; when?: string[]; next?: string[]; warnings?: string[] }
+        nodes?: unknown[]
+        edges?: unknown[]
+      }
+      if (!payload.nodeId || typeof payload.nodeId !== 'string') {
+        set.status = 400
+        return { error: 'Açıklanacak adım kimliği (nodeId) gereklidir.' }
+      }
+      const { explainFlowNode } = await import('./services/flow-explain')
+      return await explainFlowNode({
+        clinicId: currentClinicId(),
+        graphHash: typeof payload.graphHash === 'string' ? payload.graphHash : undefined,
+        nodeId: payload.nodeId,
+        summary: payload.summary,
+        nodes: Array.isArray(payload.nodes) ? (payload.nodes as any[]) : undefined,
+        edges: Array.isArray(payload.edges) ? (payload.edges as any[]) : undefined,
+      })
+    } catch (error) {
+      set.status = 500
+      return { error: error instanceof Error ? error.message : 'Adım açıklaması üretilemedi.' }
+    }
+  })
+
+  // Direct web audio keeps media in the browser; only the small flow state crosses this API.
+  .post('/api/flow-sessions', async ({ body, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const rawDir = (body as { direction?: string } | undefined)?.direction
+    const direction = rawDir && ['web', 'inbound', 'outbound', 'whatsapp'].includes(rawDir) ? rawDir : 'web'
+    const { createWebFlowSession } = await import('./services/flow-engine')
+    const session = await createWebFlowSession(clinicId, direction)
+    if (!session) { set.status = 409; return { error: 'Akışla çalışma bu görüşmede kullanılamıyor.' } }
+    return session
+  })
+
+  .post('/api/flow-sessions/:id/events', async ({ params, body, request, set }) => {
+    const { getAuthorizedWebFlowEngine } = await import('./services/flow-engine')
+    const engine = getAuthorizedWebFlowEngine(params.id, request.headers.get('x-flow-session-key') || undefined)
+    if (!engine) { set.status = 404; return { error: 'Görüşme bulunamadı veya süresi doldu.' } }
+    const event = (body || {}) as { id?: string; revision?: number; fields?: Record<string, unknown>; intent?: 'continue' | 'end' | 'new_person' }
+    return engine.accept(event)
+  })
+
+  .post('/api/flow-sessions/:id/actions', async ({ params, body, request, set }) => {
+    const { getAuthorizedWebFlowEngine } = await import('./services/flow-engine')
+    const engine = getAuthorizedWebFlowEngine(params.id, request.headers.get('x-flow-session-key') || undefined)
+    if (!engine) { set.status = 404; return { success: false, message: 'Görüşme bulunamadı veya süresi doldu.' } }
+    const input = (body || {}) as { name?: string; args?: Record<string, unknown> }
+    const args = input.args || {}
+    if (!['randevuOlustur', 'hastaNotKaydet', 'cagriySonlandir', 'aramaAktar', 'whatsappKonumGonder'].includes(String(input.name || ''))) {
+      set.status = 400
+      return { success: false, message: 'Bu işlem bu görüşmede kullanılamaz.' }
+    }
+    const step = await engine.accept({ fields: args })
+    const action = engine.expectedAction()
+    if (input.name === 'aramaAktar') {
+      const target = String(args.hedef || 'resepsiyon')
+      if (action && ['transfer_call', 'transfer'].includes(action.action)) {
+        await engine.completeAction(action.nodeId, true)
+      }
+      return { success: true, message: `Aramanız ${target} birimine aktarılıyor, lütfen hattan ayrılmayın.` }
+    }
+    if (input.name === 'whatsappKonumGonder') {
+      const phone = String(args.telefon || step.fields?.telefon || '')
+      if (phone) {
+        const { sendLocationToCaller } = await import('./services/voice-whatsapp')
+        await sendLocationToCaller(phone).catch(() => null)
+      }
+      if (action && action.action === 'send_wa_location') {
+        await engine.completeAction(action.nodeId, true)
+      }
+      return { success: true, message: 'Klinik konumu WhatsApp üzerinden paylaşıldı.' }
+    }
+    if (input.name === 'hastaNotKaydet') {
+      if (!step.success || !action || !['save_patient_note', 'notBirak'].includes(action.action)) {
+        return { success: false, message: step.message || step.next?.prompt || 'Not için gerekli bilgiler henüz tamamlanmadı.' }
+      }
+      try {
+        const { createPatientNote } = await import('./db/repositories/dental')
+        const phone = String(args.telefon || '')
+        const note = String(args.not || args.hastaNotu || '')
+        const name = String(args.hasta_adi || args.musteri_adi || '')
+        await createPatientNote({ phone, content: name ? `[${name}] ${note}` : note, source: 'web', clinicId: currentClinicId() || undefined })
+        await engine.completeAction(action.nodeId, true)
+        return { success: true, message: 'Notunuz başarıyla kaydedildi.' }
+      } catch {
+        await engine.completeAction(action.nodeId, false)
+        return { success: false, message: 'Not kaydedilirken bir hata oluştu.' }
+      }
+    }
+    if (input.name === 'cagriySonlandir') {
+      if (action && action.action === 'end_call') {
+        await engine.completeAction(action.nodeId, true)
+      }
+      return { success: true }
+    }
+    if (!step.success || !action || !['save_appointment_pending', 'randevuOlustur'].includes(action.action)) {
+      return { success: false, message: step.message || step.next?.prompt || 'Randevu için gerekli bilgiler henüz tamamlanmadı.' }
+    }
+    try {
+      const { createAssistantAppointment } = await import('./services/assistant-appointments')
+      const mergedFields = { ...(step.fields || {}), ...args }
+      const appointment = await createAssistantAppointment(mergedFields, { sessionId: params.id, clinicId: currentClinicId() || undefined, source: 'web_ai' })
+      await engine.completeAction(action.nodeId, true)
+      return { success: true, id: appointment.id, message: `Randevu talebiniz ${appointment.date} ${appointment.time} için alındı.` }
+    } catch (error) {
+      await engine.completeAction(action.nodeId, false)
+      return { success: false, message: 'Randevu oluşturulamadı. Ad, telefon, tarih ve saati kontrol edin.' }
+    }
+  })
+
+  .delete('/api/flow-sessions/:id', async ({ params, request, set }) => {
+    const { getAuthorizedWebFlowEngine, closeFlowEngine } = await import('./services/flow-engine')
+    if (!getAuthorizedWebFlowEngine(params.id, request.headers.get('x-flow-session-key') || undefined)) { set.status = 404; return { error: 'Görüşme bulunamadı.' } }
+    await closeFlowEngine(params.id)
+    return { success: true }
+  })
+
+  // ── Direct Mode: Session Config ──────────────────────────────────────────────
+  // Client bağlanmadan önce dinamik system prompt, RAG context ve tool declarations alır
+  // Web oturumları Asterisk telefon hatlarından (tel_*) tamamen bağımsız ve paralel çalışır.
+  .get('/api/direct-session-config', async () => {
+    const clinicId = currentClinicId()
+    const { resolveVoiceSettings } = await import('./services/voice-settings')
+    const { issueWebToolSessionKey } = await import('./services/flow-engine')
+    const { buildToolDeclarations } = await import('./gemini')
+    const { prepareLiveToolDeclarations } = await import('./services/live-model-profile')
+
+    const [voiceSettings, greetingRaw, ragContext, branding, rawTools] = await Promise.all([
+      resolveVoiceSettings(clinicId ?? undefined),
+      getGreeting('web').then(g => g || getGreeting('inbound')),
+      getPreWarmedRagContext(clinicId, 'web', 250),
+      getBranding(),
+      buildToolDeclarations('web'),
+    ])
+
+    const sessionKey = clinicId ? issueWebToolSessionKey(clinicId) : undefined
+    const greeting = greetingRaw ?? DEFAULT_GREETING
+    const dateHeader = `BUGÜNÜN TARİHİ: ${getTodayTurkish()}. Randevu tarihlerini söylerken mutlaka bu tarihe göre gün hesapla — asla tahmin yapma.\n\n`
+    const systemPrompt = dateHeader + await buildSystemPrompt(greeting, 'web')
+
+    const model = voiceSettings.model
+    const ASTERISK_ONLY_TOOLS = new Set(['insanaAktar'])
+    const toolDeclarations = prepareLiveToolDeclarations(
+      model,
+      rawTools.filter(t => !ASTERISK_ONLY_TOOLS.has(t.name || '')),
+    )
+
+    return {
+      systemPrompt: systemPrompt + ragContext,
+      toolDeclarations,
+      model,
+      thinkingLevel: voiceSettings.thinkingLevel,
+      textModel: process.env.GEMINI_TEXT_MODEL || 'gemini-3.8-flash',
+      greeting,
+      branding,
+      voiceName: voiceSettings.voiceName,
+      startWaitSeconds: voiceSettings.startWaitSeconds,
+      turnDetectionMode: voiceSettings.turnDetectionMode,
+      noiseFilterMode: voiceSettings.noiseFilterMode,
+      callSilenceTimeout: voiceSettings.callSilenceTimeout,
+      callSilenceCloseTimeout: voiceSettings.callSilenceCloseTimeout,
+      callMaxDuration: voiceSettings.callMaxDuration,
+      offTopicMaxStrikes: voiceSettings.offTopicMaxStrikes,
+      offTopicCloseMessage: voiceSettings.offTopicCloseMessage,
+      sessionKey,
+    }
+  })
+
+  // ── Direct Mode: Tool Call HTTP Endpoints ───────────────────────────────────
+  // Bu endpoint'ler doğrudan (direct) modda çalışan client-side Gemini
+  // bağlantısının tool call'larını karşılar. Ses direkt Gemini'ye gider,
+  // ama tool call'lar bu HTTP endpoint'ler üzerinden sunucuya gelir.
+
+  .post('/api/tools/search-knowledge', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const { sorgu, direction } = (body ?? {}) as { sorgu?: string; direction?: string }
+    if (!sorgu?.trim()) { set.status = 400; return { error: 'sorgu parametresi zorunlu' } }
+    try {
+      const { searchKnowledge } = await import('./services/knowledge')
+      const results = await searchKnowledge(sorgu, {
+        limit: 5,
+        direction: direction === 'outbound' ? 'outbound' : 'inbound',
+        channel: 'web_direct',
+      })
+      if (results.length === 0) return { sonuc: 'Bilgi tabanında ilgili bilgi bulunamadı.' }
+      const content = results
+        .map((r, i) => `[${i + 1}] (${r.documentName})\n${r.chunkText}`)
+        .join('\n\n---\n\n')
+      return { sonuc: content }
+    } catch (err) {
+      console.error('[Tools/Knowledge]', err)
+      return { sonuc: 'Bilgi tabanı şu an kullanılamıyor.' }
+    }
+  })
+
+  .post('/api/tools/customer-query', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const { telefon } = (body ?? {}) as { telefon?: string }
+    if (!telefon?.trim()) { set.status = 400; return { error: 'telefon parametresi zorunlu' } }
+    const digits = telefon.replace(/\D/g, '')
+    if (digits.length < 10) return { sonuc: 'Geçerli bir telefon numarası değil. En az 10 hane gerekli.' }
+    try {
+      const { findPatientByPhone, getPatientDoctorHistory } = await import('./db/repositories/dental')
+      const [customer, patient] = await Promise.all([
+        getCustomerByPhone(telefon),
+        findPatientByPhone(telefon),
+      ])
+      if (!customer) {
+        if (patient) {
+          const doktorGecmisi = await getPatientDoctorHistory(telefon)
+          return {
+            kayitli: true,
+            musteri_adi: patient.name,
+            doktor_gecmisi: doktorGecmisi.length > 0 ? doktorGecmisi : undefined,
+            sonuc: `Ad Soyad: ${patient.name}\nTelefon: ${patient.phone || telefon}${doktorGecmisi.length > 0 ? `\nDoktor Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}` : ''}`,
+          }
+        }
+        const knowledgeCustomer = await findCustomerDocByPhone(telefon)
+        if (knowledgeCustomer) {
+          return { kayitli: true, musteri_adi: knowledgeCustomer.name, sonuc: `Ad Soyad: ${knowledgeCustomer.name}\n${knowledgeCustomer.content}` }
+        }
+        return { kayitli: false, sonuc: 'Bu numara ile kayıtlı müşteri bulunamadı.' }
+      }
+      const info: string[] = [`Ad Soyad: ${customer.name}`, `Telefon: ${customer.phone}`]
+      const pastAppointments = customer.appointmentHistory.filter(a => a.isPast)
+      if (pastAppointments.length > 0) {
+        const last = pastAppointments[0]
+        info.push(`Son Randevu: ${last.date} ${last.time} — ${last.issueOrRequest || last.type}`)
+      }
+      return { kayitli: true, musteri_adi: customer.name, sonuc: info.join('\n') }
+    } catch (err) {
+      console.error('[Tools/CustomerQuery]', err)
+      return { kayitli: false, sonuc: 'Müşteri sorgu servisi şu an kullanılamıyor.' }
+    }
+  })
+
+  .post('/api/tools/create-appointment', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const args = (body ?? {}) as Record<string, string>
+    const name = args.musteri_adi || args.ad_soyad || args.hasta_adi || ''
+    const phone = args.telefon || args.phone || ''
+    const tarih = args.tarih || args.date || ''
+    const saat = args.saat || args.time || ''
+    const type = args.randevu_turu || args.islem_turu || args.tur || 'kontrol'
+
+    if (!name || name.length < 2) return { success: false, message: 'Müşteri adı zorunludur; müşteriden adını soyadını sor.' }
+    if (!phone || phone.replace(/\D/g, '').length < 10) return { success: false, message: 'Geçerli telefon numarası zorunludur (en az 10 hane).' }
+    if (!tarih || !saat) return { success: false, message: 'Tarih ve saat zorunludur.' }
+
+    try {
+      const { createAssistantAppointment } = await import('./services/assistant-appointments')
+      const appointment = await createAssistantAppointment(
+        { ...args, musteri_adi: name, telefon: phone, tarih, saat },
+        { sessionId: `direct-${randomUUID().slice(0, 8)}`, clinicId, source: 'web_ai' },
+      )
+      console.log('[Tools/Appointment]', appointment.id, appointment.customerName)
+      return { success: true, message: `Kontrol randevusu talebiniz alındı; klinik onayı bekleniyor.`, id: appointment.id }
+    } catch (err) {
+      console.error('[Tools/Appointment]', err)
+      set.status = 500
+      return { success: false, message: 'Randevu oluşturma hatası.' }
+    }
+  })
+
+  .post('/api/tools/check-availability', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const args = (body ?? {}) as { tarih?: string; baslangic_tarih?: string; bitis_tarih?: string }
+    const { getClinicAvailabilityReport, normalizeAppointmentDate } = await import('./services/assistant-appointments')
+    const normTarih = args.tarih ? normalizeAppointmentDate(args.tarih) : undefined
+    const normFrom = args.baslangic_tarih ? normalizeAppointmentDate(args.baslangic_tarih) : undefined
+    const normTo = args.bitis_tarih ? normalizeAppointmentDate(args.bitis_tarih) : undefined
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/
+    const hasValidDate = (normTarih && dateRegex.test(normTarih)) || (normFrom && dateRegex.test(normFrom))
+    if (!hasValidDate) return { sonuc: 'Geçerli bir tarih belirtilmedi.' }
+    try {
+      const report = await getClinicAvailabilityReport({
+        clinicId,
+        date: normTarih,
+        from: normFrom,
+        to: normTo || normFrom,
+      })
+      return { sonuc: report.sonuc, count: report.count }
+    } catch (err) {
+      console.error('[Tools/Availability]', err)
+      return { sonuc: 'Müsaitlik kontrol servisi şu an kullanılamıyor.' }
+    }
+  })
+
+  .post('/api/tools/patient-note', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const args = (body ?? {}) as Record<string, unknown>
+    const phone = String(args.telefon || '').trim()
+    const note = String(args.not || args.hastaNotu || args.mesaj || '').trim()
+    const name = String(args.hasta_adi || args.musteri_adi || '').trim()
+    if (!note) return { success: false, message: 'Kaydedilecek bir not metni belirtilmedi.' }
+    try {
+      const { createPatientNote } = await import('./db/repositories/dental')
+      await createPatientNote({ phone, content: name ? `[${name}] ${note}` : note, source: 'web', clinicId })
+      return { success: true, message: 'Notunuz başarıyla kaydedildi ve klinik bankosuna iletildi.' }
+    } catch {
+      return { success: false, message: 'Not kaydedilirken bir hata oluştu.' }
+    }
+  })
+
+  .post('/api/tools/appointment-status', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const args = (body ?? {}) as Record<string, unknown>
+    const rawDurum = String(args.durum || '')
+    const action = rawDurum === 'confirm' || rawDurum === 'confirmed'
+      ? 'confirm'
+      : rawDurum === 'postpone' || rawDurum === 'postponed'
+        ? 'postpone'
+        : 'cancel'
+    return {
+      success: true,
+      message: action === 'confirm'
+        ? 'Randevunuz onaylandı olarak takvime kaydedildi.'
+        : action === 'postpone'
+          ? 'Erteleme talebiniz takvime kaydedildi; ekibimiz yeni saat için dönüş sağlayacaktır.'
+          : 'Randevunuz iptal edildi ve takvimde güncellendi.',
+    }
+  })
+
+// ── Web session koruma sabitleri ──────────────────────────────────────────────
+const WS_IDLE_TIMEOUT_MS = 5 * 60_000   // 5 dk ses yoksa kapat
+const WS_MAX_SESSION_MS = 30 * 60_000  // 30 dk max session ömrü
+const WS_PING_INTERVAL_MS = 30_000       // 30s ping
+
+// ── WebSocket: Voice streaming ──────────────────────────────────────────────
+app.ws('/ws', {
+  idleTimeout: 120, // Elysia seviyesi idle (saniye) — ek güvenlik ağı
+
+  async open(ws) {
+    const tenant = currentTenant()
+    if (!tenant) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Bu domain için klinik tanımlanmamış.' }))
+      ws.close()
+      return
+    }
+    const shortId = randomUUID().slice(0, 8)
+    console.log(`[${shortId}] Client connected`)
+    const startedAt = new Date()
+    const startedAtMs = Date.now()
+    const info: SessionInfo = {
+      session: null as any,
+      startedAt,
+      startedAtMs,
+      audioChunks: [],
+      userAudioChunks: [],
+      shortId,
+      clinicId: tenant.clinicId,
+      hostname: tenant.hostname,
+    }
+    // ── Idle + max session timer'ları ──
+    let lastActivityAt = Date.now()
+    const idleTimer = setInterval(() => {
+      const idleMs = Date.now() - lastActivityAt
+      const totalMs = Date.now() - startedAtMs
+      if (totalMs > WS_MAX_SESSION_MS) {
+        console.log(`[${shortId}] Max session süresi aşıldı (${Math.round(totalMs / 60_000)}dk) — kapatılıyor`)
+        ws.send(JSON.stringify({ type: 'error', message: 'Maksimum oturum süresi doldu.' }))
+        ws.close()
+        return
+      }
+      if (idleMs > WS_IDLE_TIMEOUT_MS) {
+        console.log(`[${shortId}] WS idle timeout (${Math.round(idleMs / 60_000)}dk ses yok) — kapatılıyor`)
+        ws.send(JSON.stringify({ type: 'error', message: 'Uzun süredir ses alınamadı, oturum kapatıldı.' }))
+        ws.close()
+      }
+    }, 30_000)
+      ; (ws.data as any).idleTimer = idleTimer
+      ; (ws.data as any).touchActivity = () => { lastActivityAt = Date.now() }
+
+    // Heartbeat — ölü bağlantıları tespit et
+    const pingTimer = setInterval(() => {
+      try { ws.send(JSON.stringify({ type: 'ping' })) } catch { }
+    }, WS_PING_INTERVAL_MS)
+      ; (ws.data as any).pingTimer = pingTimer
+
+    try {
+      const { resolveVoiceSettings } = await import('./services/voice-settings')
+      const [voiceSettings, ragContext, greetingRaw] = await Promise.all([
+        resolveVoiceSettings(tenant.clinicId),
+        getPreWarmedRagContext(tenant.clinicId, 'web', 250),
+        getGreeting('web').then(g => g || getGreeting('inbound')),
+      ])
+
+      const dateHeader = `BUGÜNÜN TARİHİ: ${getTodayTurkish()}. Randevu tarihlerini söylerken mutlaka bu tarihe göre gün hesapla — asla tahmin yapma.\n\n`
+      const greeting = greetingRaw ?? DEFAULT_GREETING
+      const systemPrompt = dateHeader + await buildSystemPrompt(greeting, 'web') + ragContext
+      const model = voiceSettings.model
+      const voiceName = voiceSettings.voiceName
+      console.log(`[${shortId}] Gemini Live model: ${model}, voice: ${voiceName} (web)`)
+
+      const { getGeminiClient } = await import('./services/gemini-client')
+      const clinicAi = await getGeminiClient(tenant.clinicId).catch(() => getAI())
+
+      const session = await createLiveSession(clinicAi, {
+        onReady: () => { console.log(`[${shortId}] Gemini Live ready`); ws.send(JSON.stringify({ type: 'ready' })) },
+        onAudio: (pcm) => {
+          ws.send(pcm)
+          info.audioChunks.push({ buffer: pcm, offsetMs: Date.now() - startedAtMs })
+        },
+        onTranscript: (role, text) => {
+          const trimmed = text.trim()
+          if (trimmed) {
+            const label = role === 'user' ? 'USER' : 'AI'
+            console.log(`[${shortId}] ${label}: ${trimmed}`)
+          }
+          ws.send(JSON.stringify({ type: 'transcript', role, text }))
+        },
+        onInterrupted: () => ws.send(JSON.stringify({ type: 'interrupted' })),
+        onTurnComplete: () => ws.send(JSON.stringify({ type: 'turn_complete' })),
+        onError: (e) => console.error(`[${shortId}] Gemini error:`, e),
+        onClose: () => {
+          console.log(`[${shortId}] Gemini session closed`)
+          sessions.delete(shortId)
+          notifyAdmins('session_end', { id: shortId, activeSessions: sessions.size })
+        },
+      }, { dbSessionId: shortId, systemPrompt, model, voiceName, clinicId: tenant.clinicId, hostname: tenant.hostname, direction: 'web', appointmentSource: 'web_ai' })
+
+      info.session = session
+        ; (ws.data as any).sessionId = shortId
+      sessions.set(shortId, info)
+      notifyAdmins('session_start', { id: shortId, activeSessions: sessions.size })
+
+      session.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text: 'Sistem bildirimi: Müşteri sesli görüşmeye bağlandı. (Bu satır müşteri adı veya talebi değildir; randevuya yazma.)' }] }],
+        turnComplete: true,
+      })
+    } catch (err) {
+      console.error(`[${shortId}] Session başlatılamadı:`, err)
+      ws.send(JSON.stringify({ type: 'error', message: 'Session failed to start' }))
+      ws.close()
+    }
+  },
+
+  message(ws, message) {
+    const shortId = (ws.data as any).sessionId as string
+    const info = sessions.get(shortId)
+    if (!info) return
+    // Pong — client heartbeat cevabı (activity sayılmaz)
+    if (typeof message === 'string') {
+      try { if (JSON.parse(message as string).type === 'pong') return } catch { }
+    }
+    if (message instanceof Buffer || message instanceof Uint8Array) {
+      const buf = Buffer.isBuffer(message) ? message : Buffer.from(message)
+      info.session.sendRealtimeInput({
+        audio: {
+          mimeType: 'audio/pcm;rate=16000',
+          data: buf.toString('base64'),
+        }
+      })
+      info.userAudioChunks.push({ buffer: buf, offsetMs: Date.now() - info.startedAtMs })
+        // Ses geldi — idle timer'ı sıfırla
+        ; (ws.data as any).touchActivity?.()
+    }
+  },
+
+  async close(ws) {
+    // Timer'ları temizle
+    clearInterval((ws.data as any).idleTimer)
+    clearInterval((ws.data as any).pingTimer)
+    const shortId = (ws.data as any).sessionId as string
+    const info = sessions.get(shortId)
+    if (info) await runWithTenantContext({ clinicId: info.clinicId, hostname: info.hostname }, async () => {
+      const hasAudio = info.audioChunks.length > 0 || info.userAudioChunks.length > 0
+      if (hasAudio) {
+        const endedAt = new Date()
+        const durationMs = endedAt.getTime() - info.startedAt.getTime()
+        const ts = info.startedAt.toISOString().replace(/[:.]/g, '-').slice(0, 19)
+        const filename = `session_${shortId}_${ts}.wav`
+        const filePath = resolve(RECORDINGS_DIR, filename)
+        try {
+          const wavBuf = buildStereoWav(info.audioChunks, info.userAudioChunks, durationMs)
+          writeFileSync(filePath, wavBuf)
+          await saveRecording({
+            clinicId: info.clinicId,
+            filename,
+            startedAt: info.startedAt.toISOString(),
+            endedAt: endedAt.toISOString(),
+            durationMs,
+            sizeBytes: wavBuf.length,
+          })
+          console.log(`[${shortId}] Recording: ${filename}`)
+        } catch (e) { console.error(`[${shortId}] Recording hatası:`, e) }
+      }
+      try { info.session?.close() } catch { }
+      sessions.delete(shortId)
+    })
+    console.log(`[${shortId}] Disconnected`)
+  },
+})
+
+  .listen(PORT, async () => {
+    console.log(`\n Voice AI Server`)
+    console.log(`   http://localhost:${PORT}`)
+    console.log(`   ws://localhost:${PORT}/ws`)
+    // Startup has no tenant context. Clinic-specific model resolution happens
+    // inside request/call contexts; the boot log must stay tenant-independent.
+    const configuredLiveModel = process.env.GEMINI_LIVE_MODEL
+    const startupLiveModel = configuredLiveModel && (ALLOWED_LIVE_MODELS as readonly string[]).includes(configuredLiveModel)
+      ? configuredLiveModel
+      : DEFAULT_LIVE_MODEL
+    console.log(`   Model: ${startupLiveModel}`)
+    console.log(`   RAG: pgvector + HNSW (${getEmbeddingModel()}, dim=${getEmbeddingDimensions()})`)
+
+    // Seed default categories for every active clinic. Startup has no HTTP
+    // tenant context, so the request-scoped seedCategories() helper cannot be
+    // used here.
+    try {
+      const { db } = await import('./db/client')
+      const { clinics } = await import('./db/schema')
+      const activeClinics = await db.select({ id: clinics.id }).from(clinics).where(eq(clinics.isActive, true))
+      for (const clinic of activeClinics) await seedCategoriesForClinic(clinic.id)
+    } catch (e) { console.error('[Categories] Seed hatası:', e) }
+
+    // Ensure doctor_leaves table exists on startup (auto-migration / self-healing)
+    try {
+      const { ensureDoctorLeavesTable } = await import('./db/repositories/dental')
+      await ensureDoctorLeavesTable()
+    } catch (e) { console.error('[DoctorLeaves] Startup ensure table error:', e) }
+
+    try {
+      const { ensureTreatmentPlanningSchema } = await import('./db/treatment-planning-schema')
+      await ensureTreatmentPlanningSchema()
+    } catch (e) { console.error('[TreatmentPlanning] Startup ensure schema error:', e) }
+
+    const cleanDetachedAttachments = async () => {
+      try { await (await import('./services/plan-attachments')).cleanupPlanAttachments() }
+      catch { console.error('[TreatmentPlanning] Geçici ek temizliği tamamlanamadı.') }
+    }
+    setTimeout(() => void cleanDetachedAttachments(), 60_000)
+    setInterval(() => void cleanDetachedAttachments(), 60 * 60 * 1000)
+
+    try {
+      const { ensureShiftPlanningTables } = await import('./db/repositories/shift-planning')
+      await ensureShiftPlanningTables()
+    } catch (e) { console.error('[ShiftPlanning] Startup ensure table error:', e) }
+
+    try {
+      const { ensureWhatsAppSetupSchema } = await import('./db/repositories/whatsapp')
+      await ensureWhatsAppSetupSchema()
+    } catch (e) { console.error('[WhatsApp] Startup ensure schema error:', e) }
+
+    try {
+      const { ensureKnowledgeSchema } = await import('./db/repositories/knowledge')
+      await ensureKnowledgeSchema()
+    } catch (e) { console.error('[Knowledge] Startup ensure schema error:', e) }
+
+    try {
+      const [{ ensureAiUsageTable }, { ensureClinicGeminiKeyColumns }, { ensurePromptTemplates }] = await Promise.all([
+        import('./db/repositories/ai-usage'),
+        import('./services/gemini-client'),
+        import('./prompts/registry'),
+      ])
+      await Promise.all([
+        ensureAiUsageTable(),
+        ensureClinicGeminiKeyColumns(),
+        ensurePromptTemplates(),
+      ])
+    } catch (e) { console.error('[Startup] Faz 6 bootstrap error:', e) }
+
+    // Stale session temizliği — zombi/takılı session'ları periyodik olarak kapat
+    setInterval(() => {
+      const now = Date.now()
+      for (const [id, info] of sessions) {
+        const ageMs = now - info.startedAtMs
+        if (ageMs > 30 * 60_000) {
+          console.log(`[Cleanup] Stale session temizlendi: ${id} (${Math.round(ageMs / 60_000)}dk)`)
+          try { info.session?.close() } catch { }
+          sessions.delete(id)
+        }
+      }
+    }, 60_000)
+
+    // ── Telephony (Netgsm SIP Trunk → AudioSocket) ─────────────────────────
+    if (process.env.TELEPHONY_ENABLED === '1') {
+      try {
+        const { startTelephony } = await import('./telephony')
+        await startTelephony({
+          ai: getAI(),
+          port: Number(process.env.AUDIOSOCKET_PORT) || 12000,
+          resolveLiveModel,
+          buildSystemPrompt: async (direction?: string) => {
+            const dir = direction || 'inbound'
+            const g = (await getGreeting(dir)) ?? DEFAULT_GREETING
+            return buildSystemPrompt(g, dir)
+          },
+          sessions,
+          notifyAdmins,
+          callerRegistry,
+        })
+      } catch (e) {
+        console.error('[Telephony] Başlatılamadı:', e)
+      }
+    } else {
+      console.log(`   Telephony: kapalı (TELEPHONY_ENABLED=1 ile aç)`)
+    }
+    console.log('')
+
+    if (process.env.VOICEAI_BACKGROUND_JOBS_ENABLED !== '0') {
+      try {
+        const { importLegacyIntegrations } = await import('./integrations/managed/legacy')
+        await importLegacyIntegrations()
+        const { startIntegrationReconciler } = await import('./integrations/managed/asterisk')
+        startIntegrationReconciler()
+      } catch { console.error('[Integrations] Başlangıç eşitlemesi tamamlanamadı; mevcut kayıtlar korundu.') }
+      startReminderCron()
+      const { startWhatsAppWorker } = await import('./queue/whatsapp-queue')
+      startWhatsAppWorker()
+    } else {
+      console.log('[Background] Hatırlatmalar, WhatsApp işleyicisi ve entegrasyon eşitlemesi kapalı.')
+    }
+  })
+
+export type App = typeof app
