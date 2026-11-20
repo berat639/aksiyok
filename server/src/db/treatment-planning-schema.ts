@@ -111,6 +111,29 @@ export const treatmentPlanningDDL = [
   )`,
   `CREATE INDEX IF NOT EXISTS appointment_notification_jobs_due_idx ON appointment_notification_jobs (status, next_attempt_at)`,
   `CREATE INDEX IF NOT EXISTS appointment_notification_jobs_appt_idx ON appointment_notification_jobs (clinic_id, appointment_id)`,
+  `ALTER TABLE patient_consent_requests ALTER COLUMN patient_id DROP NOT NULL`,
+  `ALTER TABLE patient_consent_requests ADD COLUMN IF NOT EXISTS dynamic_row_id UUID`,
+  `ALTER TABLE patient_consent_requests ADD COLUMN IF NOT EXISTS recipient_name TEXT`,
+  `ALTER TABLE patient_consent_requests ADD COLUMN IF NOT EXISTS recipient_phone TEXT`,
+  `ALTER TABLE patient_consent_audit ALTER COLUMN patient_id DROP NOT NULL`,
+  `ALTER TABLE patient_consent_audit ADD COLUMN IF NOT EXISTS dynamic_row_id UUID`,
+  `ALTER TABLE patient_consent_audit ADD COLUMN IF NOT EXISTS phone_last10 TEXT`,
+  `CREATE TABLE IF NOT EXISTS contact_channel_preferences (
+    clinic_id UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+    phone_last10 TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL,
+    text_version TEXT NOT NULL,
+    request_id UUID REFERENCES patient_consent_requests(id) ON DELETE SET NULL,
+    dynamic_row_id UUID,
+    responded_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (clinic_id, phone_last10, channel)
+  )`,
+  `ALTER TABLE appointment_notification_jobs ALTER COLUMN patient_id DROP NOT NULL`,
+  `ALTER TABLE appointment_notification_jobs ADD COLUMN IF NOT EXISTS dynamic_row_id UUID`,
+  `ALTER TABLE appointment_notification_jobs ADD COLUMN IF NOT EXISTS recipient_name TEXT`,
+  `ALTER TABLE appointment_notification_jobs ADD COLUMN IF NOT EXISTS recipient_phone TEXT`,
+  `CREATE INDEX IF NOT EXISTS dental_appointments_intake_phone_idx ON dental_appointments (clinic_id, intake_patient_phone) WHERE intake_patient_phone IS NOT NULL`,
 ]
 
 let schemaPromise: Promise<void> | undefined

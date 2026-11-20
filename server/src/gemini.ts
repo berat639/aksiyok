@@ -15,7 +15,6 @@ import {
 } from '@google/genai'
 import { createAppointment, updateAppointment, getCustomerByPhone, getAppointmentsByDateRange } from './db/repositories/appointments'
 import { createPatientNote, findPatientByPhone, getPatientDoctorHistory } from './db/repositories/dental'
-import { createCalendarEvent, updateCalendarEvent } from './integrations/google-calendar'
 import {
   createAssistantAppointment,
   extractSpokenTurkishDate,
@@ -27,9 +26,7 @@ import {
 import { buildClinicRosterAndHoursText, searchKnowledge } from './services/knowledge'
 import { sendLocationToCaller } from './services/voice-whatsapp'
 import { findCustomerDocByPhone } from './db/repositories/knowledge'
-import { getToolDescriptions } from './db/repositories/settings'
-import { runWithTenantContext } from './tenancy/context'
-import { TOOL_DESCRIPTIONS, TOOL_PARAM_DESCRIPTIONS, getDefaultToolDescription } from './data/default-tools'
+import { currentClinicId, runWithTenantContext } from './tenancy/context'
 import {
   classifyTransferConfirmation,
   findAutomaticTransferRule,
@@ -150,14 +147,20 @@ export async function createLiveSession(
   if (options.callerPhone && options.clinicId) {
     try {
       const lookupPromise = (async () => {
-        const [customer, dentalPatient] = await Promise.all([
+        const { lookupDynamicFieldsByPhone } = await import('./db/repositories/dynamic-tables')
+        const [customer, dentalPatient, dynamicFields] = await Promise.all([
           getCustomerByPhone(options.callerPhone!, options.clinicId).catch(() => null),
           findPatientByPhone(options.callerPhone!, options.clinicId).catch(() => null),
+          lookupDynamicFieldsByPhone(options.callerPhone!, options.clinicId).catch((): Record<string, unknown> => ({})),
         ])
-        const registered = Boolean(customer || dentalPatient)
-        const name = customer?.name || dentalPatient?.name || undefined
+        const registered = Boolean(customer || dentalPatient || dynamicFields._dynamicKnownCaller === 'true')
+        const name =
+          customer?.name ||
+          dentalPatient?.name ||
+          (typeof dynamicFields._dynamicCallerName === 'string' ? dynamicFields._dynamicCallerName : undefined)
         const hasUpcoming = Boolean(customer?.appointmentHistory?.some(a => !a.isPast))
         return {
+          ...dynamicFields,
           telefon: options.callerPhone,
           kayitli: registered ? 'true' : 'false',
           'caller.isKnownPatient': registered ? 'true' : 'false',
@@ -189,7 +192,11 @@ export async function createLiveSession(
     if (name === 'akisBilgisiGuncelle') {
       if (!flowEngine) return { success: false, message: 'Akışla çalışma bu görüşmede açık değil.' }
       const rawFields = (args.bilgiler && typeof args.bilgiler === 'object') ? args.bilgiler as Record<string, unknown> : {}
-      const fields: Record<string, unknown> = { ...rawFields }
+      const flatFields = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'yeni_kisi'))
+      const fields: Record<string, unknown> = { ...flatFields, ...rawFields }
+      if (typeof fields.telefon === 'string' && fields.telefon.replace(/\D/g, '').length >= 10) {
+        lastPhoneUsed = fields.telefon
+      }
       if (recentUserTranscript) {
         if (!fields.tarih) {
           const extractedDate = extractSpokenTurkishDate(recentUserTranscript)
@@ -216,6 +223,103 @@ export async function createLiveSession(
         message: result.message || result.next?.prompt || (result.completed ? 'Görüşmeyi kısa ve nazikçe tamamla.' : 'Müşterinin yanıtını dinle.'),
         sonraki_adim: result.next?.type,
         revision: result.revision,
+      }
+    }
+
+    if (name === 'veriTablosuSorgula') {
+      const clinicId = options.clinicId || currentClinicId()
+      if (!clinicId) return { success: false, kayitli: false, message: 'Klinik bağlamı bulunamadı.' }
+      try {
+        const { queryDynamicTableRecord } = await import('./db/repositories/dynamic-tables')
+        const searchValue = typeof args.aranan_deger === 'string' ? args.aranan_deger.trim() : ''
+        const explicitPhone = typeof args.telefon === 'string' && args.telefon.trim() ? args.telefon.trim() : ''
+        const lookupPhone = explicitPhone || (!searchValue ? lastPhoneUsed || options.callerPhone || '' : '')
+        const res = await queryDynamicTableRecord({
+          clinicId,
+          tableIdOrName: typeof args.tablo === 'string' ? args.tablo : undefined,
+          searchValue: searchValue || undefined,
+          columnNameOrSlug: typeof args.sutun === 'string' ? args.sutun : undefined,
+          phone: lookupPhone || undefined,
+        })
+        if (Object.keys(res.fieldPatch).length > 0) {
+          collectedFlowFields = { ...collectedFlowFields, ...res.fieldPatch }
+          if (flowEngine) {
+            const step = await flowEngine.accept({ fields: res.fieldPatch }).catch(() => null)
+            if (step?.fields) {
+              collectedFlowFields = { ...collectedFlowFields, ...step.fields }
+            }
+          }
+        }
+        return {
+          success: true,
+          kayitli: res.found,
+          tablo: res.tableName,
+          kayit: res.record,
+          kayitlar: res.records,
+          message: res.message,
+        }
+      } catch (err) {
+        console.error('[veriTablosuSorgula] Hata:', err)
+        return { success: false, kayitli: false, message: 'Veri tablosu sorgulanırken bir hata oluştu.' }
+      }
+    }
+
+    if (name === 'veriTablosunaKaydet') {
+      const clinicId = options.clinicId || currentClinicId()
+      if (!clinicId) return { success: false, message: 'Klinik bağlamı bulunamadı.' }
+      const rawNested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+      const extraArgs = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'hedef_tablo_id'))
+      const candidatePhone = rawNested.telefon ?? extraArgs.telefon
+      if (typeof candidatePhone === 'string' && candidatePhone.replace(/\D/g, '').length >= 10) {
+        lastPhoneUsed = candidatePhone
+      }
+      collectedFlowFields = { ...collectedFlowFields, ...extraArgs, ...rawNested }
+      if (flowEngine) {
+        const step = await flowEngine.accept({ fields: { ...extraArgs, ...rawNested } })
+        if (step.fields) {
+          collectedFlowFields = { ...collectedFlowFields, ...step.fields }
+        }
+        if (Object.keys(rawNested).length === 0 && Object.keys(extraArgs).length === 0 && flowEngine.hasSavedDynamicRecord()) {
+          return { success: true, kaydedilen_satir: 1, message: 'Veri tablosu kaydı tamamlandı.' }
+        }
+      }
+      try {
+        const { saveFlowDynamicRecord } = await import('./db/repositories/dynamic-tables')
+        const { getActiveFlow } = await import('./db/repositories/flows')
+        const activeFlow = flowEngine
+          ? flowEngine.getFlow()
+          : await getActiveFlow(options.direction || 'inbound', clinicId).catch(() => null)
+        const targetTableId = typeof args.hedef_tablo_id === 'string' && args.hedef_tablo_id.trim()
+          ? args.hedef_tablo_id.trim()
+          : undefined
+        const saved = await saveFlowDynamicRecord({
+          clinicId,
+          fields: {
+            ...collectedFlowFields,
+            ...(flowEngine ? flowEngine.getFields() : {}),
+            ...(lastPhoneUsed || options.callerPhone ? { telefon: lastPhoneUsed || options.callerPhone } : {}),
+            ...extraArgs,
+            ...rawNested,
+          },
+          targetTableId,
+          flowNodes: activeFlow?.nodes,
+        })
+        if (flowEngine) {
+          const expected = flowEngine.expectedAction()
+          if (expected && expected.action === 'save_record') {
+            await flowEngine.completeAction(expected.nodeId, true)
+          }
+        }
+        return {
+          success: true,
+          kaydedilen_satir: saved.savedCount,
+          message: saved.savedCount > 0
+            ? 'Bilgileriniz veri tablosuna başarıyla kaydedildi.'
+            : 'Kaydedilecek tablo alanı bulunamadı.',
+        }
+      } catch (err) {
+        console.error('[veriTablosunaKaydet] Hata:', err)
+        return { success: false, message: 'Veri tablosuna kayıt yapılırken bir hata oluştu.' }
       }
     }
 
@@ -273,7 +377,7 @@ export async function createLiveSession(
       }
     }
 
-    if (name === 'hastaNotKaydet') {
+    if (name === 'hastaNotKaydet' || name === 'musteriNotKaydet') {
       const phone = (args.telefon as string | undefined) || lastPhoneUsed || ''
       const noteContent = (args.not as string | undefined) || (args.mesaj as string | undefined) || ''
       const patientName = (args.hasta_adi as string | undefined) || (args.musteri_adi as string | undefined) || null
@@ -299,7 +403,7 @@ export async function createLiveSession(
         }
         return {
           success: true,
-          message: 'Notunuz başarıyla kaydedildi ve klinik bankosuna iletildi. Yetkililerimiz en kısa sürede size dönüş sağlayacaktır.',
+          message: 'Notunuz başarıyla kaydedildi ve yetkililere iletildi. Ekibimiz en kısa sürede size dönüş sağlayacaktır.',
         }
       } catch (err) {
         console.error('[hastaNotKaydet] Hata:', err)
@@ -391,20 +495,18 @@ export async function createLiveSession(
         if (!targetNumber) {
           const { getSetting } = await import('./db/repositories/settings')
           const { activeConfig } = await import('./integrations/managed/store')
-          const [phonebookRaw, directSetting, defaultSetting, managedPhone] = await Promise.all([
+          const [phonebookRaw, directSetting, managedPhone] = await Promise.all([
             getSetting('transfer.phonebook'),
             getSetting(`transfer.${targetKey}`),
-            getSetting('transfer.resepsiyon'),
             options.clinicId ? activeConfig(options.clinicId, 'phone').catch(() => null) : Promise.resolve(null),
           ])
           let phonebook: Array<{ label: string; number: string }> = []
           if (phonebookRaw) {
-            try { phonebook = JSON.parse(phonebookRaw) } catch {}
+            try { phonebook = JSON.parse(phonebookRaw) } catch { }
           }
           targetNumber = resolveTransferPhonebookTarget(rawTarget, phonebook)
             || normalizeTransferPhoneNumber(directSetting || '')
             || normalizeTransferPhoneNumber(String(managedPhone?.transferNumber || ''))
-            || normalizeTransferPhoneNumber(defaultSetting || '')
             || (phonebook.length === 1 ? normalizeTransferPhoneNumber(phonebook[0].number) : null)
         }
 
@@ -496,29 +598,15 @@ export async function createLiveSession(
         const { dentalAppointments } = await import('./db/schema')
         const { and, eq, gte, sql } = await import('drizzle-orm')
         const clinicId = options.clinicId
-        if (!clinicId) return { success: false, message: 'Klinik bağlamı bulunamadı.' }
-        let appointmentId = String(args.randevu_id || '')
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(appointmentId)) {
-          appointmentId = ''
-          if (phone) {
-            const patient = await findPatientByPhone(phone, clinicId)
-            if (patient) {
-              const [upcoming] = await db.select({ id: dentalAppointments.id }).from(dentalAppointments)
-                .where(and(
-                  eq(dentalAppointments.clinicId, clinicId),
-                  eq(dentalAppointments.patientId, patient.id),
-                  eq(dentalAppointments.isActive, true),
-                  sql`${dentalAppointments.status} NOT IN ('cancelled', 'completed', 'no_show')`,
-                  gte(dentalAppointments.startTime, new Date(Date.now() - 2 * 60 * 60 * 1000)),
-                ))
-                .orderBy(dentalAppointments.startTime)
-                .limit(1)
-              if (upcoming) appointmentId = upcoming.id
-            }
-          }
+        if (!clinicId) return { success: false, message: 'İşletme bağlamı bulunamadı.' }
+        const explicitId = String(args.randevu_id || '').trim()
+        const { applyPatientAppointmentResponse, findUpcomingAppointmentByPhone } = await import('./services/appointment-notifications')
+        let appointmentId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(explicitId) ? explicitId : ''
+        if (!appointmentId && phone) {
+          const upcoming = await findUpcomingAppointmentByPhone(clinicId, phone, explicitId || undefined)
+          if (upcoming) appointmentId = upcoming.id
         }
         if (!appointmentId) return { success: false, message: 'Aktif ileri tarihli randevu bulunamadı.' }
-        const { applyPatientAppointmentResponse } = await import('./services/appointment-notifications')
         await applyPatientAppointmentResponse({
           clinicId,
           appointmentId,
@@ -606,16 +694,23 @@ export async function createLiveSession(
       lastPhoneUsed = rawPhone
       console.log(`[DB] musteriSorgula: telefon=${rawPhone}`)
       try {
-        const [customer, dentalPatient, doktorGecmisi] = await Promise.all([
+        const { lookupDynamicFieldsByPhone } = await import('./db/repositories/dynamic-tables')
+        const [customer, dentalPatient, doktorGecmisi, dynamicFields] = await Promise.all([
           getCustomerByPhone(rawPhone, options.clinicId),
           findPatientByPhone(rawPhone, options.clinicId),
           getPatientDoctorHistory(rawPhone, options.clinicId),
+          lookupDynamicFieldsByPhone(rawPhone, options.clinicId).catch((): Record<string, unknown> => ({})),
         ])
+        const dynamicSummary = typeof dynamicFields._dynamicSummary === 'string' ? dynamicFields._dynamicSummary : ''
+        const dynamicCallerName = typeof dynamicFields._dynamicCallerName === 'string' ? dynamicFields._dynamicCallerName : null
+        const dynamicSuffix = dynamicSummary ? `\nVeri Tablosu Kayıtları:\n${dynamicSummary}` : ''
+        collectedFlowFields = { ...collectedFlowFields, ...dynamicFields, telefon: rawPhone }
 
         const syncFlowLookup = async (registered: boolean, name?: string | null, hasUpcoming = false) => {
           if (!flowEngine) return undefined
           const step = await flowEngine.accept({
             fields: {
+              ...dynamicFields,
               telefon: rawPhone,
               kayitli: registered ? 'true' : 'false',
               'caller.isKnownPatient': registered ? 'true' : 'false',
@@ -623,6 +718,9 @@ export async function createLiveSession(
               ...(name ? { musteri_adi: name } : {}),
             },
           })
+          if (step.fields) {
+            collectedFlowFields = { ...collectedFlowFields, ...step.fields }
+          }
           return step.next?.prompt
         }
 
@@ -634,7 +732,7 @@ export async function createLiveSession(
               musteri_adi: dentalPatient.name,
               doktor_gecmisi: doktorGecmisi.length > 0 ? doktorGecmisi : undefined,
               ...(nextPrompt ? { sonraki_gorev: nextPrompt } : {}),
-              sonuc: `Hasta Adı: ${dentalPatient.name}\nTelefon: ${dentalPatient.phone || rawPhone}${doktorGecmisi.length > 0 ? `\nDoktor Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}` : ''}`,
+              sonuc: `Kişi Adı: ${dentalPatient.name}\nTelefon: ${dentalPatient.phone || rawPhone}${doktorGecmisi.length > 0 ? `\nSorumlu Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}` : ''}${dynamicSuffix}`,
             }
           }
           const knowledgeCustomer = await findCustomerDocByPhone(rawPhone)
@@ -645,27 +743,36 @@ export async function createLiveSession(
               musteri_adi: knowledgeCustomer.name,
               doktor_gecmisi: doktorGecmisi.length > 0 ? doktorGecmisi : undefined,
               ...(nextPrompt ? { sonraki_gorev: nextPrompt } : {}),
-              sonuc: `Hasta Adı: ${knowledgeCustomer.name}`,
+              sonuc: `Kişi Adı: ${knowledgeCustomer.name}${dynamicSuffix}`,
             }
           }
           if (doktorGecmisi.length > 0) {
-            const nextPrompt = await syncFlowLookup(true, null, false)
+            const nextPrompt = await syncFlowLookup(true, dynamicCallerName, false)
             return {
               kayitli: true,
-              musteri_adi: null,
+              musteri_adi: dynamicCallerName,
               doktor_gecmisi: doktorGecmisi,
               ...(nextPrompt ? { sonraki_gorev: nextPrompt } : {}),
-              sonuc: `Kayıtlı hasta bulundu.\nDoktor geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}`,
+              sonuc: `Kayıtlı kişi bulundu.\nSorumlu geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}${dynamicSuffix}`,
+            }
+          }
+          if (dynamicFields._dynamicKnownCaller === 'true' || dynamicSummary) {
+            const nextPrompt = await syncFlowLookup(true, dynamicCallerName, false)
+            return {
+              kayitli: true,
+              musteri_adi: dynamicCallerName,
+              ...(nextPrompt ? { sonraki_gorev: nextPrompt } : {}),
+              sonuc: `${dynamicCallerName ? `Kişi Adı: ${dynamicCallerName}\n` : ''}Telefon: ${rawPhone}${dynamicSuffix}`,
             }
           }
           const nextPrompt = await syncFlowLookup(false, null, false)
           return {
             kayitli: false,
             ...(nextPrompt ? { sonraki_gorev: nextPrompt } : {}),
-            sonuc: 'Bu numara ile kayıtlı hasta bulunamadı. Hastadan ad ve soyadını sor.',
+            sonuc: 'Bu numara ile kayıtlı kişi bulunamadı. Kişiden ad ve soyadını sor.',
           }
         }
-        
+
         const info: string[] = []
         info.push(`Ad Soyad: ${customer.name}`)
         info.push(`Telefon: ${customer.phone}`)
@@ -680,7 +787,10 @@ export async function createLiveSession(
           info.push(`Yaklaşan Randevu: ${next.date} ${next.time} — ${next.issueOrRequest || next.type}`)
         }
         if (doktorGecmisi.length > 0) {
-          info.push(`Doktor Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son: ${d.son_tedavi})`).join(', ')}`)
+          info.push(`Sorumlu Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son: ${d.son_tedavi})`).join(', ')}`)
+        }
+        if (dynamicSummary) {
+          info.push(`Veri Tablosu Kayıtları:\n${dynamicSummary}`)
         }
         const nextPrompt = await syncFlowLookup(true, customer.name, upcomingAppointments.length > 0)
         return {
@@ -880,12 +990,16 @@ export async function createLiveSession(
   const flowRuntimeInstruction = renderPromptTemplate(flowRuntimeTpl.trim() || fallbackFlowRuntimeInstruction, {}).trim() || fallbackFlowRuntimeInstruction
 
   const useSemanticTurn = (options.turnDetectionMode ?? 'semantic') === 'semantic'
+  const dynamicCallerContext =
+    typeof initialFields?._dynamicSummary === 'string' && initialFields._dynamicSummary.trim()
+      ? `\n\nARAYAN KİŞİNİN VERİ TABLOSU KAYITLARI (CANLI VERİTABANI — Koşul ve bilgilendirme adımlarında dikkate al):\n${initialFields._dynamicSummary.trim()}`
+      : ''
   const fullSystemInstruction = wrapWithTurkishLanguageLock(
-    options.systemPrompt + '\n\n' + voiceInstruction + (useSemanticTurn
+    options.systemPrompt + dynamicCallerContext + '\n\n' + voiceInstruction + (useSemanticTurn
       ? '\n\n' + SEMANTIC_TURN_PROMPT_INSTRUCTION
       : '') + (flowEngine
-      ? '\n\n' + flowRuntimeInstruction
-      : ''),
+        ? '\n\n' + flowRuntimeInstruction
+        : ''),
   )
   const liveConfig: any = {
     responseModalities: [Modality.AUDIO],
@@ -981,7 +1095,7 @@ export async function createLiveSession(
 
     return {
       // WebSocket açıldı ama Gemini henüz hazır değil — setupComplete bekleniyor.
-      onopen: () => {},
+      onopen: () => { },
       onmessage: async (msg: LiveServerMessage) => {
         // Session resumption handle güncellemesi — kopuşta bununla resume ederiz.
         if (msg.sessionResumptionUpdate) {
@@ -1271,7 +1385,7 @@ export async function createLiveSession(
     if (totalReconnects > MAX_TOTAL_RECONNECTS) {
       console.error(`[Gemini] Session ${options.dbSessionId} zombi — ${totalReconnects} toplam reconnect, kapatılıyor`)
       closedByUser = true
-      try { activeSession?.close() } catch {}
+      try { activeSession?.close() } catch { }
       callbacks.onClose()
       return
     }
@@ -1309,7 +1423,7 @@ export async function createLiveSession(
       console.log('[Gemini] Resume ile yeniden bağlanıldı')
       // Sayacı yalnızca bağlantı stabil kaldıysa sıfırla (onclose'da kontrol edilir).
       // Hemen düşerse sayaç artmaya devam eder → MAX'a ulaşınca durur.
-      try { prev?.close() } catch {}
+      try { prev?.close() } catch { }
     } catch (err) {
       console.error('[Gemini] Reconnect başarısız:', err)
       resumptionHandle = undefined // Stale handle'ı temizle
@@ -1336,7 +1450,7 @@ export async function createLiveSession(
     if (totalReconnects > MAX_TOTAL_RECONNECTS) {
       console.error(`[Gemini] Session ${options.dbSessionId} zombi (fresh) — ${totalReconnects} toplam reconnect, kapatılıyor`)
       closedByUser = true
-      try { activeSession?.close() } catch {}
+      try { activeSession?.close() } catch { }
       callbacks.onClose()
       return
     }
@@ -1364,7 +1478,7 @@ export async function createLiveSession(
       await connect() // handle'sız → yeni session
       lastReconnectSuccessAt = Date.now()
       console.log('[Gemini] Fresh session ile yeniden bağlanıldı')
-      try { prev?.close() } catch {}
+      try { prev?.close() } catch { }
     } catch (err) {
       console.error('[Gemini] Fresh reconnect de başarısız:', err)
       reconnecting = false
@@ -1392,7 +1506,7 @@ export async function createLiveSession(
 
   return {
     sendRealtimeInput: (input: LiveSendRealtimeInputParameters) => {
-      try { activeSession?.sendRealtimeInput(input) } catch {}
+      try { activeSession?.sendRealtimeInput(input) } catch { }
     },
     sendClientContent: (input: LiveSendClientContentParameters) => {
       // setupComplete henüz gelmediyse veya session henüz atanmadıysa buffer'la
@@ -1408,7 +1522,7 @@ export async function createLiveSession(
       }
     },
     sendToolResponse: (input: LiveSendToolResponseParameters) => {
-      try { activeSession?.sendToolResponse(input) } catch {}
+      try { activeSession?.sendToolResponse(input) } catch { }
     },
     beginClosing: () => {
       closingSession = true
@@ -1417,7 +1531,7 @@ export async function createLiveSession(
       closedByUser = true
       closingSession = true
       if (flowEngine) void flowEngine.close()
-      try { activeSession?.close() } catch {}
+      try { activeSession?.close() } catch { }
     },
   }
 }

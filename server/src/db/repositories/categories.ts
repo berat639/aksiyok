@@ -1,7 +1,11 @@
 import { and, sql as drizzleSql, eq } from 'drizzle-orm'
 import { db } from '../client'
-import { knowledgeCategories, knowledgeDocuments } from '../schema'
+import { clinics, knowledgeCategories, knowledgeDocuments } from '../schema'
 import { requireClinicId } from '../../tenancy/context'
+import {
+  DEFAULT_NEUTRAL_CATEGORIES,
+  getDefaultCategoriesForTemplate,
+} from '../../platform/roles'
 
 export interface CategoryRow {
   id: string
@@ -14,15 +18,7 @@ export interface CategoryRow {
 }
 
 /** Default categories seeded on first run */
-export const DEFAULT_CATEGORIES: Omit<CategoryRow, 'id' | 'createdAt'>[] = [
-  { slug: 'genel', label: 'Genel', icon: '🌐', color: '#60a5fa', sortOrder: 0 },
-  { slug: 'tedavi', label: 'Tedavi', icon: '🦷', color: '#34d399', sortOrder: 1 },
-  { slug: 'estetik', label: 'Estetik', icon: '✨', color: '#a78bfa', sortOrder: 2 },
-  { slug: 'kampanya', label: 'Kampanya', icon: '🎯', color: '#fb923c', sortOrder: 3 },
-  { slug: 'sss', label: 'SSS', icon: '❓', color: '#f59e0b', sortOrder: 4 },
-  { slug: 'hizmet', label: 'Hizmet', icon: '⚕️', color: '#38bdf8', sortOrder: 5 },
-  { slug: 'musteri', label: 'Hasta', icon: '👤', color: '#f472b6', sortOrder: 6 },
-]
+export const DEFAULT_CATEGORIES: Omit<CategoryRow, 'id' | 'createdAt'>[] = DEFAULT_NEUTRAL_CATEGORIES
 
 function toRow(r: typeof knowledgeCategories.$inferSelect): CategoryRow {
   return {
@@ -136,7 +132,7 @@ export async function deleteCategory(id: string): Promise<{ success: boolean; mo
 }
 
 /** Seed default categories for a specific clinic if its table is empty. */
-export async function seedCategoriesForClinic(clinicId: string): Promise<void> {
+export async function seedCategoriesForClinic(clinicId: string, businessTemplate?: string): Promise<void> {
   await db.execute(drizzleSql`
     UPDATE knowledge_documents
     SET category = 'genel', updated_at = now()
@@ -151,7 +147,17 @@ export async function seedCategoriesForClinic(clinicId: string): Promise<void> {
   const existing = await db.select({ id: knowledgeCategories.id }).from(knowledgeCategories).where(eq(knowledgeCategories.clinicId, clinicId)).limit(1)
   if (existing.length > 0) return
 
-  for (const cat of DEFAULT_CATEGORIES) {
+  let resolvedTemplate = businessTemplate
+  if (!resolvedTemplate) {
+    const [clinic] = await db
+      .select({ businessTemplate: clinics.businessTemplate })
+      .from(clinics)
+      .where(eq(clinics.id, clinicId))
+      .limit(1)
+    resolvedTemplate = clinic?.businessTemplate ?? 'general'
+  }
+
+  for (const cat of getDefaultCategoriesForTemplate(resolvedTemplate)) {
     await db.insert(knowledgeCategories).values({ ...cat, clinicId }).onConflictDoNothing()
   }
   console.log('[Categories] Varsayılan kategoriler oluşturuldu')

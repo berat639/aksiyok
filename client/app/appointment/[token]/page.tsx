@@ -6,6 +6,7 @@ import styles from './page.module.css'
 
 type AppointmentInfo = {
   clinicName: string
+  businessTemplate?: 'general' | 'dental_clinic'
   patientName: string
   doctorName: string | null
   doctorSpecialty: string | null
@@ -81,12 +82,19 @@ export default function PublicAppointmentResponsePage() {
           : prev,
       )
       setActiveMode('none')
+      const isDental = info?.businessTemplate === 'dental_clinic'
       setDoneMessage(
         action === 'confirm'
-          ? '✅ Randevunuza geleceğiniz onaylandı ve klinik takvimine işlendi. Teşekkür ederiz!'
+          ? (isDental
+              ? '✅ Randevunuza geleceğiniz onaylandı ve klinik takvimine işlendi. Teşekkür ederiz!'
+              : '✅ Randevunuza geleceğiniz onaylandı ve takvime işlendi. Teşekkür ederiz!')
           : action === 'postpone'
-            ? '📅 Tarih değişikliği (erteleme) talebiniz kliniğimize iletildi. Ekibimiz yeni randevu saati için sizinle iletişime geçecektir.'
-            : '❌ Randevuya gelemeyeceğiniz kliniğimize bildirildi ve randevu saatiniz iptal edildi.',
+            ? (isDental
+                ? '📅 Tarih değişikliği (erteleme) talebiniz kliniğimize iletildi. Ekibimiz yeni randevu saati için sizinle iletişime geçecektir.'
+                : '📅 Tarih değişikliği (erteleme) talebiniz işletmemize iletildi. Ekibimiz yeni randevu saati için sizinle iletişime geçecektir.')
+            : (isDental
+                ? '❌ Randevuya gelemeyeceğiniz kliniğimize bildirildi ve randevu saatiniz iptal edildi.'
+                : '❌ Randevuya gelemeyeceğiniz işletmemize bildirildi ve randevu saatiniz iptal edildi.'),
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Yanıtınız kaydedilemedi.')
@@ -125,7 +133,7 @@ export default function PublicAppointmentResponsePage() {
                 </h1>
                 <p className={styles.subtitle}>Sayın {info.patientName}, randevu detaylarınız aşağıdadır.</p>
               </div>
-              <span className={styles.clinicBadge}>🏥 {info.clinicName}</span>
+              <span className={styles.clinicBadge}>{info.businessTemplate === 'dental_clinic' ? '🏥' : '🏢'} {info.clinicName}</span>
             </div>
 
             <div className={styles.detailsBox}>
@@ -139,7 +147,7 @@ export default function PublicAppointmentResponsePage() {
               </div>
               {info.doctorName && (
                 <div className={styles.detailRow}>
-                  <span className={styles.detailLabel}>Hekim</span>
+                  <span className={styles.detailLabel}>{info.businessTemplate === 'dental_clinic' ? 'Hekim' : 'Görevli'}</span>
                   <span className={styles.detailValue}>
                     {info.doctorName}
                     {info.doctorSpecialty ? ` (${info.doctorSpecialty})` : ''}
@@ -215,7 +223,7 @@ export default function PublicAppointmentResponsePage() {
                     <textarea
                       rows={2}
                       className={styles.textarea}
-                      placeholder="Kliniğe iletmek istediğiniz not..."
+                      placeholder={info.businessTemplate === 'dental_clinic' ? 'Kliniğe iletmek istediğiniz not...' : 'İletmek istediğiniz not...'}
                       value={note}
                       onChange={e => setNote(e.target.value)}
                     />

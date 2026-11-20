@@ -1,6 +1,5 @@
 'use client'
 import type { KnowledgeDoc, CategoryDef } from '../KnowledgeTab'
-import { CALL_DIRECTION_LABELS } from '@/lib/knowledge-input-rules'
 import d from '../../../../styles/clinic-depth.module.css'
 import s from './KnowledgeTab.module.css'
 
@@ -19,15 +18,11 @@ export function fmtDate(value: string): string {
 }
 
 export function DocBadges({ doc, category }: { doc: KnowledgeDoc; category?: CategoryDef }) {
-  const dir = doc.callDirection || 'both'
   return (
-    <>
-      <span className={d.badge}>
-        <span className={s.dot} style={{ background: category?.color ?? '#60a5fa' }} />
-        {category ? `${category.icon} ${category.label}` : doc.category}
-      </span>
-      {dir !== 'both' && <span className={d.badge}>{CALL_DIRECTION_LABELS[dir]}</span>}
-    </>
+    <span className={d.badge}>
+      <span className={s.dot} style={{ background: category?.color ?? '#60a5fa' }} />
+      {category ? `${category.icon} ${category.label}` : doc.category}
+    </span>
   )
 }
 
@@ -127,13 +122,11 @@ export default function KnowledgeDocList(p: Props) {
         <input type="checkbox" className={s.checkbox} checked={allOn} onChange={e => p.onToggleAll(pageIds, e.target.checked)} aria-label="Sayfadaki tüm belgeleri seç" />
         <button type="button" className={s.sortBtn} onClick={() => p.onSort('title')}>Başlık {arrow('title')}</button>
         <button type="button" className={`${s.sortBtn} ${s.hideNarrow}`} onClick={() => p.onSort('category')}>Kategori {arrow('category')}</button>
-        <span>Kullanım yeri</span>
         <button type="button" className={s.sortBtn} onClick={() => p.onSort('active')} title="Duruma göre sırala">Durum {arrow('active')}</button>
         <button type="button" className={s.sortBtn} style={{ justifyContent: 'flex-end' }} onClick={() => p.onSort('updatedAt')}>Güncelleme {arrow('updatedAt')}</button>
       </div>
       {p.docs.map(doc => {
         const cat = catOf(doc.category)
-        const dir = doc.callDirection || 'both'
         return (
           <div key={doc.id} className={`${s.listRow} ${p.selected.has(doc.id) ? s.rowSelected : ''}`} onClick={() => p.onOpen(doc)}>
             <input type="checkbox" className={s.checkbox} checked={p.selected.has(doc.id)} onClick={e => e.stopPropagation()} onChange={() => p.onToggleSelect(doc.id)} aria-label={`${doc.title} seç`} />
@@ -146,9 +139,6 @@ export default function KnowledgeDocList(p: Props) {
             </div>
             <div className={`${s.badgeCell} ${s.hideNarrow}`}>
               <span className={d.badge}><span className={s.dot} style={{ background: cat?.color ?? '#60a5fa' }} />{cat ? `${cat.icon} ${cat.label}` : doc.category}</span>
-            </div>
-            <div className={s.badgeCell}>
-              <span className={d.badge}>{CALL_DIRECTION_LABELS[dir]}</span>
             </div>
             <div>{switchBtn(doc)}</div>
             <div className={s.actions} onClick={e => e.stopPropagation()}>

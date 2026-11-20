@@ -8,12 +8,9 @@
  * Safe to run multiple times (uses upsert/skip-if-exists logic)
  */
 
-import { readFileSync } from 'fs'
-import { resolve } from 'path'
 import postgres from 'postgres'
-import { embedText } from '../rag'
-import { RAG_PROMPT_DOCS } from '../data/rag-prompts'
 import { buildDefaultWebFlow } from '../db/repositories/flows'
+import { syncClinicFlowsWithDynamicTables } from '../db/repositories/dynamic-tables'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -25,100 +22,18 @@ const sql = postgres(DATABASE_URL, { max: 1 })
 
 async function getDefaultClinicId(): Promise<string> {
   const rows = await sql`SELECT id FROM clinics WHERE is_active = true ORDER BY created_at LIMIT 1`
-  if (!rows[0]?.id) throw new Error('Seed için aktif klinik bulunamadı; önce migration çalıştırılmalı')
+  if (!rows[0]?.id) throw new Error('Seed için aktif işletme bulunamadı; önce migration çalıştırılmalı')
   return rows[0].id
-}
-
-function vectorLiteral(vec: number[]): string {
-  return `[${vec.join(',')}]`
-}
-
-async function seedDefaultAccount() {
-  const credentials = process.env.GOOGLE_CREDENTIALS_JSON
-  const projectId = process.env.GOOGLE_CLOUD_PROJECT
-  const location = process.env.GOOGLE_VERTEX_LOCATION || 'europe-west1'
-
-  if (!credentials || !projectId) {
-    console.log('[Seed] GOOGLE_CREDENTIALS_JSON veya GOOGLE_CLOUD_PROJECT eksik — hesap seed atlandı')
-    return
-  }
-
-  // Insert only if no accounts exist yet
-  const existing = await sql`SELECT COUNT(*) AS count FROM accounts`
-  if (Number(existing[0]?.count) > 0) {
-    console.log('[Seed] Hesap zaten mevcut — atlandı')
-    return
-  }
-
-  await sql`
-    INSERT INTO accounts (name, credentials, project_id, location, is_active, priority)
-    VALUES ('Varsayılan Hesap', ${credentials}, ${projectId}, ${location}, true, 0)
-  `
-  console.log('[Seed] Varsayılan hesap eklendi:', projectId)
-}
-
-async function seedKnowledgePrompts() {
-  const clinicId = await getDefaultClinicId()
-  // Vertex embedding gerektirir; creds yoksa atla (belge embedding'siz
-  // eklenirse retrieveTopK 'embedding IS NOT NULL' filtresinden geçmez).
-  if (!process.env.GOOGLE_CREDENTIALS_JSON) {
-    console.log('[Seed] GOOGLE_CREDENTIALS_JSON eksik — bilgi bankası prompt seed atlandı')
-    return
-  }
-
-  let inserted = 0
-  let skipped = 0
-  let failed = 0
-  const nowIso = new Date().toISOString()
-
-  for (const doc of RAG_PROMPT_DOCS) {
-    // Idempotent: aynı başlık varsa atla (her redeploy'da duplicate olmasın).
-    const existing = await sql`SELECT 1 FROM knowledge_documents WHERE clinic_id = ${clinicId} AND title = ${doc.title} LIMIT 1`
-    if (existing.length > 0) {
-      skipped++
-      continue
-    }
-
-    try {
-      // Title + content embed → kullanıcı sorusu (title) ile retrieval recall'i artar.
-      const embedding = await embedText(`${doc.title}\n${doc.content}`)
-      await sql`
-        INSERT INTO knowledge_documents (clinic_id, category, title, content, active, embedding, embedded_at, created_at, updated_at)
-        VALUES (
-          ${clinicId},
-          ${doc.category},
-          ${doc.title},
-          ${doc.content},
-          true,
-          ${vectorLiteral(embedding)}::vector,
-          ${nowIso},
-          ${nowIso},
-          ${nowIso}
-        )
-      `
-      inserted++
-    } catch (err) {
-      failed++
-      console.error(`[Seed] "${doc.title}" embedding/insert hatası:`, err)
-    }
-  }
-
-  console.log(`[Seed] Bilgi bankası prompt: ${inserted} yeni, ${skipped} mevcut, ${failed} hata (toplam ${RAG_PROMPT_DOCS.length})`)
 }
 
 async function seedSystemSettings() {
   const clinicId = await getDefaultClinicId()
   const settings = [
-    { key: 'greeting_message', value: 'Merhaba, Pine Klinik asistanınızım. Size nasıl yardımcı olabilirim?' },
-    { key: 'greeting_message_outbound', value: 'Merhaba, ben Pine Klinik asistanıyım. Sizi arıyorum çünkü...' },
+    { key: 'greeting_message', value: 'Merhaba, yapay zeka asistanınızım. Size nasıl yardımcı olabilirim?' },
+    { key: 'greeting_message_outbound', value: 'Merhaba, ben işletme asistanıyım. Sizi arıyorum çünkü...' },
     { key: 'outbound_caller_id', value: '08503096119' },
   ]
   for (const s of settings) {
-    await sql`
-      INSERT INTO business_settings (key, value, updated_at)
-      VALUES (${s.key}, ${s.value}, ${new Date().toISOString()})
-      ON CONFLICT (key) DO NOTHING
-    `
     await sql`
       INSERT INTO clinic_settings (clinic_id, key, value, updated_at)
       VALUES (${clinicId}, ${s.key}, ${s.value}, ${new Date().toISOString()})
@@ -179,10 +94,10 @@ async function seedDefaultFlows() {
 async function main() {
   console.log('[Seed] Başlıyor...')
   try {
-    await seedDefaultAccount()
-    await seedKnowledgePrompts()
     await seedSystemSettings()
     await seedDefaultFlows()
+    const clinicId = await getDefaultClinicId()
+    await syncClinicFlowsWithDynamicTables(clinicId, { forceRebuild: false })
     console.log('[Seed] Tamamlandı')
   } catch (err) {
     console.error('[Seed] Hata:', err)

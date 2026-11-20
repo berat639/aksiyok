@@ -313,17 +313,10 @@ function getTodayTurkish(): string {
 }
 
 // SessionInfo arayüzü server/src/index.ts ile birebir uyumlu (referansla geçilir).
-interface TimedChunk {
-  buffer: Buffer
-  offsetMs: number
-}
-
 interface SharedSessionInfo {
   session: Awaited<ReturnType<typeof createLiveSession>>
   startedAt: Date
   startedAtMs: number
-  audioChunks: TimedChunk[]
-  userAudioChunks: TimedChunk[]
   shortId: string
   clinicId: string
   hostname: string
@@ -502,8 +495,6 @@ export async function startTelephony(deps: TelephonyDeps): Promise<{ stop: () =>
           session: null as any,
           startedAt,
           startedAtMs,
-          audioChunks: [],
-          userAudioChunks: [],
           shortId,
           clinicId: '',
           hostname: '',
@@ -723,7 +714,7 @@ export async function startTelephony(deps: TelephonyDeps): Promise<{ stop: () =>
                   })
                 })()
                 : buildSystemPrompt(direction),
-              resolveVoiceSettings(state.clinicId),
+              resolveVoiceSettings(state.clinicId, direction === 'outbound' ? 'outbound' : 'inbound'),
               (async () => {
                 if (isVip && vipRecord?.greeting) {
                   return vipRecord.greeting
@@ -775,7 +766,15 @@ export async function startTelephony(deps: TelephonyDeps): Promise<{ stop: () =>
               console.warn(`[${shortId}] Flow durumu okunamadı; maksimum görüşme süresi korunuyor`, e)
             }
 
-            const flowPriorityInstructions = `\n\n${renderPromptTemplate(flowPriorityTpl, {})}\n\n${buildOffTopicPromptRule(voiceSettings.offTopicMaxStrikes, voiceSettings.offTopicCloseMessage)}`
+            const flowPriorityParts: string[] = []
+            if (!isVip && !minimalGreetingEndFlow) {
+              const renderedPriority = renderPromptTemplate(flowPriorityTpl, {}).trim()
+              if (renderedPriority) flowPriorityParts.push(renderedPriority)
+            }
+            if (!isVip && !systemPromptBase.includes('KONU DIŞI')) {
+              flowPriorityParts.push(buildOffTopicPromptRule(voiceSettings.offTopicMaxStrikes, voiceSettings.offTopicCloseMessage))
+            }
+            const flowPriorityInstructions = flowPriorityParts.length > 0 ? `\n\n${flowPriorityParts.join('\n\n')}` : ''
             const systemPrompt = systemPromptBase + ragContext + phoneInstructions + flowPriorityInstructions
             console.log(`[${shortId}] , voice: ${voiceName}, isVip: ${isVip}, silenceWarn: ${state.silenceWarnMs}ms, silenceClose: ${state.silenceCloseMs}ms, maxCall: ${maxCallSeconds}s, offTopicStrikes: ${voiceSettings.offTopicMaxStrikes}, minimalFlow: ${minimalGreetingEndFlow}, wait: ${startWaitSec}s`)
 

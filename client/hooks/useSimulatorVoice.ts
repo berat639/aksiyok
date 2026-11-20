@@ -36,92 +36,159 @@ const NODE_TYPE_MAP: Record<string, string> = {
   endNode: 'END',
 }
 
-const TOOL_DECLARATIONS: FunctionDeclaration[] = [
-  {
-    name: 'akisBilgisiGuncelle',
-    description: 'Hastadan öğrenilen yeni veya düzeltilmiş bilgileri akışa işler ve sıradaki görevi döndürür.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        bilgiler: { type: Type.OBJECT, description: 'Alan adı → değer çiftleri (ör. ad, telefon, tarih, saat).' },
-      },
-      required: ['bilgiler'],
-    },
-  },
-  {
-    name: 'bilgiBankasindaAra',
-    description: 'Kliniğin bilgi bankasında hastanın sorusuyla ilgili bilgi arar.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: { sorgu: { type: Type.STRING, description: 'Aranacak soru veya konu.' } },
-      required: ['sorgu'],
-    },
-  },
-  {
-    name: 'cagriySonlandir',
-    description: 'Görüşme tamamlandığında, konu dışı ısrar devam ettiğinde veya maksimum süre dolduğunda veda cümlesinden sonra görüşmeyi sonlandırır.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: { neden: { type: Type.STRING, description: 'Kapanış nedeni' } },
-    },
-  },
-  {
-    name: 'aramaAktar',
-    description: 'Aramayı aktif Flow Builder işlem düğümünde tanımlanan yetkili hedefe aktarır.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        hedef: { type: Type.STRING, description: 'Aktarılacak hedef numara veya birim adı' },
-        sebep: { type: Type.STRING, description: 'Aktarım sebebi' },
-      },
-      required: ['hedef'],
-    },
-  },
-  {
-    name: 'randevuOlustur',
-    description: 'Toplanan bilgilerle randevu talebi oluşturur.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        musteri_adi: { type: Type.STRING, description: 'Hasta adı ve soyadı' },
-        telefon: { type: Type.STRING, description: 'Telefon numarası' },
-        tarih: { type: Type.STRING, description: 'Randevu tarihi (YYYY-MM-DD)' },
-        saat: { type: Type.STRING, description: 'Randevu saati (HH:MM)' },
-        sikayet: { type: Type.STRING, description: 'Şikayet veya işlem talebi' },
-      },
-    },
-  },
-  {
-    name: 'hastaNotKaydet',
-    description: 'Hastanın bıraktığı notu veya mesajı bankoya iletmek üzere kaydeder.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        telefon: { type: Type.STRING, description: 'Telefon numarası' },
-        not: { type: Type.STRING, description: 'Not veya mesaj metni' },
-        hasta_adi: { type: Type.STRING, description: 'Hasta adı soyadı' },
+function buildFieldSchemaMap(nodes: SimulatorVoiceOptions['nodes']): Record<string, Record<string, unknown>> {
+  const props: Record<string, Record<string, unknown>> = {}
+  for (const n of nodes) {
+    if (n.type !== 'fieldNode' && n.type !== 'FIELD') continue
+    const d = (n.data || {}) as Record<string, unknown>
+    const key = String(d.fieldName || '').trim()
+    if (!key) continue
+    const label = String(d.label || key)
+    const desc = String(d.description || label)
+    const fieldType = String(d.fieldType || 'text')
+    const enumValues = Array.isArray(d.enumValues)
+      ? d.enumValues.map(v => String(v).trim()).filter(Boolean)
+      : []
+    const allowMulti = Boolean(d.allowMultipleSelection) || d.sourceColumnType === 'multiselect'
+    if (fieldType === 'number') {
+      props[key] = { type: Type.NUMBER, description: `${label} — ${desc}` }
+    } else if (fieldType === 'boolean') {
+      props[key] = { type: Type.BOOLEAN, description: `${label} (Evet=true, Hayır=false) — ${desc}` }
+    } else if (enumValues.length > 0 && allowMulti) {
+      props[key] = {
+        type: Type.STRING,
+        description: `${label} — ${desc} (Birden fazla seçim varsa virgülle ayır. Seçenekler: ${enumValues.join(', ')})`,
+      }
+    } else if (enumValues.length > 0) {
+      props[key] = { type: Type.STRING, enum: enumValues, description: `${label} — ${desc}` }
+    } else {
+      props[key] = { type: Type.STRING, description: `${label} — ${desc}` }
+    }
+  }
+  return props
+}
+
+function buildSimulatorToolDeclarations(nodes: SimulatorVoiceOptions['nodes']): FunctionDeclaration[] {
+  const dynamicFieldProps = buildFieldSchemaMap(nodes)
+  return [
+    {
+      name: 'akisBilgisiGuncelle',
+      description: 'Hastadan öğrenilen yeni veya düzeltilmiş bilgileri (veri tablosu sütunları dahil) akışa işler ve sıradaki görevi döndürür.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          bilgiler: {
+            type: Type.OBJECT,
+            description: 'Alan adı → değer çiftleri (ör. ad, telefon, tarih, saat veya veri tablosu sütun anahtarları).',
+            properties: {
+              musteri_adi: { type: Type.STRING, description: 'Hasta adı ve soyadı' },
+              telefon: { type: Type.STRING, description: 'Telefon numarası' },
+              tarih: { type: Type.STRING, description: 'Randevu tarihi (YYYY-MM-DD)' },
+              saat: { type: Type.STRING, description: 'Randevu saati (HH:MM)' },
+              sikayet: { type: Type.STRING, description: 'Şikayet veya işlem talebi' },
+              ...dynamicFieldProps,
+            } as Record<string, any>,
+          },
+        },
+        required: ['bilgiler'],
       },
     },
-  },
-  {
-    name: 'whatsappKonumGonder',
-    description: 'Arayan numaraya kliniğin WhatsApp konumunu gönderir.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {},
-    },
-  },
-  {
-    name: 'musteriSorgula',
-    description: 'Telefon numarasına göre hastanın kayıtlı olup olmadığını sorgular.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        telefon: { type: Type.STRING, description: 'Sorgulanacak telefon numarası' },
+    {
+      name: 'veriTablosunaKaydet',
+      description: 'Görüşme boyunca toplanan dinamik veri tablosu sütunlarını ilgili veri tablosuna kaydeder.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          hedef_tablo_id: {
+            type: Type.STRING,
+            description: 'Kaydın yazılacağı hedef veri tablosu kimliği (opsiyonel).',
+          },
+          bilgiler: {
+            type: Type.OBJECT,
+            description: 'Kaydedilecek tablo sütunu anahtar-değer çiftleri.',
+            properties: {
+              ...dynamicFieldProps,
+            } as Record<string, any>,
+          },
+        },
       },
     },
-  },
-]
+    {
+      name: 'bilgiBankasindaAra',
+      description: 'Kliniğin bilgi bankasında hastanın sorusuyla ilgili bilgi arar.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: { sorgu: { type: Type.STRING, description: 'Aranacak soru veya konu.' } },
+        required: ['sorgu'],
+      },
+    },
+    {
+      name: 'cagriySonlandir',
+      description: 'Görüşme tamamlandığında, konu dışı ısrar devam ettiğinde veya maksimum süre dolduğunda veda cümlesinden sonra görüşmeyi sonlandırır.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: { neden: { type: Type.STRING, description: 'Kapanış nedeni' } },
+      },
+    },
+    {
+      name: 'aramaAktar',
+      description: 'Aramayı aktif Flow Builder işlem düğümünde tanımlanan yetkili hedefe aktarır.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          hedef: { type: Type.STRING, description: 'Aktarılacak hedef numara veya birim adı' },
+          sebep: { type: Type.STRING, description: 'Aktarım sebebi' },
+        },
+        required: ['hedef'],
+      },
+    },
+    {
+      name: 'randevuOlustur',
+      description: 'Toplanan bilgilerle randevu talebi oluşturur.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          musteri_adi: { type: Type.STRING, description: 'Hasta adı ve soyadı' },
+          telefon: { type: Type.STRING, description: 'Telefon numarası' },
+          tarih: { type: Type.STRING, description: 'Randevu tarihi (YYYY-MM-DD)' },
+          saat: { type: Type.STRING, description: 'Randevu saati (HH:MM)' },
+          sikayet: { type: Type.STRING, description: 'Şikayet veya işlem talebi' },
+          ...dynamicFieldProps,
+        } as Record<string, any>,
+      },
+    },
+    {
+      name: 'hastaNotKaydet',
+      description: 'Hastanın bıraktığı notu veya mesajı bankoya iletmek üzere kaydeder.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          telefon: { type: Type.STRING, description: 'Telefon numarası' },
+          not: { type: Type.STRING, description: 'Not veya mesaj metni' },
+          hasta_adi: { type: Type.STRING, description: 'Hasta adı soyadı' },
+        },
+      },
+    },
+    {
+      name: 'whatsappKonumGonder',
+      description: 'Arayan numaraya kliniğin WhatsApp konumunu gönderir.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {},
+      },
+    },
+    {
+      name: 'musteriSorgula',
+      description: 'Telefon numarasına göre hastanın kayıtlı olup olmadığını sorgular.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          telefon: { type: Type.STRING, description: 'Sorgulanacak telefon numarası' },
+        },
+      },
+    },
+  ]
+}
 
 function toServerGraph(opts: SimulatorVoiceOptions) {
   const nodes = opts.nodes.map(n => {
@@ -270,14 +337,30 @@ export function useSimulatorVoice(options: SimulatorVoiceOptions) {
   const handleTool = useCallback(async (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
     try {
       if (name === 'akisBilgisiGuncelle') {
-        const raw = (args.bilgiler || {}) as Record<string, unknown>
+        const nested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+        const flat = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'yeni_kisi'))
         const clean: Record<string, string> = {}
-        for (const [k, v] of Object.entries(raw)) {
-          const text = String(v ?? '').trim()
+        for (const [k, v] of Object.entries({ ...flat, ...nested })) {
+          const text = Array.isArray(v) ? v.map(x => String(x ?? '').trim()).filter(Boolean).join(', ') : String(v ?? '').trim()
           if (text) clean[k] = text
         }
         const step = await advance(clean)
         return { success: true, mesaj: step.nextInstruction || 'Bilgi işlendi.', tamamlandi: Boolean(step.completed) }
+      }
+      if (name === 'veriTablosunaKaydet') {
+        const nested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+        const flat = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'hedef_tablo_id'))
+        const clean: Record<string, string> = {}
+        for (const [k, v] of Object.entries({ ...flat, ...nested })) {
+          const text = Array.isArray(v) ? v.map(x => String(x ?? '').trim()).filter(Boolean).join(', ') : String(v ?? '').trim()
+          if (text) clean[k] = text
+        }
+        const step = await advance(clean)
+        return {
+          success: true,
+          mesaj: `Simülasyon: Bilgiler veri tablosuna kaydedildi (gerçek kayıt oluşturulmadı). ${step.nextInstruction || ''}`.trim(),
+          tamamlandi: Boolean(step.completed),
+        }
       }
       if (name === 'bilgiBankasindaAra' || name === 'searchKnowledgeBase') {
         const { nodes, edges } = toServerGraph(optsRef.current)
@@ -343,11 +426,18 @@ export function useSimulatorVoice(options: SimulatorVoiceOptions) {
       }
       if (name === 'musteriSorgula') {
         const isKnown = optsRef.current.callerProfile.kayitli === 'true'
-        await advance({ kayitli: isKnown ? 'true' : 'false' })
+        const phoneArg = typeof args.telefon === 'string' ? args.telefon.trim() : ''
+        await advance({
+          kayitli: isKnown ? 'true' : 'false',
+          ...(phoneArg ? { telefon: phoneArg } : {}),
+        })
+        const summary = stateRef.current.fields._dynamicSummary
         return {
-          kayitli: isKnown,
-          musteri_adi: isKnown ? 'Demo Kayıtlı Hasta' : null,
-          sonuc: isKnown
+          kayitli: isKnown || Boolean(summary),
+          musteri_adi: stateRef.current.fields.musteri_adi || (isKnown ? 'Demo Kayıtlı Hasta' : null),
+          sonuc: summary
+            ? `Veri tablosu kaydı bulundu:\n${summary}`
+            : isKnown
             ? 'Hasta sistemde kayıtlı (Demo Kayıtlı Hasta).'
             : 'Bu numara ile kayıtlı hasta bulunamadı.',
         }
@@ -416,7 +506,7 @@ export function useSimulatorVoice(options: SimulatorVoiceOptions) {
 
       const liveConfig: SessionConfig = {
         systemPrompt: voice.systemPrompt || '',
-        toolDeclarations: TOOL_DECLARATIONS,
+        toolDeclarations: buildSimulatorToolDeclarations(optsRef.current.nodes),
         model: voice.model || '',
         voiceName: voice.voiceName || 'Aoede',
         thinkingLevel: voice.thinkingLevel || 'LOW',

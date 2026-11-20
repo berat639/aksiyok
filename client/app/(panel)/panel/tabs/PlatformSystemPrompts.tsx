@@ -80,7 +80,7 @@ export default function PlatformSystemPrompts({ clinics }: { clinics: ClinicRef[
     if (!active) return
     await call(`/api/platform/system-prompts/${encodeURIComponent(active.key)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: draft }) })
     await load(active.key)
-    setNotice('Talimat kaydedildi; tüm kliniklerde geçerlidir.')
+    setNotice('Talimat kaydedildi; tüm işletmelerde geçerlidir.')
   })
 
   const resetToDefault = () => run(async () => {
@@ -108,7 +108,7 @@ export default function PlatformSystemPrompts({ clinics }: { clinics: ClinicRef[
       <div className={styles.setupHeading}>
         <div>
           <h2 className={styles.title}>Sistem Talimatları</h2>
-          <p className={styles.description}>Burada yapılan değişiklik tüm kliniklerde geçerli olur. Klinikler talimatları yalnızca görüntüler.</p>
+          <p className={styles.description}>Burada yapılan değişiklik tüm işletmelerde geçerli olur. İşletmeler talimatları yalnızca görüntüler.</p>
         </div>
       </div>
       {error && <div className={styles.error}>{error}</div>}
@@ -147,7 +147,7 @@ export default function PlatformSystemPrompts({ clinics }: { clinics: ClinicRef[
               <button type="button" className={styles.button} disabled={busy || !dirty || draft.trim().length < 5} onClick={() => void save()}>Kaydet</button>
               <button type="button" className={styles.secondaryButton} disabled={busy || !active.isCustom} onClick={() => setConfirmReset(true)}>Varsayılana dön</button>
               <button type="button" className={styles.secondaryButton} disabled={busy} onClick={() => void openHistory()}>Geçmiş</button>
-              <select className={styles.spSelect} value={previewClinic} onChange={e => setPreviewClinic(e.target.value)} aria-label="Önizleme kliniği">
+              <select className={styles.spSelect} value={previewClinic} onChange={e => setPreviewClinic(e.target.value)} aria-label="Önizleme işletmesi">
                 {clinics.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               <button type="button" className={styles.secondaryButton} disabled={busy || !previewClinic} onClick={() => void openPreview()}>Önizle</button>
@@ -199,7 +199,7 @@ export default function PlatformSystemPrompts({ clinics }: { clinics: ClinicRef[
         <ConfirmModal
           isOpen={true}
           title="Varsayılana dön"
-          message="Bu talimat varsayılan metne döndürülecek ve tüm kliniklerde geçerli olacak. Önceki metin geçmişte saklanır."
+          message="Bu talimat varsayılan metne döndürülecek ve tüm işletmelerde geçerli olacak. Önceki metin geçmişte saklanır."
           confirmText="Evet, varsayılana dön"
           cancelText="Vazgeç"
           variant="warning"

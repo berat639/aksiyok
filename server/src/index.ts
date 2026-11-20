@@ -4,26 +4,16 @@ import { knowledgePlugin } from './api/knowledge'
 import { ALLOWED_LIVE_MODELS, DEFAULT_LIVE_MODEL, resolveLiveModel, buildSystemPrompt } from './services/assistant-config'
 import { Elysia } from 'elysia'
 import { cors } from '@elysiajs/cors'
-import { createHmac, randomUUID, timingSafeEqual } from 'crypto'
-import { createReadStream, writeFileSync, mkdirSync } from 'fs'
+import { randomUUID } from 'crypto'
+import { writeFileSync, mkdirSync } from 'fs'
 import { resolve } from 'path'
 import { GoogleGenAI } from '@google/genai'
 import { eq } from 'drizzle-orm'
 import { createLiveSession, validateLiveCustomerIdentity } from './gemini'
 import {
-  readAppointments,
-  deleteAppointment,
-  createAppointment,
   getCustomerByPhone,
   getAppointmentsByDateRange,
 } from './db/repositories/appointments'
-import {
-  listRecordings,
-  getRecordingByFilename,
-  saveRecording,
-  deleteRecording,
-  RECORDINGS_DIR,
-} from './db/repositories/recordings'
 import {
   listDocs,
   createDoc,
@@ -42,41 +32,59 @@ import {
   deleteVipAssistant,
 } from './db/repositories/vip'
 import {
-  getCalendarSettings,
-  setCalendarSettings,
-  disconnectCalendar,
-  getAiModel,
-  setAiModel,
   getGreeting,
-  setGreeting,
-  getConnectionMode,
-  setConnectionMode,
-  getAllPromptSections,
-  setPromptSection,
-  resetPromptSection,
   getBranding,
   setBranding,
   getSetting,
   setSetting,
 } from './db/repositories/settings'
 import { embedText, getPreWarmEmbedding, getPreWarmedRagContext, buildRagPrompt, PRE_WARM_QUERY, getEmbeddingModel, getEmbeddingDimensions } from './rag'
-import { PROMPT_SECTIONS, PROMPT_SECTION_KEYS, getDefaultPromptValue } from './data/default-prompts'
 
 const PUBLIC_DIR = resolve(import.meta.dir, '../public')
 // Ensure public/uploads/dcm directory exists at startup
 mkdirSync(resolve(PUBLIC_DIR, 'uploads/dcm'), { recursive: true })
 import { listCategories, createCategory, updateCategory, deleteCategory, seedCategoriesForClinic } from './db/repositories/categories'
 import { authPlugin } from './api/auth'
+import { googleAuthPlugin } from './api/google-auth'
+import { publicOnboardingPlugin } from './api/public-onboarding'
+import { billingPlugin } from './api/billing'
+import { webAssistantPlugin } from './api/web-assistant'
 import { shiftsPlugin } from './api/shifts'
 import { notificationsPlugin } from './api/notifications'
 import { yoneticiPlugin } from './api/yonetici'
 import { financePlugin } from './api/finance'
 import { platformPlugin } from './api/platform'
+import { dynamicTablesPlugin } from './routes/dynamic-tables'
+import { calendarHandlers, calendarPlugin } from './routes/calendar'
 import { startReminderCron } from './cron/reminders'
-import { bindRequestContext, currentClinicId, currentTenant, enterTenantContext, findTenantByHostname, requireClinicId, resolveTenantFromRequest, runWithTenantContext, setRequestTenant } from './tenancy/context'
-import { authenticateRequest } from './middleware/auth'
+import {
+  bindRequestContext,
+  currentBusinessTemplate,
+  currentClinicId,
+  currentTenant,
+  enterTenantContext,
+  findTenantByHostname,
+  getTenantByClinicId,
+  hostnameFromRequest,
+  isAllowedTenantCorsHostname,
+  isSharedAppHostname,
+  normalizeHostname,
+  requireClinicId,
+  resolveTenantFromRequest,
+  runWithTenantContext,
+  setRequestTenant,
+  startTenantCorsHostSync,
+  type TenantContext,
+} from './tenancy/context'
+import { authenticateRequest, verifyToken } from './middleware/auth'
 
 const callerRegistry = new Map<string, { phone: string; channel?: string; direction?: string; clinicId: string; hostname: string }>()
+
+function ensureDentalTemplateAccess(set: { status?: number | string }) {
+  if (currentBusinessTemplate() === 'dental_clinic') return null
+  set.status = 403
+  return { error: 'Bu modül yalnızca Diş Kliniği işletme şablonunda aktiftir.' }
+}
 
 const PORT = Number(process.env.PORT) || 3001
 
@@ -105,42 +113,11 @@ function getAI(): GoogleGenAI {
 // ── SYSTEM_PROMPT ─────────────────────────────────────────────────────────────
 const DEFAULT_GREETING = 'Merhaba, hoş geldiniz! Ben Pine Clinic asistanınızım. Size daha iyi yardımcı olabilmem için telefon numaranızı öğrenebilir miyim?'
 
-function signOAuthState(payload: { clinicId: string; hostname: string; returnOrigin: string }): string {
-  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url')
-  const signature = createHmac('sha256', process.env.JWT_SECRET || 'voiceai-dev-secret-change-me').update(encoded).digest('base64url')
-  return `${encoded}.${signature}`
-}
-
-function verifyOAuthState(state: string | undefined): { clinicId: string; hostname: string; returnOrigin: string } | null {
-  if (!state) return null
-  const [encoded, signature] = state.split('.')
-  if (!encoded || !signature) return null
-  const expected = createHmac('sha256', process.env.JWT_SECRET || 'voiceai-dev-secret-change-me').update(encoded).digest('base64url')
-  const actualBuffer = Buffer.from(signature)
-  const expectedBuffer = Buffer.from(expected)
-  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) return null
-  try {
-    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString())
-    return typeof parsed.clinicId === 'string' && typeof parsed.hostname === 'string' && typeof parsed.returnOrigin === 'string' ? parsed : null
-  } catch { return null }
-}
-
-/**
- * Build system prompt dynamically from DB sections.
- * No cache — always reads fresh from DB for instant updates.
- */
 // ── Session tracking ──────────────────────────────────────────────────────────
-interface TimedChunk {
-  buffer: Buffer
-  offsetMs: number
-}
-
 interface SessionInfo {
   session: Awaited<ReturnType<typeof createLiveSession>>
   startedAt: Date
   startedAtMs: number
-  audioChunks: TimedChunk[]      // AI (24 kHz)
-  userAudioChunks: TimedChunk[]  // User (16 kHz)
   shortId: string
   clinicId: string
   hostname: string
@@ -168,135 +145,129 @@ sharedSseClients.add((event: string, data: unknown) => {
   notifyAdmins(event, data)
 })
 
-// ── WAV helper: time-aligned stereo (user=L, AI=R) ──────────────────────────
-/**
- * 16 kHz → 24 kHz linear-interpolation upsampling.
- */
-function upsample16to24(buf: Buffer): Buffer {
-  const inSamples = buf.length / 2
-  const outSamples = Math.ceil(inSamples * 24000 / 16000)
-  const out = Buffer.alloc(outSamples * 2)
-  for (let i = 0; i < outSamples; i++) {
-    const srcF = i * 16000 / 24000
-    const srcI = Math.floor(srcF)
-    const frac = srcF - srcI
-    const s0 = buf.readInt16LE(Math.min(srcI, inSamples - 1) * 2)
-    const s1 = buf.readInt16LE(Math.min(srcI + 1, inSamples - 1) * 2)
-    out.writeInt16LE(Math.round(s0 + (s1 - s0) * frac), i * 2)
-  }
-  return out
-}
-
-/**
- * Build a stereo WAV (user=L, AI=R) at 24 kHz using offset-based placement.
- * Each chunk is written at its real time offset; silences are zero-filled.
- * This keeps the user/AI tracks SYNCHRONIZED with the actual conversation timeline,
- * so playback reflects when each side actually spoke.
- */
-function buildStereoWav(aiChunks: TimedChunk[], userChunks: TimedChunk[], totalDurationMs: number): Buffer {
-  const sampleRate = 24000
-  const numChannels = 2
-  const bitsPerSample = 16
-  const totalSamples = Math.ceil(totalDurationMs / 1000 * sampleRate)
-  const dataSize = totalSamples * numChannels * 2
-  const byteRate = sampleRate * numChannels * bitsPerSample / 8
-  const blockAlign = numChannels * bitsPerSample / 8
-
-  const header = Buffer.alloc(44)
-  header.write('RIFF', 0); header.writeUInt32LE(36 + dataSize, 4)
-  header.write('WAVE', 8); header.write('fmt ', 12)
-  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20)
-  header.writeUInt16LE(numChannels, 22); header.writeUInt32LE(sampleRate, 24)
-  header.writeUInt32LE(byteRate, 28); header.writeUInt16LE(blockAlign, 32)
-  header.writeUInt16LE(bitsPerSample, 34); header.write('data', 36)
-  header.writeUInt32LE(dataSize, 40)
-
-  const data = Buffer.alloc(dataSize, 0)
-
-  // Place user chunks on left channel (offset 0 in each frame)
-  // User audio is 16 kHz PCM — upsample each chunk to 24 kHz before placing
-  for (const ch of userChunks) {
-    const pcm24 = upsample16to24(ch.buffer)
-    const startSample = Math.round(ch.offsetMs / 1000 * sampleRate)
-    const samples = pcm24.length / 2
-    for (let i = 0; i < samples; i++) {
-      const frame = startSample + i
-      if (frame >= totalSamples) break
-      const byteOffset = frame * 4 // 2 channels * 2 bytes
-      const s = pcm24.readInt16LE(i * 2)
-      data.writeInt16LE(s, byteOffset)
-    }
-  }
-
-  // Place AI chunks on right channel (offset 2 in each frame)
-  // AI audio is already 24 kHz PCM
-  for (const ch of aiChunks) {
-    const startSample = Math.round(ch.offsetMs / 1000 * sampleRate)
-    const samples = ch.buffer.length / 2
-    for (let i = 0; i < samples; i++) {
-      const frame = startSample + i
-      if (frame >= totalSamples) break
-      const byteOffset = frame * 4 + 2 // right channel
-      const s = ch.buffer.readInt16LE(i * 2)
-      data.writeInt16LE(s, byteOffset)
-    }
-  }
-
-  return Buffer.concat([header, data])
-}
-
 // ── Elysia app ────────────────────────────────────────────────────────────────
 const defaultCorsOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:3002',
-  'https://pineclinic.thinpine.com',
-  'http://pineclinic.thinpine.com',
+  'https://axamaz.com',
+  'http://axamaz.com',
+  'https://www.axamaz.com',
 ]
 const corsFromEnv = process.env.CORS_ORIGIN?.split(/[\s,]+/).map(s => s.trim()).filter(Boolean) ?? []
-const corsOrigins = [...new Set([...defaultCorsOrigins, ...corsFromEnv])]
+const corsOrigins = new Set<string>([...defaultCorsOrigins, ...corsFromEnv])
+const corsEnvHostnames = new Set<string>(
+  corsFromEnv
+    .map(origin => {
+      try {
+        return normalizeHostname(new URL(origin).hostname)
+      } catch {
+        return normalizeHostname(origin)
+      }
+    })
+    .filter(Boolean),
+)
+startTenantCorsHostSync()
+
+function isAllowedCorsOrigin(request: Request): boolean {
+  const origin = request.headers.get('origin')
+  if (!origin) return true
+  if (corsOrigins.has(origin)) return true
+  try {
+    const parsed = new URL(origin)
+    const hostname = normalizeHostname(parsed.hostname)
+    if (!hostname) return false
+    if (corsEnvHostnames.has(hostname)) return true
+    if (hostname === 'axamaz.com' || hostname.endsWith('.axamaz.com')) {
+      return parsed.protocol === 'https:' || process.env.NODE_ENV !== 'production'
+    }
+    return isAllowedTenantCorsHostname(hostname)
+  } catch {
+    return false
+  }
+}
+
+function readCookieFromHeader(request: Request, cookieName: string): string | undefined {
+  const header = request.headers.get('cookie')
+  if (!header) return undefined
+  for (const part of header.split(';')) {
+    const eqIdx = part.indexOf('=')
+    if (eqIdx <= 0) continue
+    const key = part.slice(0, eqIdx).trim()
+    if (key === cookieName) {
+      const rawVal = part.slice(eqIdx + 1).trim()
+      try {
+        return decodeURIComponent(rawVal)
+      } catch {
+        return rawVal
+      }
+    }
+  }
+  return undefined
+}
+
+async function resolveEffectiveRequestTenant(
+  request: Request,
+  explicitCookieToken?: string,
+): Promise<TenantContext | null> {
+  let tenant = await resolveTenantFromRequest(request)
+  const reqHost = hostnameFromRequest(request)
+  const token = explicitCookieToken || readCookieFromHeader(request, 'token')
+  if (token && (isSharedAppHostname(reqHost) || !tenant)) {
+    const payload = await verifyToken(token)
+    if (payload?.clinicId) {
+      const tokenTenant = await getTenantByClinicId(payload.clinicId, reqHost)
+      if (tokenTenant) {
+        tenant = tokenTenant
+      }
+    }
+  }
+  return tenant
+}
 
 const app = new Elysia()
   .onRequest(async ({ request }) => {
     bindRequestContext(request)
-    setRequestTenant(request, await resolveTenantFromRequest(request))
+    setRequestTenant(request, await resolveEffectiveRequestTenant(request))
   })
   .onBeforeHandle(async ({ request, cookie, set }) => {
     // Elysia may resume a lifecycle hook on a different async resource after
     // the database lookup in onRequest. Resolve and enter the tenant again at
     // the last lifecycle boundary so route handlers and repositories always
-    // see the request's clinic context.
-    setRequestTenant(request, await resolveTenantFromRequest(request))
+    // see the request's clinic context (including shared-host JWT clinicId).
+    setRequestTenant(
+      request,
+      await resolveEffectiveRequestTenant(request, cookie.token?.value as string | undefined),
+    )
     const pathname = new URL(request.url).pathname
     const protectedPrefixes = [
       '/api/admin', '/api/dental', '/api/yonetici', '/api/finance', '/api/shifts',
-      '/api/notifications', '/api/recordings', '/api/patient-notes', '/api/platform',
-      '/api/knowledge', '/api/appointments',
+      '/api/notifications', '/api/platform', '/api/knowledge', '/api/dynamic-tables', '/api/calendar',
     ]
     if (!protectedPrefixes.some(prefix => pathname.startsWith(prefix))) return
-    if (pathname === '/api/admin/settings/calendar/callback') return
     const tenant = currentTenant()
     if (!tenant) {
       set.status = 404
-      return { error: 'Bu domain için aktif klinik bulunamadı' }
+      return { error: 'Bu alan adı için aktif işletme bulunamadı' }
     }
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
     if (!user) {
       set.status = 401
       return { error: 'Oturum geçersiz' }
     }
-    if (tenant.isActive === false && !user.isPlatformAdmin && !pathname.startsWith('/api/platform')) {
+    const effectiveTenant = currentTenant() ?? tenant
+    if (effectiveTenant.isActive === false && !user.isPlatformAdmin && !pathname.startsWith('/api/platform')) {
       set.status = 403
-      return { error: 'Bu klinik şu anda dondurulmuştur (askıya alınmıştır). Lütfen satış ekibi ile iletişime geçiniz.' }
+      return { error: 'Bu işletme şu anda dondurulmuştur (askıya alınmıştır). Lütfen satış ekibi ile iletişime geçiniz.' }
     }
   })
-  .use(cors({ origin: corsOrigins }))
+  .use(cors({ origin: isAllowedCorsOrigin }))
   .use(platformIntegrations)
   .get('/uploads/*', async ({ params, set }) => {
     const clinicId = currentClinicId()
     if (!clinicId) {
       set.status = 404
-      return { error: 'Bu domain için aktif klinik bulunamadı' }
+      return { error: 'Bu alan adı için aktif işletme bulunamadı' }
     }
     const rawPath = (params as Record<string, string>)['*'] || ''
     const safeParts = rawPath.split('/').map(p => p.replace(/[^a-zA-Z0-9._-]/g, '')).filter(Boolean)
@@ -348,7 +319,7 @@ const app = new Elysia()
     const clinicId = currentClinicId()
     if (!clinicId) {
       set.status = 404
-      return { error: 'Bu domain için aktif klinik bulunamadı' }
+      return { error: 'Bu domain için aktif işletme bulunamadı' }
     }
     const safeName = params.filename.replace(/[^a-zA-Z0-9._-]/g, '')
     if (!safeName || safeName !== params.filename) {
@@ -390,46 +361,123 @@ const app = new Elysia()
     return file
   })
   .use(authPlugin)
+  .use(googleAuthPlugin)
+  .use(publicOnboardingPlugin)
+  .use(billingPlugin)
+  .use(webAssistantPlugin)
   .use(shiftsPlugin)
   .use(notificationsPlugin)
   .use(yoneticiPlugin)
   .use(financePlugin)
   .use(platformPlugin)
   .use(knowledgePlugin)
+  .use(dynamicTablesPlugin)
+  .use(calendarPlugin)
 
   // ── Public Opt-out API ─────────────────────────────────────────────────────
-  .get('/api/public/optout/:id', async ({ params, set }: any) => {
+  .derive(() => ({
+    async resolveDynamicOptOutTarget(clinicId: string, targetId: string) {
+      const { db } = await import('./db/client')
+      const { dynamicAppointmentConfigs, dynamicColumns, dynamicRows } = await import('./db/schema')
+      const { and, asc, eq } = await import('drizzle-orm')
+
+      const [dynRow] = await db.select({
+        id: dynamicRows.id,
+        tableId: dynamicRows.tableId,
+        displayTitle: dynamicRows.displayTitle,
+        values: dynamicRows.values,
+      }).from(dynamicRows).where(and(eq(dynamicRows.id, targetId), eq(dynamicRows.clinicId, clinicId))).limit(1)
+      if (!dynRow) return null
+
+      const [[cfg], cols] = await Promise.all([
+        db.select({
+          phoneColumnId: dynamicAppointmentConfigs.phoneColumnId,
+          titleColumnId: dynamicAppointmentConfigs.titleColumnId,
+        }).from(dynamicAppointmentConfigs).where(and(eq(dynamicAppointmentConfigs.tableId, dynRow.tableId), eq(dynamicAppointmentConfigs.clinicId, clinicId))).limit(1),
+        db.select({
+          id: dynamicColumns.id,
+          fieldType: dynamicColumns.fieldType,
+          isPrimaryTitle: dynamicColumns.isPrimaryTitle,
+        }).from(dynamicColumns).where(and(eq(dynamicColumns.tableId, dynRow.tableId), eq(dynamicColumns.clinicId, clinicId))).orderBy(asc(dynamicColumns.sortOrder)),
+      ])
+      const vals = (dynRow.values || {}) as Record<string, unknown>
+      const phoneColId = cfg?.phoneColumnId || cols.find(c => c.fieldType === 'phone')?.id || null
+      const titleColId = cfg?.titleColumnId || cols.find(c => c.isPrimaryTitle)?.id || null
+      const phone = phoneColId && vals[phoneColId] ? String(vals[phoneColId]).trim() : ''
+      const digits = phone.replace(/\D/g, '')
+      const phoneLast10 = digits.length >= 10 ? digits.slice(-10) : ''
+      const name = (titleColId && vals[titleColId] ? String(vals[titleColId]).trim() : '') || dynRow.displayTitle || 'Değerli Müşterimiz'
+      return { id: dynRow.id, phone, phoneLast10, name }
+    },
+  }))
+  .get('/api/public/optout/:id', async ({ params, set, resolveDynamicOptOutTarget }: any) => {
     try {
       const { db } = await import('./db/client')
-      const { patients } = await import('./db/schema')
-      const { eq, and } = await import('drizzle-orm')
+      const { contactChannelPreferences, patients } = await import('./db/schema')
+      const { and, eq, or } = await import('drizzle-orm')
 
-      const patientId = params.id
-      const patient = await db.query.patients.findFirst({
-        where: and(eq(patients.id, patientId), eq(patients.clinicId, requireClinicId()))
-      })
-      if (!patient) {
+      const targetId = String(params.id || '').trim()
+      const clinicId = requireClinicId()
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      if (!uuidPattern.test(targetId)) {
         set.status = 404
-        return { error: 'Hasta bulunamadı' }
+        return { error: 'Kayıt bulunamadı' }
       }
+
+      const patient = await db.query.patients.findFirst({
+        where: and(eq(patients.id, targetId), eq(patients.clinicId, clinicId))
+      })
+      if (patient) {
+        return {
+          id: patient.id,
+          name: patient.name,
+          smsOptOut: patient.smsOptOut,
+          emailOptOut: patient.emailOptOut,
+          whatsappOptOut: patient.whatsappOptOut
+        }
+      }
+
+      const dynTarget = await resolveDynamicOptOutTarget(clinicId, targetId)
+      if (!dynTarget) {
+        set.status = 404
+        return { error: 'Kayıt bulunamadı' }
+      }
+
+      const prefs = await db.select({
+        channel: contactChannelPreferences.channel,
+        status: contactChannelPreferences.status,
+      }).from(contactChannelPreferences).where(and(
+        eq(contactChannelPreferences.clinicId, clinicId),
+        dynTarget.phoneLast10
+          ? or(eq(contactChannelPreferences.dynamicRowId, dynTarget.id), eq(contactChannelPreferences.phoneLast10, dynTarget.phoneLast10))
+          : eq(contactChannelPreferences.dynamicRowId, dynTarget.id),
+      ))
+      const isBlocked = (ch: string) => prefs.some(p => p.channel === ch && (p.status === 'refused' || p.status === 'revoked'))
       return {
-        id: patient.id,
-        smsOptOut: patient.smsOptOut,
-        emailOptOut: patient.emailOptOut,
-        whatsappOptOut: patient.whatsappOptOut
+        id: dynTarget.id,
+        name: dynTarget.name,
+        smsOptOut: isBlocked('sms'),
+        emailOptOut: isBlocked('email'),
+        whatsappOptOut: isBlocked('whatsapp'),
       }
     } catch (e: any) {
       set.status = 500
       return { error: 'Sunucu hatası' }
     }
   })
-  .post('/api/public/optout/:id', async ({ params, body, set }: any) => {
+  .post('/api/public/optout/:id', async ({ params, body, set, resolveDynamicOptOutTarget }: any) => {
     try {
       const { db } = await import('./db/client')
-      const { patients } = await import('./db/schema')
-      const { eq, and } = await import('drizzle-orm')
+      const { contactChannelPreferences, patients } = await import('./db/schema')
+      const { and, eq, inArray } = await import('drizzle-orm')
 
-      const patientId = params.id
+      const targetId = String(params.id || '').trim()
+      const clinicId = requireClinicId()
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      if (!uuidPattern.test(targetId)) {
+        set.status = 404
+        return { error: 'Kayıt bulunamadı' }
+      }
       const b = body as any
 
       const update: { smsOptOut?: boolean; emailOptOut?: boolean; whatsappOptOut?: boolean } = {}
@@ -440,11 +488,36 @@ const app = new Elysia()
       if (update.smsOptOut) channels.push('sms')
       if (update.emailOptOut) channels.push('email')
       if (update.whatsappOptOut) channels.push('whatsapp')
+
+      const [existingPatient] = await db.select({ id: patients.id }).from(patients).where(and(eq(patients.id, targetId), eq(patients.clinicId, clinicId))).limit(1)
+      if (existingPatient) {
+        if (channels.length) {
+          await db.update(patients).set(update).where(and(eq(patients.id, targetId), eq(patients.clinicId, clinicId)))
+          const { revokePatientConsent } = await import('./services/patient-consent')
+          await revokePatientConsent(clinicId, targetId, channels)
+        }
+        return { success: true }
+      }
+
+      const dynTarget = await resolveDynamicOptOutTarget(clinicId, targetId)
+      if (!dynTarget) {
+        set.status = 404
+        return { error: 'Kayıt bulunamadı' }
+      }
+
       if (channels.length) {
-        const [patient] = await db.update(patients).set(update).where(and(eq(patients.id, patientId), eq(patients.clinicId, requireClinicId()))).returning({ id: patients.id })
-        if (!patient) { set.status = 404; return { error: 'Hasta bulunamadı' } }
-        const { revokePatientConsent } = await import('./services/patient-consent')
-        await revokePatientConsent(requireClinicId(), patientId, channels)
+        if (dynTarget.phone) {
+          const { revokeContactConsent } = await import('./services/patient-consent')
+          await revokeContactConsent(clinicId, dynTarget.phone, channels, dynTarget.id)
+        } else {
+          await db.update(contactChannelPreferences)
+            .set({ status: 'revoked', respondedAt: new Date() })
+            .where(and(
+              eq(contactChannelPreferences.clinicId, clinicId),
+              eq(contactChannelPreferences.dynamicRowId, dynTarget.id),
+              inArray(contactChannelPreferences.channel, channels),
+            ))
+        }
       }
 
       return { success: true }
@@ -516,180 +589,71 @@ const app = new Elysia()
   // ── Users API (admin) ──────────────────────────────────────────────────────
   .get('/api/admin/users', async () => {
     const { listUsers } = await import('./db/repositories/users')
-    return await listUsers()
+    const { getEffectiveUserAccess } = await import('./services/staff-invitations')
+    const clinicId = requireClinicId()
+    const rawUsers = await listUsers()
+    const enriched = await Promise.all(
+      rawUsers.map(async (u) => {
+        const effective = await getEffectiveUserAccess(clinicId, { id: u.id, role: u.role })
+        return {
+          ...u,
+          allowedTabs: effective.allowedTabs,
+          staffPermissions: effective.staffPermissions,
+        }
+      }),
+    )
+    return enriched
   })
 
-  // ── Dental Calendar API ────────────────────────────────────────────────────
-  .get('/api/dental/doctors', async () => {
-    const { listDoctors } = await import('./db/repositories/dental')
-    return listDoctors()
-  })
-  .post('/api/dental/doctors', async ({ body, set }) => {
-    const { createDoctor } = await import('./db/repositories/dental')
-    const b = body as any
-    if (!b.name || !b.specialty) { set.status = 400; return { error: 'Name and specialty required' } }
-    return createDoctor({ name: b.name, specialty: b.specialty, color: b.color })
-  })
-  .get('/api/dental/doctors/leaves', async ({ query }) => {
-    const { getDoctorLeaves } = await import('./db/repositories/dental')
-    return await getDoctorLeaves({
-      doctorId: query.doctorId as string | undefined,
-      date: query.date as string | undefined,
-      startDate: query.startDate as string | undefined,
-      endDate: query.endDate as string | undefined,
-    })
-  })
-  .post('/api/dental/doctors/leaves', async ({ body, set, cookie }) => {
-    const { authenticateRequest } = await import('./middleware/auth')
-    const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
-    const { createDoctorLeave } = await import('./db/repositories/dental')
-    const b = body as any
-    if (!b.doctorId || !b.date || !b.startTime || !b.endTime) {
-      set.status = 400; return { error: 'Hekim, tarih ve saat aralığı zorunludur' }
-    }
-    return await createDoctorLeave({
-      doctorId: b.doctorId,
-      substituteDoctorId: b.substituteDoctorId || null,
-      unassignAppointments: Boolean(b.unassignAppointments),
-      cancelAppointments: Boolean(b.cancelAppointments),
-      appointmentIds: Array.isArray(b.appointmentIds) ? b.appointmentIds : undefined,
-      date: b.date,
-      startTime: b.startTime,
-      endTime: b.endTime,
-      isFullDay: Boolean(b.isFullDay),
-      reason: b.reason,
-      notes: b.notes,
-      createdBy: user?.id,
-    })
-  })
-  .delete('/api/dental/doctors/leaves/:id', async ({ params, set }) => {
-    const { deleteDoctorLeave } = await import('./db/repositories/dental')
-    const ok = await deleteDoctorLeave(params.id)
-    if (!ok) { set.status = 404; return { error: 'İzin bulunamadı' } }
-    return { success: true }
-  })
-  .get('/api/dental/appointments', async ({ query }) => {
-    const { listDentalAppointments } = await import('./db/repositories/dental')
-    return await listDentalAppointments(query.date as string | undefined)
-  })
-  .post('/api/dental/appointments', async ({ body, set, cookie }) => {
-    const user = await authenticateRequest(cookie.token?.value as string | undefined).catch(() => null)
-    const actor = user
-      ? { actorType: user.role === 'hekim' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
-      : undefined
-    const { createDentalAppointment } = await import('./db/repositories/dental')
-    const b = body as any
-    if (!b.patientId || !b.title || !b.startTime || !b.endTime) {
-      set.status = 400; return { error: 'Missing required fields' }
-    }
-    try {
-      return await createDentalAppointment({
-        patientId: b.patientId, doctorId: b.doctorId || null, title: b.title,
-        startTime: new Date(b.startTime), endTime: new Date(b.endTime),
-        status: b.status, type: b.type, notes: b.notes,
-      }, actor)
-    } catch (err: any) {
-      set.status = 400; return { error: err.message || 'Randevu oluşturulamadı' }
-    }
-  })
-  .delete('/api/dental/appointments/:id', async ({ params, set }) => {
-    const { deleteDentalAppointment } = await import('./db/repositories/dental')
-    const ok = await deleteDentalAppointment(params.id)
-    if (!ok) { set.status = 404; return { error: 'Not found' } }
-    return { success: true }
-  })
-  .put('/api/dental/appointments/:id', async ({ params, body, set, cookie }) => {
-    const user = await authenticateRequest(cookie.token?.value as string | undefined).catch(() => null)
-    const actor = user
-      ? { actorType: user.role === 'hekim' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
-      : undefined
-    const { updateDentalAppointment } = await import('./db/repositories/dental')
-    const b = body as Record<string, unknown>
-    try {
-      const updated = await updateDentalAppointment(params.id, {
-        patientId: b.patientId !== undefined ? (b.patientId as string | null) : undefined,
-        doctorId: b.doctorId !== undefined ? (b.doctorId as string | null) : undefined,
-        timeConfirmed: b.timeConfirmed !== undefined ? (b.timeConfirmed as boolean) : undefined,
-        status: b.status as string | undefined,
-        startTime: b.startTime ? new Date(b.startTime as string) : undefined,
-        endTime: b.endTime ? new Date(b.endTime as string) : undefined,
-        type: b.type as string | undefined,
-        complaint: b.complaint as string | undefined,
-        notes: b.notes as string | undefined,
-        title: b.title as string | undefined,
-      }, actor)
-      if (!updated) { set.status = 404; return { error: 'Not found' } }
-      return updated
-    } catch (err: any) {
-      set.status = 400; return { error: err.message || 'Randevu güncellenemedi' }
-    }
-  })
-  .post('/api/dental/appointments/:id/approve-ai', async ({ params, body, set, cookie }) => {
-    const user = await authenticateRequest(cookie.token?.value as string | undefined)
-    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
-    const b = body as any
-    try {
-      const { approveAiAppointment } = await import('./db/repositories/dental')
-      return await approveAiAppointment(params.id, {
-        patientId: b.patientId || undefined,
-        patient: b.newPatient ? { name: String(b.newPatient.name || ''), phone: b.newPatient.phone ? String(b.newPatient.phone) : undefined } : undefined,
-        patientUpdate: b.patientUpdate ? { name: String(b.patientUpdate.name || ''), phone: b.patientUpdate.phone === undefined ? undefined : String(b.patientUpdate.phone) } : undefined,
-        doctorId: b.doctorId || null,
-        startTime: new Date(b.startTime), endTime: new Date(b.endTime),
-        complaint: typeof b.complaint === 'string' ? b.complaint : undefined,
-        reviewedBy: user.id,
-      })
-    } catch (err: any) {
-      set.status = 400; return { error: err.message || 'AI randevusu onaylanamadı' }
-    }
-  })
-  .post('/api/dental/appointments/:id/reject-ai', async ({ params, body, set, cookie }) => {
-    const user = await authenticateRequest(cookie.token?.value as string | undefined)
-    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
-    try {
-      const { rejectAiAppointment } = await import('./db/repositories/dental')
-      return await rejectAiAppointment(params.id, String((body as any)?.reason || ''), user.id)
-    } catch (err: any) {
-      set.status = 400; return { error: err.message || 'AI randevusu iptal edilemedi' }
-    }
-  })
-  .post('/api/dental/appointments/:id/patient-response', async ({ params, body, set }) => {
-    const b = (body || {}) as Record<string, unknown>
-    const action = String(b.action || '') as 'confirm' | 'postpone' | 'cancel'
-    if (!['confirm', 'postpone', 'cancel'].includes(action)) {
-      set.status = 400; return { error: 'Geçersiz işlem (confirm | postpone | cancel)' }
-    }
-    try {
-      const { applyPatientAppointmentResponse } = await import('./services/appointment-notifications')
-      return await applyPatientAppointmentResponse({
-        clinicId: requireClinicId(),
-        appointmentId: params.id,
-        action,
-        note: typeof b.note === 'string' ? b.note : null,
-        preferredDate: typeof b.preferredDate === 'string' ? b.preferredDate : null,
-        channel: 'link',
-      })
-    } catch (err: any) {
-      set.status = err.status || 400
-      return { error: err.message || 'Yanıt kaydedilemedi' }
-    }
-  })
-  .get('/api/dental/appointments/:id/treatments', async ({ params }) => {
+  // ── Dental & Calendar Compatibility API (/api/dental/* -> /api/calendar/*) ─
+  .get('/api/dental/doctors', () => calendarHandlers.listEmployees())
+  .post('/api/dental/doctors', ({ body, set }) => calendarHandlers.createEmployee(body, set))
+  .get('/api/dental/doctors/leaves', ({ query }) => calendarHandlers.listLeaves(query))
+  .post('/api/dental/doctors/leaves', ({ body, set, cookie, request }) =>
+    calendarHandlers.createLeave(body, set, cookie, request),
+  )
+  .delete('/api/dental/doctors/leaves/:id', ({ params, set }) => calendarHandlers.deleteLeave(params.id, set))
+  .get('/api/dental/appointments', ({ query }) => calendarHandlers.listAppointments(query))
+  .post('/api/dental/appointments', ({ body, set, cookie, request }) =>
+    calendarHandlers.createAppointment(body, set, cookie, request),
+  )
+  .delete('/api/dental/appointments/:id', ({ params, set }) => calendarHandlers.deleteAppointment(params.id, set))
+  .put('/api/dental/appointments/:id', ({ params, body, set, cookie, request }) =>
+    calendarHandlers.updateAppointment(params.id, body, set, cookie, request),
+  )
+  .post('/api/dental/appointments/:id/approve-ai', ({ params, body, set, cookie, request }) =>
+    calendarHandlers.approveAiAppointment(params.id, body, set, cookie, request),
+  )
+  .post('/api/dental/appointments/:id/reject-ai', ({ params, body, set, cookie, request }) =>
+    calendarHandlers.rejectAiAppointment(params.id, body, set, cookie, request),
+  )
+  .post('/api/dental/appointments/:id/patient-response', ({ params, body, set }) =>
+    calendarHandlers.applyAppointmentResponse(params.id, body, set),
+  )
+  .get('/api/dental/appointments/:id/treatments', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getAppointmentTreatments } = await import('./db/repositories/dental')
     return await getAppointmentTreatments(params.id)
   })
-  .post('/api/dental/appointments/:id/treatments', async ({ params, body }) => {
+  .post('/api/dental/appointments/:id/treatments', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { linkTreatmentToAppointment } = await import('./db/repositories/dental')
     const b = body as any
     return await linkTreatmentToAppointment(params.id, b.treatmentPlanId, b.sessionNumber, b.notes)
   })
   .delete('/api/dental/appointments/:id/treatments/:tpId', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { unlinkTreatmentFromAppointment } = await import('./db/repositories/dental')
     const ok = await unlinkTreatmentFromAppointment(params.id, params.tpId)
     if (!ok) { set.status = 404; return { error: 'Not found' } }
     return { success: true }
   })
   .patch('/api/dental/appointments/:id/treatments/:atId', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { updateAppointmentTreatmentSession } = await import('./db/repositories/dental')
     const b = body as any
     const updated = await updateAppointmentTreatmentSession(params.atId, { sessionStatus: b.sessionStatus, notes: b.notes })
@@ -867,11 +831,15 @@ const app = new Elysia()
       return { error: e.message || 'Hastalar silinemedi' }
     }
   })
-  .get('/api/dental/patients/:id/treatment-groups', async ({ params }) => {
+  .get('/api/dental/patients/:id/treatment-groups', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getPatientTreatmentGroups } = await import('./db/repositories/dental')
     return await getPatientTreatmentGroups(params.id)
   })
-  .get('/api/dental/treatment-catalog', async () => {
+  .get('/api/dental/treatment-catalog', async ({ set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { listTreatmentCatalog } = await import('./services/treatment-catalog')
     return listTreatmentCatalog(requireClinicId())
   })
@@ -887,7 +855,7 @@ const app = new Elysia()
       ...settings,
       integrations,
       canEdit: !!user && ['yonetici', 'moderator'].includes(user.role),
-      canManageConsent: !!user && ['yonetici', 'moderator', 'hekim', 'host'].includes(user.role),
+      canManageConsent: !!user && ['yonetici', 'moderator', 'calisan', 'hekim', 'host', 'sekreter', 'asistan'].includes(user.role),
     }
   })
   .put('/api/dental/consent-settings', async ({ body, set, cookie, request }) => {
@@ -923,7 +891,7 @@ const app = new Elysia()
   })
   .post('/api/dental/patients/:id/consent-requests', async ({ params, body, set, cookie, request }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator', 'hekim', 'host'].includes(user.role)) { set.status = 403; return { error: 'Yetki yok' } }
+    if (!user || !['yonetici', 'moderator', 'calisan', 'hekim', 'host', 'sekreter', 'asistan'].includes(user.role)) { set.status = 403; return { error: 'Yetki yok' } }
     const { requestPatientConsent } = await import('./services/patient-consent')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     const b = (body || {}) as { deliveryChannel: 'sms' | 'whatsapp' | 'email'; requestKey: string }
@@ -934,7 +902,7 @@ const app = new Elysia()
   })
   .post('/api/dental/patients/:id/consent-in-clinic', async ({ params, body, set, cookie, request }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator', 'hekim', 'host'].includes(user.role)) { set.status = 403; return { error: 'Yetki yok' } }
+    if (!user || !['yonetici', 'moderator', 'calisan', 'hekim', 'host', 'sekreter', 'asistan'].includes(user.role)) { set.status = 403; return { error: 'Yetki yok' } }
     const { grantInClinicPatientConsent } = await import('./services/patient-consent')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     const b = (body || {}) as { channels?: Array<'sms' | 'whatsapp' | 'email' | 'assistant_call'> }
@@ -942,24 +910,30 @@ const app = new Elysia()
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .post('/api/dental/treatment-catalog', async ({ body, set, cookie, request }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
+    if (!user || !['yonetici', 'moderator', 'calisan', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
     const { saveTreatmentCatalog } = await import('./services/treatment-catalog')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await saveTreatmentCatalog(requireClinicId(), body as any) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .put('/api/dental/treatment-catalog/:id', async ({ params, body, set, cookie, request }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
+    if (!user || !['yonetici', 'moderator', 'calisan', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
     const { saveTreatmentCatalog } = await import('./services/treatment-catalog')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await saveTreatmentCatalog(requireClinicId(), body as any, params.id) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .delete('/api/dental/treatment-catalog/:id', async ({ params, set, cookie, request }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
+    if (!user || !['yonetici', 'moderator', 'calisan', 'hekim'].includes(user.role)) { set.status = 403; return { error: 'Katalog düzenleme yetkisi yok' } }
     const { archiveTreatmentCatalog } = await import('./services/treatment-catalog')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try {
@@ -968,6 +942,8 @@ const app = new Elysia()
     } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .post('/api/dental/patients/:id/treatment-groups', async ({ params, body, set, cookie }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { authenticateRequest } = await import('./middleware/auth')
     const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
     const { createTreatmentGroup } = await import('./db/repositories/dental')
@@ -976,6 +952,8 @@ const app = new Elysia()
     return await createTreatmentGroup({ patientId: params.id, name: b.name, description: b.description, createdById: user?.id })
   })
   .get('/api/dental/treatment-groups/:id', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getTreatmentPlan, TreatmentPlanError } = await import('./services/treatment-planning')
     try {
       const plan = await getTreatmentPlan(params.id, requireClinicId())
@@ -987,6 +965,8 @@ const app = new Elysia()
     }
   })
   .put('/api/dental/treatment-groups/:id/full', async ({ params, body, set, cookie, request }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { saveTreatmentPlan, TreatmentPlanError } = await import('./services/treatment-planning')
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
     if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
@@ -997,7 +977,9 @@ const app = new Elysia()
       throw error
     }
   })
-  .put('/api/dental/treatment-groups/:id', async ({ params, body, cookie }) => {
+  .put('/api/dental/treatment-groups/:id', async ({ params, body, set, cookie }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { authenticateRequest } = await import('./middleware/auth')
     const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
     const { updateTreatmentGroup } = await import('./db/repositories/dental')
@@ -1005,6 +987,8 @@ const app = new Elysia()
     return await updateTreatmentGroup(params.id, { name: b.name, description: b.description, status: b.status, updatedById: user?.id })
   })
   .delete('/api/dental/treatment-groups/:id', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { cancelTreatmentGroup, TreatmentPlanError } = await import('./services/treatment-planning')
     try {
       const success = await cancelTreatmentGroup(params.id, requireClinicId())
@@ -1015,13 +999,17 @@ const app = new Elysia()
       throw error
     }
   })
-  .get('/api/dental/patients/:id/treatments', async ({ params }) => {
+  .get('/api/dental/patients/:id/treatments', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getPatientTreatments, getPatientTreatmentGroups } = await import('./db/repositories/dental')
     const treatments = await getPatientTreatments(params.id)
     const groups = await getPatientTreatmentGroups(params.id)
     return { treatments, groups: groups.groups }
   })
   .post('/api/dental/patients/:id/treatments/bulk', async ({ params, body, set, cookie, request }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { saveTreatmentPlan, TreatmentPlanError } = await import('./services/treatment-planning')
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
     if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
@@ -1035,6 +1023,8 @@ const app = new Elysia()
     }
   })
   .post('/api/dental/patients/:id/treatments', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { createStandaloneTreatment, TreatmentPlanError } = await import('./services/treatment-planning')
     try {
       return await createStandaloneTreatment(params.id, body as any, requireClinicId())
@@ -1048,12 +1038,16 @@ const app = new Elysia()
     const { inventoryItems } = await import('./db/schema')
     return db.select().from(inventoryItems).where(eq(inventoryItems.clinicId, requireClinicId())).orderBy(inventoryItems.name)
   })
-  .get('/api/dental/attachment-settings', async ({ cookie, request }) => {
+  .get('/api/dental/attachment-settings', async ({ cookie, request, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { attachmentLimits } = await import('./services/plan-attachments')
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
     return { ...(await attachmentLimits(requireClinicId())), canEdit: !!user && ['yonetici', 'moderator'].includes(user.role) }
   })
   .put('/api/dental/attachment-settings', async ({ body, set, cookie, request }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
     if (!user || !['yonetici', 'moderator'].includes(user.role)) { set.status = 403; return { error: 'Dosya ayarlarını düzenleme yetkisi yok' } }
     const { saveAttachmentLimits } = await import('./services/plan-attachments')
@@ -1062,30 +1056,40 @@ const app = new Elysia()
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .get('/api/dental/patients/:id/attachments', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { listPatientAttachments } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await listPatientAttachments(requireClinicId(), params.id) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .post('/api/dental/patients/:id/attachments', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { createPlanAttachment } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await createPlanAttachment(requireClinicId(), params.id, body as any) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .get('/api/dental/patients/:id/attachments/:attachmentId', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getPlanAttachment } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await getPlanAttachment(requireClinicId(), params.id, params.attachmentId) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .delete('/api/dental/patients/:id/attachments/:attachmentId', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { deletePlanAttachment } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await deletePlanAttachment(requireClinicId(), params.id, params.attachmentId) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .put('/api/dental/patients/:id/attachments/:attachmentId/files/:fileIndex', async ({ params, query, request, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { uploadPlanChunk, readLimitedChunk } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try {
@@ -1095,12 +1099,16 @@ const app = new Elysia()
     } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .post('/api/dental/patients/:id/attachments/:attachmentId/finish', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { finishPlanAttachment } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try { return await finishPlanAttachment(requireClinicId(), params.id, params.attachmentId, (body as any)?.groupId) }
     catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
   .get('/api/dental/patients/:id/attachments/:attachmentId/files/:fileIndex', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getPlanAttachmentFile } = await import('./services/plan-attachments')
     const { TreatmentPlanError } = await import('./services/treatment-planning')
     try {
@@ -1112,11 +1120,15 @@ const app = new Elysia()
       return Bun.file(file.path)
     } catch (error) { if (error instanceof TreatmentPlanError) { set.status = error.status; return { error: error.message } }; throw error }
   })
-  .get('/api/dental/patients/:id/consultations', async ({ params }) => {
+  .get('/api/dental/patients/:id/consultations', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getPatientConsultations } = await import('./db/repositories/dental')
     return await getPatientConsultations(params.id)
   })
   .post('/api/dental/patients/:id/consultations', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { createConsultation } = await import('./db/repositories/dental')
     const b = body as any
     if (!b.consultationNote && !b.diseaseNote) { set.status = 400; return { error: 'Missing fields' } }
@@ -1128,7 +1140,9 @@ const app = new Elysia()
       diseaseNote: b.diseaseNote || undefined
     })
   })
-  .put('/api/dental/consultations/:id', async ({ params, body }) => {
+  .put('/api/dental/consultations/:id', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { db } = await import('./db/client')
     const { consultations } = await import('./db/schema')
     const { and, eq } = await import('drizzle-orm')
@@ -1140,11 +1154,15 @@ const app = new Elysia()
     await db.update(consultations).set(updateData).where(and(eq(consultations.id, params.id), eq(consultations.clinicId, requireClinicId())))
     return { success: true }
   })
-  .get('/api/dental/clinics/:id/consultations/autocomplete', async ({ params }) => {
+  .get('/api/dental/clinics/:id/consultations/autocomplete', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getClinicConsultationAutocomplete } = await import('./db/repositories/dental')
     return await getClinicConsultationAutocomplete(params.id)
   })
   .post('/api/dental/upload-dcm', async ({ body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const MAX_DCM_SIZE = 20 * 1024 * 1024; // 20 MB
     const b = body as any
     if (!b.file) {
@@ -1175,6 +1193,8 @@ const app = new Elysia()
     return { url: `/api/dental/dcm/${fileName}`, originalSize: raw.byteLength, compressedSize: compressed.byteLength, savedKB };
   })
   .get('/api/dental/dcm/:filename', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const safeName = params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
     const clinicDirectory = resolve(PUBLIC_DIR, 'uploads/dcm', requireClinicId());
     const filePath = resolve(clinicDirectory, safeName);
@@ -1194,9 +1214,11 @@ const app = new Elysia()
     return new Response(raw);
   })
   .put('/api/dental/treatments/:id', async ({ params, body, set, cookie }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const user = await authenticateRequest(cookie.token?.value as string | undefined).catch(() => null)
     const actor = user
-      ? { actorType: user.role === 'hekim' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
+      ? { actorType: user.role === 'hekim' || user.role === 'calisan' ? 'doctor' : user.role === 'yonetici' ? 'admin' : 'desk', actorName: user.name }
       : undefined
     const { completeTreatmentItem, TreatmentPlanError } = await import('./services/treatment-planning')
     const { logPatientActivity } = await import('./db/repositories/dental')
@@ -1244,6 +1266,8 @@ const app = new Elysia()
     }
   })
   .delete('/api/dental/treatments/:id', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { cancelTreatmentItem, TreatmentPlanError } = await import('./services/treatment-planning')
     try {
       const success = await cancelTreatmentItem(params.id, requireClinicId())
@@ -1277,21 +1301,15 @@ const app = new Elysia()
       treatmentPlanId: b.treatmentPlanId || null
     })
   })
-  .get('/api/dental/patients/:id/works', async ({ params }) => {
-    const { getPatientCompletedWorks } = await import('./db/repositories/dental')
-    return await getPatientCompletedWorks(params.id)
-  })
-  .post('/api/dental/patients/:id/works', async ({ params, body, set }) => {
-    const { createCompletedWork } = await import('./db/repositories/dental')
-    const b = body as any
-    if (!b.doctorId || !b.date || !b.description) { set.status = 400; return { error: 'Missing fields' } }
-    return await createCompletedWork({ patientId: params.id, doctorId: b.doctorId, date: b.date, description: b.description })
-  })
-  .get('/api/dental/patients/:id/consultations', async ({ params }) => {
+  .get('/api/dental/patients/:id/consultations', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { getPatientConsultations } = await import('./db/repositories/dental')
     return await getPatientConsultations(params.id)
   })
   .post('/api/dental/patients/:id/consultations', async ({ params, body, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { createConsultation } = await import('./db/repositories/dental')
     const b = body as any
     if (!b.consultationNote && !b.diseaseNote) { set.status = 400; return { error: 'Missing fields' } }
@@ -1304,69 +1322,13 @@ const app = new Elysia()
     })
   })
   .delete('/api/dental/consultations/:id', async ({ params, set }) => {
+    const denied = ensureDentalTemplateAccess(set)
+    if (denied) return denied
     const { deleteConsultation } = await import('./db/repositories/dental')
     const success = await deleteConsultation(params.id)
     if (!success) { set.status = 404; return { error: 'Not found' } }
     return { success: true }
   })
-  .get('/api/dental/patients/:id/diseases', async ({ params }) => {
-    const { getPatientDiseases } = await import('./db/repositories/dental')
-    return await getPatientDiseases(params.id)
-  })
-  .post('/api/dental/patients/:id/diseases', async ({ params, body, set }) => {
-    const { createPatientDisease } = await import('./db/repositories/dental')
-    const b = body as any
-    if (!b.name) { set.status = 400; return { error: 'Missing fields' } }
-    return await createPatientDisease({ patientId: params.id, name: b.name, notes: b.notes })
-  })
-  .delete('/api/dental/diseases/:id', async ({ params, set }) => {
-    const { deletePatientDisease } = await import('./db/repositories/dental')
-    const success = await deletePatientDisease(params.id)
-    if (!success) { set.status = 404; return { error: 'Not found' } }
-    return { success: true }
-  })
-
-  // ── Patient Notes ──────────────────────────────────────────────────────────
-  .get('/api/patient-notes', async ({ query }) => {
-    const { listPatientNotes } = await import('./db/repositories/dental')
-    return await listPatientNotes(query.status as string | undefined)
-  })
-
-  .post('/api/patient-notes', async ({ body, set }) => {
-    const b = (body ?? {}) as { phone?: string; content?: string; patientId?: string; source?: string }
-    if (!b.content || !b.content.trim()) {
-      set.status = 400
-      return { error: 'Not içeriği zorunludur' }
-    }
-    const { createPatientNote } = await import('./db/repositories/dental')
-    return await createPatientNote({
-      phone: b.phone || '',
-      content: b.content.trim(),
-      patientId: b.patientId,
-      source: b.source || 'manual',
-    })
-  })
-
-  .patch('/api/patient-notes/:id/read', async ({ params, set }) => {
-    const { markPatientNoteRead } = await import('./db/repositories/dental')
-    const updated = await markPatientNoteRead(params.id)
-    if (!updated) { set.status = 404; return { error: 'Not bulunamadı' } }
-    return { success: true, note: updated }
-  })
-
-  .get('/api/appointments', async () => await readAppointments())
-
-  .delete('/api/appointments/:id', async ({ params, set }) => {
-    const deleted = await deleteAppointment(params.id)
-    if (!deleted) { set.status = 404; return { error: 'Appointment not found' } }
-    return { success: true, id: params.id }
-  })
-
-  .get('/api/stats', async () => ({
-    activeSessions: sessions.size,
-    totalAppointments: (await readAppointments()).length,
-    totalRecordings: (await listRecordings()).length,
-  }))
 
   // ── /api/admin/* aliases ─────────────────────────────────────────────────
   .get('/api/admin/stats', async () => {
@@ -1388,8 +1350,6 @@ const app = new Elysia()
       keySource: keyInfo.source,
       tokens: tokenStats,
       costTry: tokenStats.costTry,
-      appointments: (await readAppointments()).length,
-      recordings: (await listRecordings()).length,
     }
   })
 
@@ -1579,224 +1539,6 @@ const app = new Elysia()
     })
   })
 
-  // User-scoped SSE for notifications
-  .get('/api/notifications/stream', async ({ cookie, set }) => {
-    const { authenticateRequest } = await import('./middleware/auth')
-    const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined))
-    if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
-
-    set.headers['Content-Type'] = 'text/event-stream'
-    set.headers['Cache-Control'] = 'no-cache'
-    set.headers['Connection'] = 'keep-alive'
-
-    const { registerSSEClient } = await import('./services/notification')
-    return new ReadableStream({
-      start(controller) {
-        const enc = new TextEncoder()
-        const send = (data: string) => { try { controller.enqueue(enc.encode(data)) } catch { } }
-        const unregister = registerSSEClient(user.id, send)
-        send(`: connected\n\n`)
-        const hb = setInterval(() => send(`: ping\n\n`), 25000)
-          ; (controller as any).__cleanup = () => { clearInterval(hb); unregister() }
-      },
-      cancel(controller: any) {
-        controller?.__cleanup?.()
-      },
-    })
-  })
-
-  .get('/api/recordings', async () => await listRecordings())
-
-  .get('/api/recordings/:filename', async ({ params, set }) => {
-    try {
-      const recording = await getRecordingByFilename(params.filename)
-      if (!recording) { set.status = 404; return 'Not found' }
-      const filePath = resolve(RECORDINGS_DIR, params.filename)
-      if (!filePath.startsWith(RECORDINGS_DIR)) { set.status = 403; return 'Forbidden' }
-      set.headers['Content-Type'] = 'audio/wav'
-      set.headers['Content-Disposition'] = `inline; filename="${params.filename}"`
-      return createReadStream(filePath)
-    } catch { set.status = 404; return 'Not found' }
-  })
-
-  .delete('/api/recordings/:id', async ({ params, set }) => {
-    const deleted = await deleteRecording(params.id)
-    if (!deleted) { set.status = 404; return { error: 'Recording not found' } }
-    return { success: true, id: params.id }
-  })
-
-  // ── Google Calendar OAuth ──────────────────────────────────────────────────
-  // Sabit callback URL (Google Console'a kayıtlı) + state parametresi ile
-  // dinamik geri dönüş orijini. Böylece kullanıcı localhost, ngrok-X, ngrok-Y
-  // gibi farklı kaynaklardan OAuth başlatsa bile flow tek bir kayıtlı URI ile
-  // çalışır ve sonunda geldiği yere döner.
-  .get('/api/admin/settings/calendar/auth', ({ request, set }) => {
-    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID
-    if (!clientId) {
-      set.status = 400
-      return { error: 'GOOGLE_OAUTH_CLIENT_ID tanımlı değil' }
-    }
-
-    const redirectUri =
-      process.env.OAUTH_REDIRECT_URI
-      || `${process.env.APP_URL || 'http://localhost:3001'}/api/admin/settings/calendar/callback`
-
-    // Kullanıcının geldiği orijini state'e koy (token alındıktan sonra dönüş için)
-    const referer = request.headers.get('referer') || request.headers.get('origin') || ''
-    let returnOrigin = process.env.CLIENT_APP_URL || 'http://localhost:3000'
-    try { if (referer) returnOrigin = new URL(referer).origin } catch { }
-    const tenant = currentTenant()!
-    const state = signOAuthState({ clinicId: tenant.clinicId, hostname: tenant.hostname, returnOrigin })
-
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      response_type: 'code',
-      scope: [
-        'https://www.googleapis.com/auth/calendar.events',
-        'https://www.googleapis.com/auth/calendar.readonly',
-        'https://www.googleapis.com/auth/userinfo.email',
-      ].join(' '),
-      access_type: 'offline',
-      prompt: 'consent',
-      state,
-    })
-    return { url: `https://accounts.google.com/o/oauth2/v2/auth?${params}` }
-  })
-
-  .get('/api/admin/settings/calendar/callback', async ({ query, redirect, set }) => {
-    const code = query.code as string
-    const stateRaw = query.state as string | undefined
-    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID!
-    const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET!
-
-    // state'ten dönüş orijinini çöz, fallback olarak env'i kullan
-    let clientUrl = process.env.CLIENT_APP_URL || 'http://localhost:3000'
-    const oauthState = verifyOAuthState(stateRaw)
-    if (!oauthState) {
-      set.status = 400
-      return { error: 'Geçersiz veya süresi geçmiş OAuth state' }
-    }
-    clientUrl = oauthState.returnOrigin
-
-    const redirectUri =
-      process.env.OAUTH_REDIRECT_URI
-      || `${process.env.APP_URL || 'http://localhost:3001'}/api/admin/settings/calendar/callback`
-
-    if (!code) {
-      set.status = 400
-      return redirect(`${clientUrl}/admin?calendar=error`)
-    }
-    try {
-      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code' }),
-      })
-      const tokens = await tokenRes.json() as { access_token: string; refresh_token?: string; error?: string; error_description?: string }
-      if (tokens.error) {
-        console.error('[Calendar] Token exchange hatası:', tokens.error, tokens.error_description)
-        return redirect(`${clientUrl}/admin?calendar=error&reason=${encodeURIComponent(tokens.error)}`)
-      }
-      const patch: { refreshToken?: string; email?: string } = {}
-      if (tokens.refresh_token) patch.refreshToken = tokens.refresh_token
-      try {
-        const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-          headers: { Authorization: `Bearer ${tokens.access_token}` },
-        })
-        const userInfo = await userRes.json() as { email?: string }
-        if (userInfo.email) patch.email = userInfo.email
-      } catch { }
-      await runWithTenantContext({ clinicId: oauthState.clinicId, hostname: oauthState.hostname }, () => setCalendarSettings(patch))
-      console.log('[Calendar] OAuth bağlantısı kuruldu:', patch.email)
-      return redirect(`${clientUrl}/admin?calendar=connected`)
-    } catch (e) {
-      console.error('[Calendar] OAuth callback hatası:', e)
-      return redirect(`${clientUrl}/admin?calendar=error`)
-    }
-  })
-
-  .get('/api/admin/settings/calendar/status', async () => {
-    const s = await getCalendarSettings()
-    return {
-      connected: !!s.refreshToken,
-      authType: s.refreshToken ? 'oauth2' : null,
-      email: s.email ?? null,
-      calendarId: s.calendarId ?? null,
-    }
-  })
-
-  .delete('/api/admin/settings/calendar/disconnect', async () => {
-    await disconnectCalendar()
-    return { success: true }
-  })
-
-  .post('/api/admin/settings/calendar', async ({ body }) => {
-    const { calendarId } = body as { calendarId: string }
-    await setCalendarSettings({ calendarId })
-    return { success: true }
-  })
-
-  .put('/api/admin/settings/calendar', async ({ body }) => {
-    const { calendarId } = body as { calendarId: string }
-    await setCalendarSettings({ calendarId })
-    return { success: true }
-  })
-
-  .get('/api/admin/settings/calendar/calendars', async () => {
-    try {
-      const s = await getCalendarSettings()
-      if (!s.refreshToken) return { calendars: [] }
-      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: s.refreshToken,
-          client_id: process.env.GOOGLE_OAUTH_CLIENT_ID!,
-          client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET!,
-        }),
-      })
-      const { access_token } = await tokenRes.json() as { access_token: string }
-      const calRes = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
-        headers: { Authorization: `Bearer ${access_token}` },
-      })
-      const data = await calRes.json() as { items?: Array<{ id: string; summary: string }> }
-      return { calendars: (data.items ?? []).map(c => ({ id: c.id, name: c.summary })) }
-    } catch { return { calendars: [] } }
-  })
-
-  // ── AI Model Settings ───────────────────────────────────────────────────────
-  .get('/api/admin/settings/ai', async () => {
-    const { LIVE_MODEL_OPTIONS } = await import('./services/live-model-profile')
-    return {
-      current: await resolveLiveModel(),
-      default: DEFAULT_LIVE_MODEL,
-      available: ALLOWED_LIVE_MODELS,
-      models: LIVE_MODEL_OPTIONS,
-    }
-  })
-
-  .put('/api/admin/settings/ai', async ({ body, set }) => {
-    const { model } = (body ?? {}) as { model?: string }
-    if (!model || !(ALLOWED_LIVE_MODELS as readonly string[]).includes(model)) {
-      set.status = 400
-      return { error: 'Geçersiz model. İzin verilen: ' + ALLOWED_LIVE_MODELS.join(', ') }
-    }
-    const saved = await setAiModel(model)
-    return { success: true, ...saved }
-  })
-
-  // ── Greeting Settings ─────────────────────────────────────────────────────
-  .get('/api/admin/settings/greeting', async () => {
-    const greeting = await getGreeting('inbound')
-    const greetingOutbound = await getGreeting('outbound')
-    return {
-      greeting: greeting ?? DEFAULT_GREETING,
-      greetingOutbound: greetingOutbound ?? DEFAULT_GREETING
-    }
-  })
-
   // ── Clinic WhatsApp Location & Address Geocode Settings ──────────────────
   .get('/api/admin/settings/whatsapp-location', async () => {
     const [address, title, lat, lng, locationUrl, locationMessage] = await Promise.all([
@@ -1872,7 +1614,7 @@ const app = new Elysia()
       if (countryFilter) params.set('countrycodes', 'tr')
       const res = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
         headers: {
-          'User-Agent': 'VoiceAIClinicPlatform/1.0 (contact@thinpine.com)',
+          'User-Agent': 'VoiceAIBusinessPlatform/1.0 (contact@axamaz.com)',
           'Accept-Language': 'tr-TR,tr;q=0.9',
         },
       })
@@ -1904,29 +1646,6 @@ const app = new Elysia()
     } catch {
       return { results: [] }
     }
-  })
-
-  .put('/api/admin/settings/greeting', async ({ body, set }) => {
-    const { greeting, greetingOutbound } = (body ?? {}) as { greeting?: string; greetingOutbound?: string }
-    let updatedInbound = undefined
-    let updatedOutbound = undefined
-    if (greeting !== undefined) {
-      if (greeting.trim().length < 3) {
-        set.status = 400
-        return { error: 'Gelen Karşılama mesajı en az 3 karakter olmalıdır.' }
-      }
-      await setGreeting(greeting.trim(), 'inbound')
-      updatedInbound = greeting.trim()
-    }
-    if (greetingOutbound !== undefined) {
-      if (greetingOutbound.trim().length < 3) {
-        set.status = 400
-        return { error: 'Giden Karşılama mesajı en az 3 karakter olmalıdır.' }
-      }
-      await setGreeting(greetingOutbound.trim(), 'outbound')
-      updatedOutbound = greetingOutbound.trim()
-    }
-    return { success: true, greeting: updatedInbound, greetingOutbound: updatedOutbound }
   })
 
   // ── Outbound Caller ID Settings ──────────────────────────────────────────────
@@ -2124,22 +1843,6 @@ const app = new Elysia()
     }
   })
 
-  // ── Connection Mode Settings ─────────────────────────────────────────────────
-  .get('/api/admin/settings/connection-mode', async () => {
-    const mode = await getConnectionMode()
-    return { mode }
-  })
-
-  .put('/api/admin/settings/connection-mode', async ({ body, set }) => {
-    const { mode } = (body ?? {}) as { mode?: string }
-    if (mode !== 'server' && mode !== 'direct') {
-      set.status = 400
-      return { error: 'Geçersiz mod. İzin verilen: server, direct' }
-    }
-    const saved = await setConnectionMode(mode)
-    return { success: true, ...saved }
-  })
-
   // ── Branding Settings ──────────────────────────────────────────────────────
   .get('/api/admin/settings/branding', async () => {
     return getBranding()
@@ -2195,41 +1898,6 @@ const app = new Elysia()
     return { success: true, logoUrl }
   })
 
-  // ── Prompt Section Settings ─────────────────────────────────────────────────
-  .get('/api/admin/settings/prompts', async () => {
-    const { getEffectivePromptSections } = await import('./prompts/registry')
-    const effective = await getEffectivePromptSections()
-    return PROMPT_SECTIONS.map(section => {
-      const value = effective[section.key] ?? section.defaultValue
-      return {
-        key: section.key,
-        label: section.label,
-        description: section.description,
-        sortOrder: section.sortOrder,
-        value,
-        isCustom: value !== section.defaultValue,
-        updatedAt: null,
-      }
-    })
-  })
-
-  .put('/api/admin/settings/prompts/:key', async ({ set }) => {
-    set.status = 403
-    return { error: 'Sistem talimatları yalnızca platform yöneticisi tarafından PineClinic panelinden değiştirilebilir.' }
-  })
-
-  .delete('/api/admin/settings/prompts/:key', async ({ set }) => {
-    set.status = 403
-    return { error: 'Sistem talimatları yalnızca platform yöneticisi tarafından PineClinic panelinden değiştirilebilir.' }
-  })
-
-  .post('/api/admin/settings/prompts/preview', async () => {
-    const greeting = await getGreeting() ?? DEFAULT_GREETING
-    const dateHeader = `BUGÜNÜN TARİHİ: ${getTodayTurkish()}. Randevu tarihlerini söylerken mutlaka bu tarihe göre gün hesapla — asla tahmin yapma.\n\n`
-    const prompt = await buildSystemPrompt(greeting)
-    return { prompt: dateHeader + prompt }
-  })
-
   // ── Transfer Phonebook Settings ─────────────────────────────────────────────
   .get('/api/admin/settings/transfer-phonebook', async () => {
     const { getSetting } = await import('./db/repositories/settings')
@@ -2256,101 +1924,50 @@ const app = new Elysia()
     return { success: true, phonebook }
   })
 
-  // ── Tool Description Settings ───────────────────────────────────────────────
-  .get('/api/admin/settings/tools', async () => {
-    const { getToolDescriptions } = await import('./db/repositories/settings')
-    const { TOOL_DESCRIPTIONS, TOOL_PARAM_DESCRIPTIONS, getDefaultToolDescription } = await import('./data/default-tools')
-    const dbDescs = await getToolDescriptions()
-    const allItems = [
-      ...TOOL_DESCRIPTIONS.map(t => ({
-        key: t.key,
-        toolName: t.toolName,
-        label: t.label,
-        type: 'tool' as const,
-        value: dbDescs[t.key] ?? t.defaultDescription,
-        isCustom: !!dbDescs[t.key],
-      })),
-      ...TOOL_PARAM_DESCRIPTIONS.map(p => ({
-        key: p.key,
-        toolName: p.toolName,
-        label: `${p.toolName} → ${p.label}`,
-        type: 'param' as const,
-        value: dbDescs[p.key] ?? p.defaultDescription,
-        isCustom: !!dbDescs[p.key],
-      })),
-    ]
-    // Include custom_fields entry so frontend can load it
-    if (dbDescs['tools.custom_fields']) {
-      allItems.push({
-        key: 'tools.custom_fields',
-        toolName: 'randevuOlustur',
-        label: 'Özel Alanlar JSON',
-        type: 'param' as const,
-        value: dbDescs['tools.custom_fields'],
-        isCustom: true,
-      })
-    }
-    return allItems
+  // ── 4-Channel AI Assistant Settings ──────────────────────────────────────────
+  .get('/api/admin/settings/assistants', async () => {
+    const { resolveAssistantChannelsConfig } = await import('./services/voice-settings')
+    return await resolveAssistantChannelsConfig()
   })
-
-  .put('/api/admin/settings/tools/:key', async ({ params, body, set }) => {
-    const { key } = params
-    const { value } = (body ?? {}) as { value?: string }
-    if (!key.startsWith('tools.')) { set.status = 400; return { error: 'Geçersiz key' } }
-    if (!value) { set.status = 400; return { error: 'Değer boş olamaz' } }
-    // custom_fields can be "[]" (2 chars), other keys need 3+
-    if (key !== 'tools.custom_fields' && value.trim().length < 3) { set.status = 400; return { error: 'Değer en az 3 karakter olmalı' } }
-    const { setToolDescription } = await import('./db/repositories/settings')
-    await setToolDescription(key, value.trim())
-    return { success: true, key, updatedAt: new Date().toISOString() }
-  })
-
-  .delete('/api/admin/settings/tools/:key', async ({ params, set }) => {
-    const { key } = params
-    if (!key.startsWith('tools.')) { set.status = 400; return { error: 'Geçersiz key' } }
-    const { resetToolDescription } = await import('./db/repositories/settings')
-    const { getDefaultToolDescription } = await import('./data/default-tools')
-    await resetToolDescription(key)
-    return { success: true, key, value: getDefaultToolDescription(key) }
-  })
-
-  // ── Voice AI Settings ────────────────────────────────────────────────────────
-  .get('/api/admin/settings/voice', async () => {
-    const { resolveVoiceSettings } = await import('./services/voice-settings')
-    return resolveVoiceSettings()
-  })
-  .put('/api/admin/settings/voice', async ({ body, set }) => {
-    const { validateVoiceSettings, saveVoiceSettings } = await import('./services/voice-settings')
+  .put('/api/admin/settings/assistants', async ({ body, set }) => {
+    const { validateAssistantChannelsConfig, saveAssistantChannelsConfig } = await import('./services/voice-settings')
     const config = (body ?? {}) as Record<string, unknown>
-    const validation = validateVoiceSettings(config)
+    const validation = validateAssistantChannelsConfig(config)
     if (!validation.valid) {
       set.status = 400
-      return { error: validation.error || 'Geçersiz sesli AI ayarları', fieldErrors: validation.fieldErrors }
+      return { error: validation.error || 'Geçersiz asistan ayarları', fieldErrors: validation.fieldErrors }
     }
-    const saved = await saveVoiceSettings(config)
-    return { success: true, settings: saved }
+    const settings = await saveAssistantChannelsConfig(config)
+    return { success: true, settings }
   })
 
-  .get('/api/admin/settings/roles', async () => {
-    const { getSetting } = await import('./db/repositories/settings')
-    let permsStr = await getSetting('role_tab_permissions')
-    let perms = {}
-    if (permsStr) {
-      try { perms = JSON.parse(permsStr) } catch (e) { }
-    } else {
-      // Default permissions if none exist
-      perms = {
-        hekim: ['calendar', 'patients', 'knowledge'],
-        sekreter: ['calendar', 'patients', 'payments'],
-        asistan: ['calendar', 'patients']
+  .get('/api/admin/settings/roles', async ({ cookie, request }) => {
+    const { getClinicRoleTabPermissions, getEffectiveUserAccess } = await import('./services/staff-invitations')
+    const clinicId = requireClinicId()
+    const perms = await getClinicRoleTabPermissions(clinicId)
+    const isAdmin = cookie.admin_auth?.value === 'true'
+    const user = isAdmin
+      ? { id: null, role: 'yonetici' }
+      : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (user) {
+      const effective = await getEffectiveUserAccess(clinicId, { id: user.id, role: user.role })
+      return {
+        ...perms,
+        effectiveAllowedTabs: effective.allowedTabs,
       }
     }
     return perms
   })
-  .put('/api/admin/settings/roles', async ({ body }) => {
-    const { setSetting } = await import('./db/repositories/settings')
-    await setSetting('role_tab_permissions', JSON.stringify(body))
-    return { success: true }
+  .put('/api/admin/settings/roles', async ({ body, set, cookie, request }) => {
+    const isAdmin = cookie.admin_auth?.value === 'true'
+    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user || !['yonetici', 'moderator'].includes(user.role)) {
+      set.status = 403
+      return { error: 'Rol sekme izinlerini yalnızca yönetici değiştirebilir' }
+    }
+    const { saveClinicRoleTabPermissions } = await import('./services/staff-invitations')
+    const saved = await saveClinicRoleTabPermissions(requireClinicId(), body)
+    return { success: true, roles: saved }
   })
   .get('/api/admin/settings/notification-policy', async () => {
     const { getNotificationPolicy } = await import('./db/repositories/settings')
@@ -2359,7 +1976,7 @@ const app = new Elysia()
   .put('/api/admin/settings/notification-policy', async ({ body, set, cookie, request }) => {
     const isAdmin = cookie.admin_auth?.value === 'true'
     const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator', 'host'].includes(user.role)) {
+    if (!user || !['yonetici', 'moderator', 'host', 'sekreter'].includes(user.role)) {
       set.status = 403
       return { error: 'Bildirim öncelik ayarlarını yalnızca yönetici değiştirebilir' }
     }
@@ -2367,54 +1984,23 @@ const app = new Elysia()
     const policy = await setNotificationPolicy((body || {}) as Record<string, unknown>)
     return { success: true, policy }
   })
-  .get('/api/dental/working-hours', async () => {
-    const { getClinicWorkingHours } = await import('./db/repositories/settings')
-    return await getClinicWorkingHours()
-  })
-  .get('/api/admin/settings/working-hours', async () => {
-    const { getClinicWorkingHours } = await import('./db/repositories/settings')
-    return await getClinicWorkingHours()
-  })
+  .get('/api/dental/working-hours', () => calendarHandlers.getWorkingHours())
+  .get('/api/admin/settings/working-hours', () => calendarHandlers.getWorkingHours())
   .put('/api/admin/settings/working-hours', async ({ body, set, cookie, request }) => {
     const isAdmin = cookie.admin_auth?.value === 'true'
-    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
+    const user = isAdmin ? { id: null, role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
     const { hasClinicStaffPermission } = await import('./services/staff-invitations')
-    if (!user || !(await hasClinicStaffPermission(requireClinicId(), user.role, 'editClinicWorkingHours'))) {
+    if (!user || !(await hasClinicStaffPermission(requireClinicId(), user.role, 'editClinicWorkingHours', user.id))) {
       set.status = 403
-      return { error: 'Klinik genel mesai saatlerini değiştirme yetkiniz bulunmuyor' }
+      return { error: 'İşletme genel mesai saatlerini değiştirme yetkiniz bulunmuyor' }
     }
     const { setClinicWorkingHours } = await import('./db/repositories/settings')
     const workingHours = await setClinicWorkingHours((body || {}) as Record<string, unknown>)
     return { success: true, ...workingHours, workingHours }
   })
-  .get('/api/dental/staff-permissions', async ({ cookie, request }) => {
-    const isAdmin = cookie.admin_auth?.value === 'true'
-    const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
-    const { getClinicStaffPermissions } = await import('./services/staff-invitations')
-    const config = await getClinicStaffPermissions(requireClinicId())
-    const role = user?.role || 'yonetici'
-    const effective =
-      role === 'yonetici' || role === 'moderator'
-        ? {
-          viewShiftPlanner: true,
-          editShifts: true,
-          manageLeaves: true,
-          editClinicWorkingHours: true,
-          manageStaff: true,
-        }
-        : role === 'hekim'
-          ? config.hekim
-          : role === 'host'
-            ? config.host
-            : {
-              viewShiftPlanner: true,
-              editShifts: false,
-              manageLeaves: false,
-              editClinicWorkingHours: false,
-              manageStaff: false,
-            }
-    return { role, config, effective }
-  })
+  .get('/api/dental/staff-permissions', ({ cookie, request }) =>
+    calendarHandlers.getStaffPermissions(cookie, request),
+  )
   .get('/api/admin/settings/staff-permissions', async () => {
     const { getClinicStaffPermissions } = await import('./services/staff-invitations')
     return await getClinicStaffPermissions(requireClinicId())
@@ -2424,7 +2010,7 @@ const app = new Elysia()
     const user = isAdmin ? { role: 'yonetici' } : await authenticateRequest(cookie.token?.value as string | undefined, request)
     if (!user || !['yonetici', 'moderator'].includes(user.role)) {
       set.status = 403
-      return { error: 'Klinik personeli rol yetkilerini yalnızca yönetici değiştirebilir' }
+      return { error: 'Çalışan rol yetkilerini yalnızca yönetici değiştirebilir' }
     }
     const { saveClinicStaffPermissions } = await import('./services/staff-invitations')
     const config = await saveClinicStaffPermissions(requireClinicId(), body)
@@ -2487,21 +2073,55 @@ const app = new Elysia()
     return { success: true, flow, issues: validateConversationFlow(flow.nodes, flow.edges) }
   })
 
-  .get('/api/admin/flow/runtime', async () => {
-    const { getSetting } = await import('./db/repositories/settings')
-    const value = await getSetting('ai.flow_runtime_mode')
-    return { mode: value === 'active' || value === 'observe' ? value : 'legacy' }
+  .get('/api/admin/flow/runtime', async ({ query }) => {
+    const { resolveFlowRuntimeMode } = await import('./services/flow-engine')
+    const rawDir = typeof (query as Record<string, unknown>)?.direction === 'string'
+      ? String((query as Record<string, unknown>).direction)
+      : undefined
+    const direction = rawDir && ['inbound', 'outbound', 'whatsapp', 'web'].includes(rawDir)
+      ? (rawDir as 'inbound' | 'outbound' | 'whatsapp' | 'web')
+      : 'inbound'
+    const [inbound, outbound, whatsapp, web] = await Promise.all([
+      resolveFlowRuntimeMode(undefined, 'inbound'),
+      resolveFlowRuntimeMode(undefined, 'outbound'),
+      resolveFlowRuntimeMode(undefined, 'whatsapp'),
+      resolveFlowRuntimeMode(undefined, 'web'),
+    ])
+    const modes = { inbound, outbound, whatsapp, web }
+    return { mode: modes[direction], direction, modes }
   })
 
   .put('/api/admin/flow/runtime', async ({ body, set }) => {
-    const mode = (body as { mode?: string } | undefined)?.mode
+    const payload = (body ?? {}) as { mode?: string; direction?: string }
+    const mode = payload.mode
     if (!['legacy', 'observe', 'active'].includes(String(mode))) {
       set.status = 400
       return { error: 'Geçerli bir çalışma biçimi seçin.' }
     }
+    const rawDir = payload.direction
+    if (rawDir !== undefined && !['inbound', 'outbound', 'whatsapp', 'web'].includes(String(rawDir))) {
+      set.status = 400
+      return { error: 'Geçersiz kanal yönü.' }
+    }
     const { setSetting } = await import('./db/repositories/settings')
-    await setSetting('ai.flow_runtime_mode', String(mode))
-    return { success: true, mode }
+    const { resolveFlowRuntimeMode } = await import('./services/flow-engine')
+    const validMode = String(mode) as 'legacy' | 'observe' | 'active'
+    const effectiveDirection = (rawDir as 'inbound' | 'outbound' | 'whatsapp' | 'web' | undefined) || 'inbound'
+    if (rawDir && ['inbound', 'outbound', 'whatsapp', 'web'].includes(rawDir)) {
+      await setSetting(`ai.flow_runtime_mode.${rawDir}`, validMode)
+    } else {
+      await setSetting('ai.flow_runtime_mode.inbound', validMode)
+    }
+    if (!rawDir || rawDir === 'inbound') {
+      await setSetting('ai.flow_runtime_mode', validMode)
+    }
+    const [inbound, outbound, whatsapp, web] = await Promise.all([
+      resolveFlowRuntimeMode(undefined, 'inbound'),
+      resolveFlowRuntimeMode(undefined, 'outbound'),
+      resolveFlowRuntimeMode(undefined, 'whatsapp'),
+      resolveFlowRuntimeMode(undefined, 'web'),
+    ])
+    return { success: true, mode: validMode, direction: effectiveDirection, modes: { inbound, outbound, whatsapp, web } }
   })
 
   .post('/api/admin/flow/simulate', async ({ body, set }) => {
@@ -2542,10 +2162,92 @@ const app = new Elysia()
     }
   })
 
+  .get('/api/admin/flow/ai-chat', async ({ query, set }) => {
+    try {
+      const { parseFlowDirection, listFlowAiMessages } = await import('./db/repositories/flow-ai-chat')
+      const direction = parseFlowDirection((query as Record<string, unknown>)?.direction)
+      if (!direction) {
+        set.status = 400
+        return { error: 'Geçersiz asistan kanalı.' }
+      }
+      const messages = await listFlowAiMessages(direction)
+      return { direction, messages }
+    } catch (error) {
+      set.status = 500
+      return { error: error instanceof Error ? error.message : 'Sohbet geçmişi yüklenemedi.' }
+    }
+  })
+
+  .post('/api/admin/flow/ai-chat', async ({ body, cookie, request, set }) => {
+    try {
+      const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+      const payload = (body ?? {}) as {
+        direction?: string
+        message?: string
+        currentNodes?: unknown[]
+        currentEdges?: unknown[]
+      }
+      const { parseFlowDirection } = await import('./db/repositories/flow-ai-chat')
+      const direction = parseFlowDirection(payload.direction)
+      if (!direction) {
+        set.status = 400
+        return { error: 'Geçersiz asistan kanalı.' }
+      }
+      const { runFlowBuilderChatTurn } = await import('./services/flow-builder-ai')
+      return await runFlowBuilderChatTurn({
+        userId: user?.id ?? null,
+        direction,
+        message: typeof payload.message === 'string' ? payload.message : '',
+        currentNodes: Array.isArray(payload.currentNodes) ? (payload.currentNodes as any[]) : undefined,
+        currentEdges: Array.isArray(payload.currentEdges) ? (payload.currentEdges as any[]) : undefined,
+      })
+    } catch (error) {
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Akış sohbeti işlenemedi.' }
+    }
+  })
+
+  .post('/api/admin/flow/ai-chat/revert', async ({ body, set }) => {
+    try {
+      const payload = (body ?? {}) as { direction?: string; messageId?: string }
+      const { parseFlowDirection, revertFlowAiTurn } = await import('./db/repositories/flow-ai-chat')
+      const direction = parseFlowDirection(payload.direction)
+      if (!direction) {
+        set.status = 400
+        return { error: 'Geçersiz asistan kanalı.' }
+      }
+      const messageId = typeof payload.messageId === 'string' ? payload.messageId.trim() : ''
+      if (!messageId) {
+        set.status = 400
+        return { error: 'Geri alınacak işlem kimliği bulunamadı.' }
+      }
+      return await revertFlowAiTurn({ messageId, direction })
+    } catch (error) {
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Önceki akışa dönülemedi.' }
+    }
+  })
+
+  .delete('/api/admin/flow/ai-chat', async ({ query, set }) => {
+    try {
+      const { parseFlowDirection, clearFlowAiMessages } = await import('./db/repositories/flow-ai-chat')
+      const direction = parseFlowDirection((query as Record<string, unknown>)?.direction)
+      if (!direction) {
+        set.status = 400
+        return { error: 'Geçersiz asistan kanalı.' }
+      }
+      await clearFlowAiMessages(direction)
+      return { direction, messages: [] }
+    } catch (error) {
+      set.status = 500
+      return { error: error instanceof Error ? error.message : 'Sohbet temizlenemedi.' }
+    }
+  })
+
   // Direct web audio keeps media in the browser; only the small flow state crosses this API.
   .post('/api/flow-sessions', async ({ body, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const rawDir = (body as { direction?: string } | undefined)?.direction
     const direction = rawDir && ['web', 'inbound', 'outbound', 'whatsapp'].includes(rawDir) ? rawDir : 'web'
     const { createWebFlowSession } = await import('./services/flow-engine')
@@ -2568,12 +2270,60 @@ const app = new Elysia()
     if (!engine) { set.status = 404; return { success: false, message: 'Görüşme bulunamadı veya süresi doldu.' } }
     const input = (body || {}) as { name?: string; args?: Record<string, unknown> }
     const args = input.args || {}
-    if (!['randevuOlustur', 'hastaNotKaydet', 'cagriySonlandir', 'aramaAktar', 'whatsappKonumGonder'].includes(String(input.name || ''))) {
+    if (!['randevuOlustur', 'hastaNotKaydet', 'musteriNotKaydet', 'cagriySonlandir', 'aramaAktar', 'whatsappKonumGonder', 'veriTablosunaKaydet', 'veriTablosuSorgula'].includes(String(input.name || ''))) {
       set.status = 400
       return { success: false, message: 'Bu işlem bu görüşmede kullanılamaz.' }
     }
-    const step = await engine.accept({ fields: args })
+    if (input.name === 'veriTablosuSorgula') {
+      const clinicId = currentClinicId() || engine.clinicId
+      const { queryDynamicTableRecord } = await import('./db/repositories/dynamic-tables')
+      const res = await queryDynamicTableRecord({
+        clinicId,
+        tableIdOrName: typeof args.tablo === 'string' ? args.tablo : undefined,
+        searchValue: typeof args.aranan_deger === 'string' ? args.aranan_deger : undefined,
+        columnNameOrSlug: typeof args.sutun === 'string' ? args.sutun : undefined,
+        phone: typeof args.telefon === 'string' ? args.telefon : undefined,
+      })
+      if (Object.keys(res.fieldPatch).length > 0) {
+        await engine.accept({ fields: res.fieldPatch }).catch(() => null)
+      }
+      return {
+        success: true,
+        kayitli: res.found,
+        tablo: res.tableName,
+        kayit: res.record,
+        kayitlar: res.records,
+        message: res.message,
+      }
+    }
+    const rawNested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+    const flatArgs = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'hedef_tablo_id'))
+    const step = await engine.accept({ fields: { ...flatArgs, ...rawNested } })
     const action = engine.expectedAction()
+    if (input.name === 'veriTablosunaKaydet') {
+      const clinicId = currentClinicId() || engine.clinicId
+      if (Object.keys(rawNested).length === 0 && Object.keys(flatArgs).length === 0 && engine.hasSavedDynamicRecord()) {
+        return { success: true, message: 'Veri tablosu kaydı tamamlandı.' }
+      }
+      const { saveFlowDynamicRecord } = await import('./db/repositories/dynamic-tables')
+      const targetTableId = typeof args.hedef_tablo_id === 'string' && args.hedef_tablo_id.trim()
+        ? args.hedef_tablo_id.trim()
+        : undefined
+      const saved = await saveFlowDynamicRecord({
+        clinicId,
+        fields: { ...(step.fields || {}), ...flatArgs, ...rawNested },
+        targetTableId,
+        flowNodes: engine.getFlow().nodes,
+      })
+      if (action && action.action === 'save_record') {
+        await engine.completeAction(action.nodeId, true)
+      }
+      return {
+        success: true,
+        kaydedilen_satir: saved.savedCount,
+        message: saved.savedCount > 0 ? 'Bilgileriniz veri tablosuna başarıyla kaydedildi.' : 'Kaydedilecek tablo alanı bulunamadı.',
+      }
+    }
     if (input.name === 'aramaAktar') {
       const target = String(args.hedef || 'resepsiyon')
       if (action && ['transfer_call', 'transfer'].includes(action.action)) {
@@ -2592,7 +2342,7 @@ const app = new Elysia()
       }
       return { success: true, message: 'Klinik konumu WhatsApp üzerinden paylaşıldı.' }
     }
-    if (input.name === 'hastaNotKaydet') {
+    if (input.name === 'hastaNotKaydet' || input.name === 'musteriNotKaydet') {
       if (!step.success || !action || !['save_patient_note', 'notBirak'].includes(action.action)) {
         return { success: false, message: step.message || step.next?.prompt || 'Not için gerekli bilgiler henüz tamamlanmadı.' }
       }
@@ -2643,16 +2393,17 @@ const app = new Elysia()
   .get('/api/direct-session-config', async () => {
     const clinicId = currentClinicId()
     const { resolveVoiceSettings } = await import('./services/voice-settings')
-    const { issueWebToolSessionKey } = await import('./services/flow-engine')
+    const { issueWebToolSessionKey, resolveFlowRuntimeMode } = await import('./services/flow-engine')
     const { buildToolDeclarations } = await import('./gemini')
     const { prepareLiveToolDeclarations } = await import('./services/live-model-profile')
 
-    const [voiceSettings, greetingRaw, ragContext, branding, rawTools] = await Promise.all([
-      resolveVoiceSettings(clinicId ?? undefined),
+    const [voiceSettings, greetingRaw, ragContext, branding, rawTools, flowRuntimeMode] = await Promise.all([
+      resolveVoiceSettings(clinicId ?? undefined, 'web'),
       getGreeting('web').then(g => g || getGreeting('inbound')),
       getPreWarmedRagContext(clinicId, 'web', 250),
       getBranding(),
       buildToolDeclarations('web'),
+      resolveFlowRuntimeMode(clinicId ?? undefined, 'web'),
     ])
 
     const sessionKey = clinicId ? issueWebToolSessionKey(clinicId) : undefined
@@ -2664,7 +2415,11 @@ const app = new Elysia()
     const ASTERISK_ONLY_TOOLS = new Set(['insanaAktar'])
     const toolDeclarations = prepareLiveToolDeclarations(
       model,
-      rawTools.filter(t => !ASTERISK_ONLY_TOOLS.has(t.name || '')),
+      rawTools.filter(t => {
+        if (ASTERISK_ONLY_TOOLS.has(t.name || '')) return false
+        if (flowRuntimeMode === 'legacy' && t.name === 'akisBilgisiGuncelle') return false
+        return true
+      }),
     )
 
     return {
@@ -2695,7 +2450,7 @@ const app = new Elysia()
 
   .post('/api/tools/search-knowledge', async ({ body, request, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
     if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
       set.status = 401
@@ -2723,7 +2478,7 @@ const app = new Elysia()
 
   .post('/api/tools/customer-query', async ({ body, request, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
     if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
       set.status = 401
@@ -2735,10 +2490,19 @@ const app = new Elysia()
     if (digits.length < 10) return { sonuc: 'Geçerli bir telefon numarası değil. En az 10 hane gerekli.' }
     try {
       const { findPatientByPhone, getPatientDoctorHistory } = await import('./db/repositories/dental')
-      const [customer, patient] = await Promise.all([
+      const { lookupDynamicFieldsByPhone } = await import('./db/repositories/dynamic-tables')
+      const [customer, patient, dynamicFields] = await Promise.all([
         getCustomerByPhone(telefon),
         findPatientByPhone(telefon),
+        lookupDynamicFieldsByPhone(telefon, clinicId).catch((): Record<string, unknown> => ({})),
       ])
+      const dynamicSummary = typeof dynamicFields._dynamicSummary === 'string' ? dynamicFields._dynamicSummary : ''
+      const dynamicCallerName = typeof dynamicFields._dynamicCallerName === 'string' ? dynamicFields._dynamicCallerName : undefined
+      const dynamicSuffix = dynamicSummary ? `\nVeri Tablosu Kayıtları:\n${dynamicSummary}` : ''
+      const publicDynamicFields = Object.fromEntries(
+        Object.entries(dynamicFields).filter(([k]) => !k.startsWith('_') || k.startsWith('_col__')),
+      )
+
       if (!customer) {
         if (patient) {
           const doktorGecmisi = await getPatientDoctorHistory(telefon)
@@ -2746,12 +2510,26 @@ const app = new Elysia()
             kayitli: true,
             musteri_adi: patient.name,
             doktor_gecmisi: doktorGecmisi.length > 0 ? doktorGecmisi : undefined,
-            sonuc: `Ad Soyad: ${patient.name}\nTelefon: ${patient.phone || telefon}${doktorGecmisi.length > 0 ? `\nDoktor Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}` : ''}`,
+            dinamik_alanlar: Object.keys(publicDynamicFields).length > 0 ? publicDynamicFields : undefined,
+            sonuc: `Ad Soyad: ${patient.name}\nTelefon: ${patient.phone || telefon}${doktorGecmisi.length > 0 ? `\nSorumlu Geçmişi: ${doktorGecmisi.map(d => `${d.doktor_adi} (son işlem: ${d.son_tedavi})`).join(', ')}` : ''}${dynamicSuffix}`,
           }
         }
         const knowledgeCustomer = await findCustomerDocByPhone(telefon)
         if (knowledgeCustomer) {
-          return { kayitli: true, musteri_adi: knowledgeCustomer.name, sonuc: `Ad Soyad: ${knowledgeCustomer.name}\n${knowledgeCustomer.content}` }
+          return {
+            kayitli: true,
+            musteri_adi: knowledgeCustomer.name,
+            dinamik_alanlar: Object.keys(publicDynamicFields).length > 0 ? publicDynamicFields : undefined,
+            sonuc: `Ad Soyad: ${knowledgeCustomer.name}\n${knowledgeCustomer.content}${dynamicSuffix}`,
+          }
+        }
+        if (dynamicFields._dynamicKnownCaller === 'true' || dynamicSummary) {
+          return {
+            kayitli: true,
+            musteri_adi: dynamicCallerName || null,
+            dinamik_alanlar: Object.keys(publicDynamicFields).length > 0 ? publicDynamicFields : undefined,
+            sonuc: `${dynamicCallerName ? `Ad Soyad: ${dynamicCallerName}\n` : ''}Telefon: ${telefon}${dynamicSuffix}`,
+          }
         }
         return { kayitli: false, sonuc: 'Bu numara ile kayıtlı müşteri bulunamadı.' }
       }
@@ -2761,16 +2539,61 @@ const app = new Elysia()
         const last = pastAppointments[0]
         info.push(`Son Randevu: ${last.date} ${last.time} — ${last.issueOrRequest || last.type}`)
       }
-      return { kayitli: true, musteri_adi: customer.name, sonuc: info.join('\n') }
+      if (dynamicSummary) {
+        info.push(`Veri Tablosu Kayıtları:\n${dynamicSummary}`)
+      }
+      return {
+        kayitli: true,
+        musteri_adi: customer.name,
+        dinamik_alanlar: Object.keys(publicDynamicFields).length > 0 ? publicDynamicFields : undefined,
+        sonuc: info.join('\n'),
+      }
     } catch (err) {
       console.error('[Tools/CustomerQuery]', err)
       return { kayitli: false, sonuc: 'Müşteri sorgu servisi şu an kullanılamıyor.' }
     }
   })
 
+  .post('/api/tools/save-dynamic-record', async ({ body, request, set }) => {
+    const clinicId = currentClinicId()
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
+    const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
+    if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
+      set.status = 401
+      return { error: 'Yetkisiz araç çağrısı: geçerli oturum anahtarı gerekli.' }
+    }
+    const args = (body ?? {}) as Record<string, unknown>
+    const rawNested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+    const flatArgs = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'hedef_tablo_id'))
+    try {
+      const { saveFlowDynamicRecord } = await import('./db/repositories/dynamic-tables')
+      const { getActiveFlow } = await import('./db/repositories/flows')
+      const activeFlow = await getActiveFlow('web', clinicId).catch(() => null)
+      const targetTableId = typeof args.hedef_tablo_id === 'string' && args.hedef_tablo_id.trim()
+        ? args.hedef_tablo_id.trim()
+        : undefined
+      const saved = await saveFlowDynamicRecord({
+        clinicId,
+        fields: { ...flatArgs, ...rawNested },
+        targetTableId,
+        flowNodes: activeFlow?.nodes,
+      })
+      return {
+        success: true,
+        kaydedilen_satir: saved.savedCount,
+        message: saved.savedCount > 0
+          ? 'Bilgileriniz veri tablosuna başarıyla kaydedildi.'
+          : 'Kaydedilecek veri tablosu alanı bulunamadı.',
+      }
+    } catch (err) {
+      console.error('[Tools/SaveDynamicRecord]', err)
+      return { success: false, message: 'Veri tablosu kaydı sırasında hata oluştu.' }
+    }
+  })
+
   .post('/api/tools/create-appointment', async ({ body, request, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
     if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
       set.status = 401
@@ -2794,7 +2617,7 @@ const app = new Elysia()
         { sessionId: `direct-${randomUUID().slice(0, 8)}`, clinicId, source: 'web_ai' },
       )
       console.log('[Tools/Appointment]', appointment.id, appointment.customerName)
-      return { success: true, message: `Kontrol randevusu talebiniz alındı; klinik onayı bekleniyor.`, id: appointment.id }
+      return { success: true, message: `Randevu talebiniz alındı; işletme onayı bekleniyor.`, id: appointment.id }
     } catch (err) {
       console.error('[Tools/Appointment]', err)
       set.status = 500
@@ -2804,7 +2627,7 @@ const app = new Elysia()
 
   .post('/api/tools/check-availability', async ({ body, request, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
     if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
       set.status = 401
@@ -2834,7 +2657,7 @@ const app = new Elysia()
 
   .post('/api/tools/patient-note', async ({ body, request, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
     if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
       set.status = 401
@@ -2848,7 +2671,7 @@ const app = new Elysia()
     try {
       const { createPatientNote } = await import('./db/repositories/dental')
       await createPatientNote({ phone, content: name ? `[${name}] ${note}` : note, source: 'web', clinicId })
-      return { success: true, message: 'Notunuz başarıyla kaydedildi ve klinik bankosuna iletildi.' }
+      return { success: true, message: 'Notunuz başarıyla kaydedildi ve yetkililere iletildi.' }
     } catch {
       return { success: false, message: 'Not kaydedilirken bir hata oluştu.' }
     }
@@ -2856,7 +2679,7 @@ const app = new Elysia()
 
   .post('/api/tools/appointment-status', async ({ body, request, set }) => {
     const clinicId = currentClinicId()
-    if (!clinicId) { set.status = 404; return { error: 'Bu alan için klinik bulunamadı.' } }
+    if (!clinicId) { set.status = 404; return { error: 'Bu alan için işletme bulunamadı.' } }
     const { isAuthorizedWebToolSession } = await import('./services/flow-engine')
     if (!isAuthorizedWebToolSession(clinicId, request.headers.get('x-flow-session-key') || undefined)) {
       set.status = 401
@@ -2891,7 +2714,7 @@ app.ws('/ws', {
   async open(ws) {
     const tenant = currentTenant()
     if (!tenant) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Bu domain için klinik tanımlanmamış.' }))
+      ws.send(JSON.stringify({ type: 'error', message: 'Bu domain için işletme tanımlanmamış.' }))
       ws.close()
       return
     }
@@ -2903,8 +2726,6 @@ app.ws('/ws', {
       session: null as any,
       startedAt,
       startedAtMs,
-      audioChunks: [],
-      userAudioChunks: [],
       shortId,
       clinicId: tenant.clinicId,
       hostname: tenant.hostname,
@@ -2937,10 +2758,12 @@ app.ws('/ws', {
 
     try {
       const { resolveVoiceSettings } = await import('./services/voice-settings')
-      const [voiceSettings, ragContext, greetingRaw] = await Promise.all([
-        resolveVoiceSettings(tenant.clinicId),
+      const { resolveFlowRuntimeMode } = await import('./services/flow-engine')
+      const [voiceSettings, ragContext, greetingRaw, flowRuntimeMode] = await Promise.all([
+        resolveVoiceSettings(tenant.clinicId, 'web'),
         getPreWarmedRagContext(tenant.clinicId, 'web', 250),
         getGreeting('web').then(g => g || getGreeting('inbound')),
+        resolveFlowRuntimeMode(tenant.clinicId, 'web'),
       ])
 
       const dateHeader = `BUGÜNÜN TARİHİ: ${getTodayTurkish()}. Randevu tarihlerini söylerken mutlaka bu tarihe göre gün hesapla — asla tahmin yapma.\n\n`
@@ -2948,7 +2771,7 @@ app.ws('/ws', {
       const systemPrompt = dateHeader + await buildSystemPrompt(greeting, 'web') + ragContext
       const model = voiceSettings.model
       const voiceName = voiceSettings.voiceName
-      console.log(`[${shortId}] Gemini Live model: ${model}, voice: ${voiceName} (web)`)
+      console.log(`[${shortId}] Gemini Live model: ${model}, voice: ${voiceName}, flowMode: ${flowRuntimeMode} (web)`)
 
       const { getGeminiClient } = await import('./services/gemini-client')
       const clinicAi = await getGeminiClient(tenant.clinicId).catch(() => getAI())
@@ -2957,7 +2780,6 @@ app.ws('/ws', {
         onReady: () => { console.log(`[${shortId}] Gemini Live ready`); ws.send(JSON.stringify({ type: 'ready' })) },
         onAudio: (pcm) => {
           ws.send(pcm)
-          info.audioChunks.push({ buffer: pcm, offsetMs: Date.now() - startedAtMs })
         },
         onTranscript: (role, text) => {
           const trimmed = text.trim()
@@ -2969,13 +2791,16 @@ app.ws('/ws', {
         },
         onInterrupted: () => ws.send(JSON.stringify({ type: 'interrupted' })),
         onTurnComplete: () => ws.send(JSON.stringify({ type: 'turn_complete' })),
+        onHangup: () => {
+          try { ws.send(JSON.stringify({ type: 'hangup' })) } catch { }
+        },
         onError: (e) => console.error(`[${shortId}] Gemini error:`, e),
         onClose: () => {
           console.log(`[${shortId}] Gemini session closed`)
           sessions.delete(shortId)
           notifyAdmins('session_end', { id: shortId, activeSessions: sessions.size })
         },
-      }, { dbSessionId: shortId, systemPrompt, model, voiceName, clinicId: tenant.clinicId, hostname: tenant.hostname, direction: 'web', appointmentSource: 'web_ai' })
+      }, { dbSessionId: shortId, systemPrompt, model, voiceName, thinkingLevel: voiceSettings.thinkingLevel, turnDetectionMode: voiceSettings.turnDetectionMode, clinicId: tenant.clinicId, hostname: tenant.hostname, direction: 'web', appointmentSource: 'web_ai' })
 
       info.session = session
         ; (ws.data as any).sessionId = shortId
@@ -3009,7 +2834,6 @@ app.ws('/ws', {
           data: buf.toString('base64'),
         }
       })
-      info.userAudioChunks.push({ buffer: buf, offsetMs: Date.now() - info.startedAtMs })
         // Ses geldi — idle timer'ı sıfırla
         ; (ws.data as any).touchActivity?.()
     }
@@ -3021,31 +2845,10 @@ app.ws('/ws', {
     clearInterval((ws.data as any).pingTimer)
     const shortId = (ws.data as any).sessionId as string
     const info = sessions.get(shortId)
-    if (info) await runWithTenantContext({ clinicId: info.clinicId, hostname: info.hostname }, async () => {
-      const hasAudio = info.audioChunks.length > 0 || info.userAudioChunks.length > 0
-      if (hasAudio) {
-        const endedAt = new Date()
-        const durationMs = endedAt.getTime() - info.startedAt.getTime()
-        const ts = info.startedAt.toISOString().replace(/[:.]/g, '-').slice(0, 19)
-        const filename = `session_${shortId}_${ts}.wav`
-        const filePath = resolve(RECORDINGS_DIR, filename)
-        try {
-          const wavBuf = buildStereoWav(info.audioChunks, info.userAudioChunks, durationMs)
-          writeFileSync(filePath, wavBuf)
-          await saveRecording({
-            clinicId: info.clinicId,
-            filename,
-            startedAt: info.startedAt.toISOString(),
-            endedAt: endedAt.toISOString(),
-            durationMs,
-            sizeBytes: wavBuf.length,
-          })
-          console.log(`[${shortId}] Recording: ${filename}`)
-        } catch (e) { console.error(`[${shortId}] Recording hatası:`, e) }
-      }
+    if (info) {
       try { info.session?.close() } catch { }
       sessions.delete(shortId)
-    })
+    }
     console.log(`[${shortId}] Disconnected`)
   },
 })
@@ -3084,6 +2887,11 @@ app.ws('/ws', {
       await ensureTreatmentPlanningSchema()
     } catch (e) { console.error('[TreatmentPlanning] Startup ensure schema error:', e) }
 
+    try {
+      const { ensureDynamicTablesSchema } = await import('./db/dynamic-tables-schema')
+      await ensureDynamicTablesSchema()
+    } catch (e) { console.error('[DynamicTables] Startup ensure schema error:', e) }
+
     const cleanDetachedAttachments = async () => {
       try { await (await import('./services/plan-attachments')).cleanupPlanAttachments() }
       catch { console.error('[TreatmentPlanning] Geçici ek temizliği tamamlanamadı.') }
@@ -3107,7 +2915,12 @@ app.ws('/ws', {
     } catch (e) { console.error('[Knowledge] Startup ensure schema error:', e) }
 
     try {
-      const [{ ensureAiUsageTable }, { ensureClinicGeminiKeyColumns }, { ensurePromptTemplates }] = await Promise.all([
+      const { ensureSubscriptionSchema } = await import('./services/subscriptions')
+      await ensureSubscriptionSchema()
+    } catch (e) { console.error('[Subscriptions] Startup ensure schema error:', e) }
+
+    try {
+      const [{ ensureAiUsageTable }, { ensureClinicGeminiKeyColumns }, { ensurePlatformPromptTable }] = await Promise.all([
         import('./db/repositories/ai-usage'),
         import('./services/gemini-client'),
         import('./prompts/registry'),
@@ -3115,7 +2928,7 @@ app.ws('/ws', {
       await Promise.all([
         ensureAiUsageTable(),
         ensureClinicGeminiKeyColumns(),
-        ensurePromptTemplates(),
+        ensurePlatformPromptTable(),
       ])
     } catch (e) { console.error('[Startup] Faz 6 bootstrap error:', e) }
 

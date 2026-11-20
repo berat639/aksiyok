@@ -5,13 +5,11 @@ function backendBaseUrls(): string[] {
     process.env.SERVER_URL,
     process.env.NEXT_PUBLIC_BACKEND_URL,
     ...(isDev ? ['http://localhost:3001'] : []),
-    'http://voiceai-pineclinic-gycmpw:3001',
-    'https://api.pineclinic.thinpine.com',
-    'https://api.pinecllinic.thinpine.com',
     'http://voiceai-server:3001',
+    'https://api.axamaz.com',
     'http://server:3001',
     'http://localhost:3001',
-  ].filter((url, index, urls): url is string => Boolean(url) && urls.indexOf(url) === index)
+  ].filter((url): url is string => typeof url === 'string' && url.length > 0 && !url.includes('undefined'))
 }
 
 export async function fetchBackend(path: string, init?: RequestInit): Promise<Response> {

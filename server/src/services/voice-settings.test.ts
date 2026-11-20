@@ -1,7 +1,12 @@
+process.env.DATABASE_URL ||= 'postgres://postgres:postgres@localhost:5432/voiceai'
+
 import { describe, expect, test } from 'bun:test'
 import {
+  ASSISTANT_GREETING_DEFAULTS,
   buildOffTopicPromptRule,
   DEFAULT_OFF_TOPIC_CLOSE_MESSAGE,
+  normalizeTurkishPhoneOrNull,
+  validateAssistantChannelsConfig,
   validateVoiceSettings,
   VOICE_SETTINGS_DEFAULTS,
 } from './voice-settings'
@@ -136,5 +141,135 @@ describe('voice-settings validation & prompt registry', () => {
     const dateNode = webFlow.nodes.find(n => n.id === 'field_tarih')!
     const combinedSlotPrompt = buildFlowNodePrompt(webFlow, dateNode, { musteri_adi: 'Ahmet Yılmaz', telefon: '05551234567' })
     expect(combinedSlotPrompt).toContain('Hangi gün ve saat için randevu oluşturmamı istersiniz?')
+  })
+
+  test('validates 4-channel AI assistant configuration across inbound, outbound, whatsapp, and web', () => {
+    const validRes = validateAssistantChannelsConfig({
+      inbound: {
+        ...VOICE_SETTINGS_DEFAULTS,
+        greeting: ASSISTANT_GREETING_DEFAULTS.inbound,
+        flowRuntimeMode: 'active',
+      },
+      outbound: {
+        model: 'gemini-3.8-live',
+        thinkingLevel: 'MEDIUM',
+        voiceName: 'Kore',
+        startWaitSeconds: 0.5,
+        turnDetectionMode: 'semantic',
+        noiseFilterMode: 'rnnoise',
+        callSilenceTimeout: 25,
+        callSilenceCloseTimeout: 15,
+        callMaxDuration: 420,
+        offTopicMaxStrikes: 2,
+        offTopicCloseMessage: DEFAULT_OFF_TOPIC_CLOSE_MESSAGE,
+        callerId: '08503096119',
+        greeting: ASSISTANT_GREETING_DEFAULTS.outbound,
+        flowRuntimeMode: 'observe',
+        useInboundVoice: false,
+      },
+      whatsapp: {
+        greeting: ASSISTANT_GREETING_DEFAULTS.whatsapp,
+        flowRuntimeMode: 'active',
+        toneStyle: 'samimi',
+        allowEmoji: true,
+        allowLocationSharing: true,
+        autoHandoverOnUnclear: true,
+        offTopicMaxStrikes: 3,
+        offTopicCloseMessage: DEFAULT_OFF_TOPIC_CLOSE_MESSAGE,
+      },
+      web: {
+        model: 'gemini-3.8-live-extended-thinking',
+        thinkingLevel: 'HIGH',
+        voiceName: 'Aoede',
+        startWaitSeconds: 0.3,
+        turnDetectionMode: 'semantic',
+        noiseFilterMode: 'off',
+        callSilenceTimeout: 30,
+        callSilenceCloseTimeout: 15,
+        callMaxDuration: 600,
+        offTopicMaxStrikes: 2,
+        offTopicCloseMessage: DEFAULT_OFF_TOPIC_CLOSE_MESSAGE,
+        greeting: ASSISTANT_GREETING_DEFAULTS.web,
+        flowRuntimeMode: 'legacy',
+        useInboundVoice: true,
+      },
+    })
+    expect(validRes.valid).toBe(true)
+    expect(validRes.error).toBeUndefined()
+    expect(Object.keys(validRes.fieldErrors)).toHaveLength(0)
+  })
+
+  test('rejects invalid 4-channel AI assistant fields with clear Turkish fieldErrors', () => {
+    const invalidRes = validateAssistantChannelsConfig({
+      inbound: {
+        greeting: 'ab',
+        flowRuntimeMode: 'invalid_mode',
+        maxActivePhoneCalls: 99,
+      },
+      outbound: {
+        callerId: '12345',
+        greeting: 'x'.repeat(300),
+        voiceName: 'UnknownVoice',
+        useInboundVoice: false,
+      },
+      whatsapp: {
+        greeting: 'a',
+        toneStyle: 'argo',
+        allowEmoji: 'evet' as unknown as boolean,
+        offTopicMaxStrikes: 0,
+        offTopicCloseMessage: 'kısa',
+      },
+      web: {
+        greeting: 'ok',
+        callMaxDuration: 50,
+        flowRuntimeMode: 'wrong',
+      },
+    })
+    expect(invalidRes.valid).toBe(false)
+    expect(invalidRes.error).toBeDefined()
+    expect(invalidRes.fieldErrors['inbound.greeting']).toBeDefined()
+    expect(invalidRes.fieldErrors['inbound.flowRuntimeMode']).toBeDefined()
+    expect(invalidRes.fieldErrors['inbound.maxActivePhoneCalls']).toBeDefined()
+    expect(invalidRes.fieldErrors['outbound.callerId']).toBeDefined()
+    expect(invalidRes.fieldErrors['outbound.greeting']).toBeDefined()
+    expect(invalidRes.fieldErrors['outbound.voiceName']).toBeDefined()
+    expect(invalidRes.fieldErrors['whatsapp.greeting']).toBeDefined()
+    expect(invalidRes.fieldErrors['whatsapp.toneStyle']).toBeDefined()
+    expect(invalidRes.fieldErrors['whatsapp.allowEmoji']).toBeDefined()
+    expect(invalidRes.fieldErrors['whatsapp.offTopicMaxStrikes']).toBeDefined()
+    expect(invalidRes.fieldErrors['whatsapp.offTopicCloseMessage']).toBeDefined()
+    expect(invalidRes.fieldErrors['web.greeting']).toBeDefined()
+    expect(invalidRes.fieldErrors['web.callMaxDuration']).toBeDefined()
+    expect(invalidRes.fieldErrors['web.flowRuntimeMode']).toBeDefined()
+  })
+
+  test('normalizes valid 10-11 digit TR phone numbers and allows empty outbound callerId', () => {
+    expect(normalizeTurkishPhoneOrNull('08503096119')).toBe('08503096119')
+    expect(normalizeTurkishPhoneOrNull('8503096119')).toBe('08503096119')
+    expect(normalizeTurkishPhoneOrNull('+90 532 123 45 67')).toBe('05321234567')
+    expect(normalizeTurkishPhoneOrNull('123')).toBeNull()
+    expect(normalizeTurkishPhoneOrNull('abc08503096119')).toBeNull()
+
+    const emptyCallerRes = validateAssistantChannelsConfig({
+      outbound: {
+        callerId: '',
+        greeting: ASSISTANT_GREETING_DEFAULTS.outbound,
+      },
+    })
+    expect(emptyCallerRes.valid).toBe(true)
+  })
+
+  test('isNonSubstantiveWhatsAppOpening distinguishes pure greetings/gibberish from direct flow requests', async () => {
+    const { isNonSubstantiveWhatsAppOpening } = await import('./assistant-config')
+    expect(isNonSubstantiveWhatsAppOpening('Merhaba')).toBe(true)
+    expect(isNonSubstantiveWhatsAppOpening('Selam, kolay gelsin!')).toBe(true)
+    expect(isNonSubstantiveWhatsAppOpening('İyi günler orada mısınız?')).toBe(true)
+    expect(isNonSubstantiveWhatsAppOpening('???')).toBe(true)
+    expect(isNonSubstantiveWhatsAppOpening('asdfgh')).toBe(true)
+
+    expect(isNonSubstantiveWhatsAppOpening('Merhaba, yarın saat 15:00 için randevu almak istiyorum')).toBe(false)
+    expect(isNonSubstantiveWhatsAppOpening('Kanal tedavisi fiyatınız nedir?')).toBe(false)
+    expect(isNonSubstantiveWhatsAppOpening('Dişim çok ağrıyor bugün boş yer var mı')).toBe(false)
+    expect(isNonSubstantiveWhatsAppOpening('Randevumu iptal etmek istiyorum')).toBe(false)
   })
 })

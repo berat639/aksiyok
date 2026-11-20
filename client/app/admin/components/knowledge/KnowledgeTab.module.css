@@ -40,9 +40,9 @@
 .btnIconDanger { composes: btnDanger; width: 30px; min-height: 30px; padding: 0; font-size: 13px; }
 
 /* Liste */
-.list { display: flex; flex-direction: column; overflow: hidden; padding: 0; }
-.listHead, .listRow { display: grid; grid-template-columns: 28px minmax(0, 1fr) 128px 104px 46px 112px; align-items: center; gap: 10px; padding: 8px 14px; }
-.listHead { border-bottom: 1.5px solid var(--pc-border); background: var(--card-inner, var(--pc-surface)); font-size: 11.5px; font-weight: 800; color: var(--foreground-2); }
+.list { display: flex; flex-direction: column; overflow: hidden; padding: 0; background: var(--card-bg); }
+.listHead, .listRow { display: grid; grid-template-columns: 28px minmax(0, 1fr) 136px 46px 112px; align-items: center; gap: 10px; padding: 8px 14px; }
+.listHead { border-bottom: 1.5px solid var(--pc-border); background: var(--card-bg); font-size: 11.5px; font-weight: 800; color: var(--foreground-2); }
 .sortBtn { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: none; background: none; color: inherit; font: inherit; font-weight: 800; cursor: pointer; text-align: left; }
 .sortBtn:hover { color: var(--pc-tint-fg); }
 .listRow { composes: tableRow from '../../../../styles/clinic-depth.module.css'; min-height: 46px; cursor: pointer; }
@@ -63,13 +63,13 @@
 
 /* Kart görünümü */
 .cardGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.docCard { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--pc-border); border-radius: 14px; background: var(--pc-surface); box-shadow: var(--pc-neo-subcard); cursor: pointer; }
+.docCard { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1.5px solid var(--input-border); border-radius: 14px; background: var(--card-bg); box-shadow: var(--pc-neo-card); cursor: pointer; }
 .docCardTop { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
 .docCardBody { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 0; font-size: 12px; color: var(--foreground-3); }
 .docCardFoot { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; }
 
 /* Sayfalama */
-.pagerBar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 14px; border-top: 1.5px solid var(--pc-border); }
+.pagerBar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 14px; border-top: 1.5px solid var(--pc-border); background: var(--card-bg); }
 .pagerBarFree { composes: pagerBar; border-top: none; padding: 0; }
 .pageInfo { font-size: 12px; color: var(--foreground-3); }
 
@@ -117,15 +117,19 @@
 :global([data-theme="dark"]) .toastOk { border-color: #34d399; color: #34d399; }
 
 /* Sağ kolon düzeni */
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 450px), 1fr)); gap: 16px; align-items: start; }
+.cols { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, 460px); gap: 16px; align-items: start; }
 .catPill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 10px; border: 1px solid var(--pc-border); border-radius: 999px; background: var(--pc-tint); color: var(--pc-tint-fg); font-size: 12px; font-weight: 700; box-shadow: var(--pc-clay-pale); }
 .catRemove { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: 50%; background: var(--pc-surface); color: var(--danger); font-size: 10px; cursor: pointer; }
 .accordion { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0; border: none; background: none; color: var(--foreground-2); font: inherit; font-weight: 800; cursor: pointer; }
 .flowNotice { padding: 10px 14px; border: 1px solid var(--flow-info-border); border-radius: 12px; background: var(--flow-info-bg); color: var(--flow-info-text); font-weight: 600; }
 
+@media (max-width: 1024px) {
+  .cols { grid-template-columns: minmax(0, 1fr); }
+}
+
 @media (max-width: 900px) {
   .cardGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .listHead, .listRow { grid-template-columns: 28px minmax(0, 1fr) 104px 46px 112px; }
+  .listHead, .listRow { grid-template-columns: 28px minmax(0, 1fr) 46px 112px; }
   .hideNarrow { display: none; }
 }
 @media (max-width: 560px) {

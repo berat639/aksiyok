@@ -28,7 +28,7 @@ function OptOutContent() {
 
     fetch(`/api/public/optout/${patientId}`)
       .then(res => {
-        if (!res.ok) throw new Error('Hasta bulunamadı')
+        if (!res.ok) throw new Error('Kayıt bulunamadı')
         return res.json()
       })
       .then(data => {
@@ -37,7 +37,7 @@ function OptOutContent() {
           smsOptOut: !!data.smsOptOut,
           emailOptOut: !!data.emailOptOut,
           whatsappOptOut: !!data.whatsappOptOut,
-          name: data.name || 'Değerli Hastamız'
+          name: data.name || 'Değerli Müşterimiz'
         })
         setLoading(false)
       })
@@ -87,8 +87,8 @@ function OptOutContent() {
       <div style={styles.card}>
         <h1 style={styles.title}>Bildirim Tercihleri</h1>
         <p style={styles.greeting}>Merhaba,</p>
-        <p style={styles.subtitle}>Aşağıdan kliniğimizden almak istemediğiniz bildirim türlerini seçebilirsiniz. İşaretlediğiniz kanallardan size bildirim <b>gönderilmeyecektir</b>.</p>
-        <p style={styles.subtitle}>Kapatılmış bir kanalı tekrar açmak için klinikten yeni tercih formu isteyin.</p>
+        <p style={styles.subtitle}>Aşağıdan işletmemizden almak istemediğiniz bildirim türlerini seçebilirsiniz. İşaretlediğiniz kanallardan size bildirim <b>gönderilmeyecektir</b>.</p>
+        <p style={styles.subtitle}>Kapatılmış bir kanalı tekrar açmak için işletmeden yeni tercih formu isteyin.</p>
 
         <form onSubmit={handleSave} style={styles.form}>
           <label style={styles.label}>

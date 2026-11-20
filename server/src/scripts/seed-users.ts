@@ -3,7 +3,8 @@ import { db } from '../db/client'
 import { users } from '../db/schema'
 import { eq } from 'drizzle-orm'
 
-const EMAIL = process.env.INITIAL_ADMIN_EMAIL || 'admin@klinik.com'
+// Varsayılan geliştirici/üretim yönetici e-postası (örn: INITIAL_ADMIN_EMAIL=admin@isletme.com)
+const EMAIL = process.env.INITIAL_ADMIN_EMAIL || 'admin@axamaz.com'
 const PASSWORD = process.env.INITIAL_ADMIN_PASSWORD || 'Admin123!'
 
 async function seed() {

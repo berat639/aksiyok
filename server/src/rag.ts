@@ -245,8 +245,8 @@ export async function getPreWarmEmbedding(): Promise<number[]> {
   return pendingPreWarmPromise
 }
 
-export async function getPreWarmedRagContext(clinicId?: string | null, direction = 'inbound', maxWaitMs = 250): Promise<string> {
-  const key = `${clinicId || 'default'}:${direction}`
+export async function getPreWarmedRagContext(clinicId?: string | null, _direction = 'all', maxWaitMs = 250): Promise<string> {
+  const key = `${clinicId || 'default'}:all`
   const now = Date.now()
   const hit = preWarmedRagContextCache.get(key)
   if (hit && hit.expiresAt > now) {
@@ -256,7 +256,7 @@ export async function getPreWarmedRagContext(clinicId?: string | null, direction
   const refreshTask = (async () => {
     try {
       const emb = await getPreWarmEmbedding()
-      const topDocs = await retrieveDocsByEmbedding(emb, 5, direction === 'web' ? 'inbound' : direction)
+      const topDocs = await retrieveDocsByEmbedding(emb, 5, 'all')
       const ctx = topDocs.length > 0 ? await buildRagPrompt(topDocs) : ''
       preWarmedRagContextCache.set(key, { context: ctx, expiresAt: Date.now() + PRE_WARM_CONTEXT_TTL_MS })
       return ctx
@@ -284,18 +284,6 @@ export type { RankedDoc } from './db/repositories/knowledge'
 export const DEFAULT_RAG_MIN_SCORE = 0.55
 
 export async function resolveRagMinScore(): Promise<number> {
-  try {
-    const { getSetting } = await import('./db/repositories/settings')
-    const raw = await getSetting('ai.rag_min_score')
-    if (raw !== null && raw !== undefined && raw !== '') {
-      const parsed = Number(raw)
-      if (Number.isFinite(parsed) && parsed >= 0.1 && parsed <= 0.95) {
-        return parsed
-      }
-    }
-  } catch {
-    // Fallback to default if no tenant context or DB error
-  }
   return DEFAULT_RAG_MIN_SCORE
 }
 
@@ -356,4 +344,4 @@ ${sections.join('\n\n')}
 // ── Pre-warm query ────────────────────────────────────────────────────────────
 
 export const PRE_WARM_QUERY =
-  'Diş kliniği randevu muayene tedavi dolgu implant kanal tedavisi kampanya'
+  'işletme randevu hizmet ürün bilgi çalışma saatleri kampanya iletişim'

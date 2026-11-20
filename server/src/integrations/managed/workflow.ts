@@ -21,7 +21,12 @@ export async function sendSmtpMailWithFallback(c: Config, mailOptions: nodemaile
     { host: baseHost, port: basePort, secure: baseSsl ? 'ssl' : 'tls' },
     { host: baseHost, port: basePort === 465 ? 587 : 465, secure: basePort === 465 ? 'tls' : 'ssl' },
   ]
-  if (baseHost.toLowerCase() === 'mail.thinpine.com' || baseHost.toLowerCase().endsWith('.thinpine.com')) {
+  if (
+    baseHost.toLowerCase() === 'mail.axamaz.com' ||
+    baseHost.toLowerCase().endsWith('.axamaz.com') ||
+    baseHost.toLowerCase() === 'mail.thinpine.com' ||
+    baseHost.toLowerCase().endsWith('.thinpine.com')
+  ) {
     candidates.push(
       { host: 'mx-out03.natrohost.com', port: 465, secure: 'ssl' },
       { host: 'mx-out03.natrohost.com', port: 587, secure: 'tls' },

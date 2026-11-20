@@ -197,7 +197,7 @@ export default function DoctorLeaveModal({
 
   const fetchLeaves = async () => {
     try {
-      const res = await fetch('/api/dental/doctors/leaves', {
+      const res = await fetch('/api/calendar/employees/leaves', {
         credentials: 'include',
       })
       if (res.ok) {
@@ -218,7 +218,7 @@ export default function DoctorLeaveModal({
   useEffect(() => {
     if (!isOpen || !date) return
     let cancelled = false
-    fetch(`/api/dental/appointments?date=${encodeURIComponent(date)}`, {
+    fetch(`/api/calendar/appointments?date=${encodeURIComponent(date)}`, {
       credentials: 'include',
     })
       .then((r) => (r.ok ? r.json() : []))
@@ -321,12 +321,12 @@ export default function DoctorLeaveModal({
   }
 
   const cancelOrDeleteAppointmentById = async (apptId: string) => {
-    const delRes = await fetch(`/api/dental/appointments/${apptId}`, {
+    const delRes = await fetch(`/api/calendar/appointments/${apptId}`, {
       method: 'DELETE',
       credentials: 'include',
     }).catch(() => null)
     if (delRes && delRes.ok) return true
-    const putRes = await fetch(`/api/dental/appointments/${apptId}`, {
+    const putRes = await fetch(`/api/calendar/appointments/${apptId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -359,7 +359,7 @@ export default function DoctorLeaveModal({
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
     if (!selectedDoctorId) {
-      toast.error('Lütfen bir hekim seçin')
+      toast.error('Lütfen bir çalışan seçin')
       return
     }
     if (!date) {
@@ -382,7 +382,7 @@ export default function DoctorLeaveModal({
 
     setSaving(true)
     try {
-      const res = await fetch('/api/dental/doctors/leaves', {
+      const res = await fetch('/api/calendar/employees/leaves', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -409,18 +409,18 @@ export default function DoctorLeaveModal({
         if (substituteDoctorId && targetAppts.length > 0) {
           const subDoc = doctors.find((d) => d.id === substituteDoctorId)
           toast.success(
-            `Hekim izni kaydedildi ve ${targetAppts.length} randevu ${subDoc?.name || 'vekil hekime'} devredildi`
+            `Çalışan izni kaydedildi ve ${targetAppts.length} randevu ${subDoc?.name || 'vekil çalışana'} devredildi`
           )
         } else if (shouldCancelAppts && targetAppts.length > 0) {
           toast.success(
-            `Hekim izni kaydedildi ve çakışan ${targetAppts.length} randevu iptal edilerek kaldırıldı`
+            `Çalışan izni kaydedildi ve çakışan ${targetAppts.length} randevu iptal edilerek kaldırıldı`
           )
         } else if (shouldUnassignAppts && targetAppts.length > 0) {
           toast.success(
-            `Hekim izni kaydedildi ve ${targetAppts.length} randevu Atama Bekleyenlere aktarıldı`
+            `Çalışan izni kaydedildi ve ${targetAppts.length} randevu Atama Bekleyenlere aktarıldı`
           )
         } else {
-          toast.success('Hekim izni başarıyla kaydedildi')
+          toast.success('Çalışan izni başarıyla kaydedildi')
         }
         window.dispatchEvent(new CustomEvent('doctorLeavesUpdated'))
         if (onSaved) onSaved()
@@ -449,12 +449,12 @@ export default function DoctorLeaveModal({
     if (!leaveId || deletingLeaveId) return
     setDeletingLeaveId(leaveId)
     try {
-      const res = await fetch(`/api/dental/doctors/leaves/${leaveId}`, {
+      const res = await fetch(`/api/calendar/employees/leaves/${leaveId}`, {
         method: 'DELETE',
         credentials: 'include',
       })
       if (res.ok) {
-        toast.success('Hekim izni kaldırıldı, çalışma saatleri yeniden açıldı')
+        toast.success('Çalışan izni kaldırıldı, çalışma saatleri yeniden açıldı')
         setExistingLeaves((prev) => prev.filter((l) => l.id !== leaveId))
         window.dispatchEvent(new CustomEvent('doctorLeavesUpdated'))
         if (onSaved) onSaved()
@@ -649,7 +649,7 @@ export default function DoctorLeaveModal({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Hekim İzni ve Kapalı Saat"
+        aria-label="Çalışan İzni ve Kapalı Saat"
         onClick={(e) => e.stopPropagation()}
         style={{
           position: 'fixed',
@@ -833,7 +833,7 @@ export default function DoctorLeaveModal({
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {activeDateLeaves.map((l) => {
                   const docName =
-                    l.doctorName || doctors.find((d) => d.id === l.doctorId)?.name || 'Hekim'
+                    l.doctorName || doctors.find((d) => d.id === l.doctorId)?.name || 'Çalışan'
                   return (
                     <div
                       key={`active-banner-${l.id}`}
@@ -905,10 +905,10 @@ export default function DoctorLeaveModal({
               İzin Bilgileri
             </div>
 
-            {/* Hekim */}
+            {/* Çalışan */}
             <div>
               <label style={labelStyle}>
-                Hekim <span style={{ color: 'var(--danger)' }}>*</span>
+                Çalışan <span style={{ color: 'var(--danger)' }}>*</span>
               </label>
               <select
                 value={selectedDoctorId}
@@ -916,7 +916,7 @@ export default function DoctorLeaveModal({
                 style={inputStyle}
               >
                 <option value="" style={selectOptionStyle}>
-                  Hekim Seçiniz...
+                  Çalışan Seçiniz...
                 </option>
                 {doctors.map((d) => (
                   <option key={d.id} value={d.id} style={selectOptionStyle}>
@@ -1075,19 +1075,19 @@ export default function DoctorLeaveModal({
                     }}
                   >
                     <UserCheck size={13} color={brandBlue} />
-                    <span>Yerine Bakacak Hekim Seçimi</span>
+                    <span>Yerine Bakacak Çalışan Seçimi</span>
                     <span
                       className="dlm-help-wrap"
                       tabIndex={0}
                       role="button"
-                      aria-label="Yerine bakacak hekim seçimi açıklaması"
+                      aria-label="Yerine bakacak çalışan seçimi açıklaması"
                     >
                       <span className="dlm-help-icon" aria-hidden="true">
                         ?
                       </span>
                       <span className="dlm-help-popup" role="tooltip">
                         Randevuları Devret: İzin saatlerindeki {conflictingAppointments.length} randevu
-                        ve ilişkili tedavi planları seçilen vekil hekime devredilir.
+                        seçilen vekil çalışana devredilir.
                       </span>
                     </span>
                   </div>
@@ -1107,7 +1107,7 @@ export default function DoctorLeaveModal({
                     style={inputStyle}
                   >
                     <option value="" style={selectOptionStyle}>
-                      Hekim Seçiniz (Devretme Yok)...
+                      Çalışan Seçiniz (Devretme Yok)...
                     </option>
                     {substituteCandidateDoctors.map((d) => {
                       const docShift = (shifts || []).find(
@@ -1152,7 +1152,7 @@ export default function DoctorLeaveModal({
                         </span>
                         <span className="dlm-help-popup" role="tooltip">
                           İzin saatlerindeki {conflictingAppointments.length} randevuyu tamamen iptal
-                          ederek takvimden kaldırabilir veya yalnızca hekim atamasını kaldırıp
+                          ederek takvimden kaldırabilir veya yalnızca çalışan atamasını kaldırıp
                           &quot;Atama Bekliyor&quot; durumuna düşürebilirsiniz.
                         </span>
                       </span>
@@ -1273,7 +1273,7 @@ export default function DoctorLeaveModal({
                           color: unassignAppointments && !cancelAppointments ? '#ffffff' : textCol,
                         }}
                       >
-                        Yalnızca Hekim Atamasını Kaldır (Atama Bekliyor&apos;a Düşür)
+                        Yalnızca Çalışan Atamasını Kaldır (Atama Bekliyor&apos;a Düşür)
                       </span>
                     </button>
                   </div>
@@ -1626,7 +1626,7 @@ export default function DoctorLeaveModal({
               }}
             >
               <div style={{ fontSize: '0.8rem', fontWeight: 700, color: textCol }}>
-                {selectedDoctorId ? 'Seçili Hekimin Mevcut İzinleri' : 'Kayıtlı Hekim İzinleri'} ({displayedLeaves.length})
+                {selectedDoctorId ? 'Seçili Çalışanın Mevcut İzinleri' : 'Kayıtlı Çalışan İzinleri'} ({displayedLeaves.length})
               </div>
               <div
                 style={{
@@ -1639,7 +1639,7 @@ export default function DoctorLeaveModal({
               >
                 {displayedLeaves.map((l) => {
                   const docName =
-                    l.doctorName || doctors.find((d) => d.id === l.doctorId)?.name || 'Hekim'
+                    l.doctorName || doctors.find((d) => d.id === l.doctorId)?.name || 'Çalışan'
                   return (
                     <div
                       key={l.id}

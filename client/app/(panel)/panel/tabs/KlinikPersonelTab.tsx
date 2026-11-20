@@ -6,6 +6,15 @@ import { useAuth } from '../../../../lib/auth-context'
 import ShiftContextMenu from '../../../admin/components/ShiftContextMenu'
 import DoctorLeaveModal from '../../../admin/components/DoctorLeaveModal'
 import ConfirmModal from '../../../admin/components/ConfirmModal'
+import StaffRolePermissionsSection, {
+  ROLE_BADGE_META,
+  STAFF_ROLE_OPTIONS,
+  DEFAULT_ROLE_TABS,
+  DEFAULT_ROLE_STAFF_PERMS,
+  getPresetForRole,
+  normalizeStaffRoleForForm,
+  type StaffGranularPermissions,
+} from '../../../admin/components/StaffRolePermissionsSection'
 import ShiftPlanner, { type StaffPlannerPermissions } from './ShiftPlanner'
 import { useBackdropDismiss } from '../../../../hooks/useBackdropDismiss'
 import { PhoneMaskedInput } from '@/lib/phone-mask'
@@ -33,6 +42,8 @@ interface User {
   phone?: string
   specialty?: string
   color?: string
+  allowedTabs?: string[]
+  staffPermissions?: StaffGranularPermissions
 }
 
 interface ShiftItem {
@@ -131,11 +142,7 @@ const clayOutlineBtnStyle: React.CSSProperties = {
   gap: 6,
 }
 
-const ROLE_META: Record<string, { label: string; color: string; bg: string; border: string }> = {
-  yonetici: { label: 'Yönetici', color: '#1d4ed8', bg: 'var(--badge-clinic-bg, #e0f2fe)', border: 'var(--badge-clinic-border, #bae6fd)' },
-  hekim: { label: 'Hekim', color: '#1d4ed8', bg: 'var(--badge-clinic-bg, #e0f2fe)', border: 'var(--badge-clinic-border, #bae6fd)' },
-  host: { label: 'Kayıt / Resepsiyon', color: '#15803d', bg: 'var(--btn-mint-bg, #f0fdf4)', border: 'var(--btn-mint-border, #86efac)' },
-}
+const ROLE_META = ROLE_BADGE_META
 
 export default function KlinikPersonelTab() {
   const { user } = useAuth()
@@ -156,6 +163,9 @@ export default function KlinikPersonelTab() {
     editClinicWorkingHours: true,
     manageStaff: true,
   })
+  const [roleTabsPresets, setRoleTabsPresets] = useState<Record<string, string[]>>(DEFAULT_ROLE_TABS)
+  const [roleStaffPresets, setRoleStaffPresets] = useState<Record<string, StaffGranularPermissions>>(DEFAULT_ROLE_STAFF_PERMS)
+  const [dynamicTabLabel, setDynamicTabLabel] = useState<string>('Veri Tabloları')
 
   const [workspace, setWorkspace] = useState<'planner' | 'people'>('planner')
 
@@ -165,11 +175,14 @@ export default function KlinikPersonelTab() {
   const [inviteForm, setInviteForm] = useState({
     email: '',
     name: '',
-    role: 'hekim',
+    role: 'calisan',
     phone: '',
     specialty: '',
     color: '#0284c7',
   })
+  const [inviteAllowedTabs, setInviteAllowedTabs] = useState<string[]>([...DEFAULT_ROLE_TABS.calisan])
+  const [inviteStaffPerms, setInviteStaffPerms] = useState<StaffGranularPermissions>({ ...DEFAULT_ROLE_STAFF_PERMS.calisan })
+  const [inviteSaveAsRoleDefault, setInviteSaveAsRoleDefault] = useState(false)
   const [inviteError, setInviteError] = useState('')
   const [sendingInvite, setSendingInvite] = useState(false)
 
@@ -190,13 +203,17 @@ export default function KlinikPersonelTab() {
     specialty: string
     color: string
     active: boolean
-  }>({ name: '', email: '', phone: '', role: 'hekim', specialty: '', color: '#0284c7', active: true })
+  }>({ name: '', email: '', phone: '', role: 'calisan', specialty: '', color: '#0284c7', active: true })
+  const [editAllowedTabs, setEditAllowedTabs] = useState<string[]>([...DEFAULT_ROLE_TABS.calisan])
+  const [editStaffPerms, setEditStaffPerms] = useState<StaffGranularPermissions>({ ...DEFAULT_ROLE_STAFF_PERMS.calisan })
+  const [editSaveAsRoleDefault, setEditSaveAsRoleDefault] = useState(false)
   const [editError, setEditError] = useState('')
   const [isSavingUser, setIsSavingUser] = useState(false)
   const [confirmDeleteUser, setConfirmDeleteUser] = useState<User | null>(null)
   const [confirmFreezeUser, setConfirmFreezeUser] = useState<User | null>(null)
 
   const activeAdminCount = users.filter((x) => x.role === 'yonetici' && x.active !== false).length
+  const canUpdateRoleDefaults = user?.role === 'yonetici' || user?.role === 'super_admin' || user?.role === 'moderator'
 
   const fetchData = useCallback(() => {
     fetch('/api/admin/users', { credentials: 'include' })
@@ -218,8 +235,23 @@ export default function KlinikPersonelTab() {
             setWorkspace('people')
           }
         }
+        if (data?.roleTabs && typeof data.roleTabs === 'object') {
+          setRoleTabsPresets((prev) => ({ ...prev, ...data.roleTabs }))
+        }
+        if (data?.config && typeof data.config === 'object') {
+          setRoleStaffPresets((prev) => ({ ...prev, ...data.config }))
+        }
         if (data?.smtpStatus) {
           setSmtpStatus(data.smtpStatus)
+        }
+      })
+      .catch(() => { })
+
+    fetch('/api/dynamic-tables/schema', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && typeof d.tabLabel === 'string' && d.tabLabel.trim()) {
+          setDynamicTabLabel(d.tabLabel.trim())
         }
       })
       .catch(() => { })
@@ -244,6 +276,23 @@ export default function KlinikPersonelTab() {
   const canManageStaff = user?.role === 'yonetici' || user?.role === 'super_admin' || permissions.manageStaff
   const canManageLeaves = user?.role === 'yonetici' || user?.role === 'super_admin' || permissions.manageLeaves
 
+  const openInviteModal = () => {
+    const preset = getPresetForRole('calisan', roleTabsPresets, roleStaffPresets)
+    setInviteForm({ email: '', name: '', role: 'calisan', phone: '', specialty: '', color: '#0284c7' })
+    setInviteAllowedTabs(preset.allowedTabs)
+    setInviteStaffPerms(preset.staffPermissions)
+    setInviteSaveAsRoleDefault(false)
+    setInviteError('')
+    setShowInviteModal(true)
+  }
+
+  const handleInviteRoleChange = (nextRole: string) => {
+    const preset = getPresetForRole(nextRole, roleTabsPresets, roleStaffPresets)
+    setInviteForm((prev) => ({ ...prev, role: nextRole }))
+    setInviteAllowedTabs(preset.allowedTabs)
+    setInviteStaffPerms(preset.staffPermissions)
+  }
+
   // KVKK-Compliant Email Staff Invite
   async function handleInviteSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -258,7 +307,12 @@ export default function KlinikPersonelTab() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify(inviteForm),
+        body: JSON.stringify({
+          ...inviteForm,
+          allowedTabs: inviteAllowedTabs,
+          staffPermissions: inviteStaffPerms,
+          saveAsRoleDefault: inviteSaveAsRoleDefault,
+        }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -266,8 +320,8 @@ export default function KlinikPersonelTab() {
         return
       }
       setShowInviteModal(false)
-      setInviteForm({ email: '', name: '', role: 'hekim', phone: '', specialty: '', color: '#0284c7' })
-      toast.success('KVKK uyumlu davet e-postası personele gönderildi.')
+      setInviteForm({ email: '', name: '', role: 'calisan', phone: '', specialty: '', color: '#0284c7' })
+      toast.success('KVKK uyumlu davet e-postası ve rol yetkileri kaydedildi.')
       fetchData()
     } catch {
       setInviteError('Bağlantı hatası oluştu.')
@@ -295,17 +349,31 @@ export default function KlinikPersonelTab() {
 
   const openEditModal = (u: User) => {
     if (!canManageStaff) return
+    const normalizedRole = normalizeStaffRoleForForm(u.role)
+    const preset = getPresetForRole(normalizedRole, roleTabsPresets, roleStaffPresets)
     setEditingUser(u)
     setEditForm({
       name: u.name || '',
       email: u.email || '',
       phone: u.phone || '',
-      role: u.role || 'hekim',
+      role: normalizedRole,
       specialty: u.specialty || '',
       color: u.color || '#0284c7',
       active: u.active ?? true,
     })
+    setEditAllowedTabs(
+      Array.isArray(u.allowedTabs) && u.allowedTabs.length > 0 ? [...u.allowedTabs] : preset.allowedTabs,
+    )
+    setEditStaffPerms(u.staffPermissions ? { ...preset.staffPermissions, ...u.staffPermissions } : preset.staffPermissions)
+    setEditSaveAsRoleDefault(false)
     setEditError('')
+  }
+
+  const handleEditRoleChange = (nextRole: string) => {
+    const preset = getPresetForRole(nextRole, roleTabsPresets, roleStaffPresets)
+    setEditForm((prev) => ({ ...prev, role: nextRole }))
+    setEditAllowedTabs(preset.allowedTabs)
+    setEditStaffPerms(preset.staffPermissions)
   }
 
   async function handleUpdateUser(e: React.FormEvent) {
@@ -318,7 +386,7 @@ export default function KlinikPersonelTab() {
       return
     }
     if (editingUser.role === 'yonetici' && editingUser.active !== false && activeAdminCount <= 1 && (!editForm.active || editForm.role !== 'yonetici')) {
-      const msg = 'Güvenlik Uyarısı: Klinikteki tek aktif yönetici hesabı dondurulamaz veya yetkisi düşürülemez. Önce başka bir yönetici tanımlayın.'
+      const msg = 'Güvenlik Uyarısı: İşletmedeki tek aktif yönetici hesabı dondurulamaz veya yetkisi düşürülemez. Önce başka bir yönetici tanımlayın.'
       setEditError(msg)
       toast.error(msg)
       return
@@ -331,9 +399,16 @@ export default function KlinikPersonelTab() {
         email: editForm.email,
         phone: editForm.phone,
         role: editForm.role,
-        specialty: editForm.role === 'hekim' ? editForm.specialty : null,
-        color: editForm.role === 'hekim' ? editForm.color : null,
+        specialty: editForm.role !== 'yonetici' ? editForm.specialty : null,
+        color: editForm.role !== 'yonetici' ? editForm.color : null,
         active: editForm.active,
+        ...(editingUser.role !== 'yonetici'
+          ? {
+              allowedTabs: editAllowedTabs,
+              staffPermissions: editStaffPerms,
+              saveAsRoleDefault: editSaveAsRoleDefault,
+            }
+          : {}),
       }
       const res = await fetch(`/api/yonetici/users/${editingUser.id}`, {
         method: 'PUT',
@@ -348,7 +423,7 @@ export default function KlinikPersonelTab() {
       if (!editForm.active && editingUser.active && Number(data.unassignedAppointmentsCount) > 0) {
         toast.success(`${editForm.name} hesabı donduruldu. Gelecekteki ${data.unassignedAppointmentsCount} randevu boşa çıkarıldı (Atama Bekliyor).`)
       } else {
-        toast.success('Personel bilgileri güncellendi.')
+        toast.success('Personel bilgileri, rol ve yetki izinleri güncellendi.')
       }
       fetchData()
     } catch (err: any) {
@@ -385,7 +460,7 @@ export default function KlinikPersonelTab() {
     if (e) e.stopPropagation()
     if (!canManageStaff) return
     if (u.role === 'yonetici') {
-      toast.error('⚠️ Yönetici hesabı yalnızca satışçı tarafından Klinikler sekmesinden ilgili klinik altında dondurulabilir.')
+      toast.error('⚠️ Yönetici hesabı yalnızca satışçı tarafından İşletmeler sekmesinden ilgili işletme altında dondurulabilir.')
       return
     }
     const nextActive = !u.active
@@ -455,7 +530,7 @@ export default function KlinikPersonelTab() {
             </div>
             <div style={{ fontSize: '0.78rem', color: 'var(--foreground)', lineHeight: 1.45, fontWeight: 600 }}>
               {smtpStatus.message ||
-                'Kliniğin KVKK uyumlu olarak yeni hekim veya personel davet edebilmesi için E-Posta (SMTP) entegrasyonunun yapılandırılmış ve aktif olması zorunludur. Lütfen Entegrasyonlar (Ayarlar) sekmesinden E-Posta kurulumunu tamamlayın.'}
+                'İşletmenin KVKK uyumlu olarak yeni çalışan veya personel davet edebilmesi için E-Posta (SMTP) entegrasyonunun yapılandırılmış ve aktif olması zorunludur. Lütfen Entegrasyonlar (Ayarlar) sekmesinden E-Posta kurulumunu tamamlayın.'}
             </div>
           </div>
         </div>
@@ -463,7 +538,7 @@ export default function KlinikPersonelTab() {
 
       {/* Üst Sekme Seçici (Yalnızca Mesai Planı ve Personeller — Şablonlar kaldırıldı) */}
       <nav
-        aria-label="Klinik personeli bölümleri"
+        aria-label="Ekip ve vardiya bölümleri"
         style={{
           display: 'inline-flex',
           gap: 4,
@@ -542,7 +617,7 @@ export default function KlinikPersonelTab() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <h2 style={{ fontSize: '1.02rem', fontWeight: 800, color: 'var(--foreground)', margin: 0 }}>
-                Klinik Personeli & Hekimler
+                İşletme Ekibi & Çalışanlar
               </h2>
               <span
                 style={{
@@ -577,10 +652,7 @@ export default function KlinikPersonelTab() {
               {canManageStaff && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setInviteError('')
-                    setShowInviteModal(true)
-                  }}
+                  onClick={openInviteModal}
                   className="btn-clinic-primary"
                   style={clayPrimaryBtnStyle}
                 >
@@ -599,7 +671,7 @@ export default function KlinikPersonelTab() {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))', gap: 10 }}>
                 {pendingInvitations.map((inv) => {
-                  const roleMeta = ROLE_META[inv.role] || ROLE_META.host
+                  const roleMeta = ROLE_META[inv.role] || ROLE_META.calisan
                   const inviteLink = typeof window !== 'undefined' ? `${window.location.origin}/invite/${inv.token}` : `/invite/${inv.token}`
                   return (
                     <div
@@ -677,7 +749,7 @@ export default function KlinikPersonelTab() {
           {/* Personel Kartları */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 310px), 1fr))', gap: 12 }}>
             {users.map((u) => {
-              const role = ROLE_META[u.role] || ROLE_META.host
+              const role = ROLE_META[u.role] || ROLE_META.calisan
               return (
                 <div
                   key={u.id}
@@ -733,6 +805,11 @@ export default function KlinikPersonelTab() {
                         {u.specialty}
                       </div>
                     )}
+                    {u.role !== 'yonetici' && Array.isArray(u.allowedTabs) && (
+                      <div style={{ fontSize: '0.67rem', color: 'var(--foreground-3)', marginTop: 2, fontWeight: 650 }}>
+                        {u.allowedTabs.length} görünür sekme · Karttan yetkileri düzenle
+                      </div>
+                    )}
                   </div>
 
                   {/* Rozetler ve Hızlı Aksiyonlar */}
@@ -779,9 +856,9 @@ export default function KlinikPersonelTab() {
                               color: 'var(--foreground-3)',
                               fontWeight: 700,
                             }}
-                            title="Yönetici hesabı yalnızca satışçı tarafından Klinikler sekmesinden dondurulabilir"
+                            title="Yönetici hesabı yalnızca satışçı tarafından İşletmeler sekmesinden dondurulabilir"
                           >
-                            Satış Ekibi (Klinikler)
+                            Satış Ekibi (İşletmeler)
                           </span>
                         ) : (
                           <button
@@ -831,7 +908,7 @@ export default function KlinikPersonelTab() {
           style={{
             position: 'fixed',
             inset: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.6)',
+            background: 'var(--modal-overlay, rgba(15, 23, 42, 0.6))',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -847,7 +924,7 @@ export default function KlinikPersonelTab() {
             onSubmit={handleInviteSubmit}
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: 'calc(100vw - 24px)',
+              width: 'min(460px, calc(100vw - 24px))',
               maxWidth: 460,
               maxHeight: '90vh',
               background: 'var(--card-bg)',
@@ -981,7 +1058,7 @@ export default function KlinikPersonelTab() {
                   </label>
                   <input
                     type="email"
-                    placeholder="ornek@klinik.com"
+                    placeholder="ornek@axamaz.com"
                     value={inviteForm.email}
                     onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })}
                     required
@@ -996,11 +1073,14 @@ export default function KlinikPersonelTab() {
                     </label>
                     <select
                       value={inviteForm.role}
-                      onChange={(e) => setInviteForm({ ...inviteForm, role: e.target.value })}
+                      onChange={(e) => handleInviteRoleChange(e.target.value)}
                       style={{ ...inputStyle, cursor: 'pointer' }}
                     >
-                      <option value="hekim">Hekim</option>
-                      <option value="host">Kayıt / Resepsiyon</option>
+                      {STAFF_ROLE_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
                     </select>
                   </div>
                   <div>
@@ -1016,14 +1096,14 @@ export default function KlinikPersonelTab() {
                   </div>
                 </div>
 
-                {inviteForm.role === 'hekim' && (
+                {inviteForm.role !== 'yonetici' && (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <div>
                       <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>
-                        Uzmanlık Alanı
+                        Ünvan / Uzmanlık Alanı
                       </label>
                       <input
-                        placeholder="Örn: Ortodonti"
+                        placeholder="Örn: Müşteri Temsilcisi, Uzman"
                         value={inviteForm.specialty}
                         onChange={(e) => setInviteForm({ ...inviteForm, specialty: e.target.value })}
                         style={inputStyle}
@@ -1046,6 +1126,23 @@ export default function KlinikPersonelTab() {
                   </div>
                 )}
               </div>
+
+              <StaffRolePermissionsSection
+                role={inviteForm.role}
+                allowedTabs={inviteAllowedTabs}
+                staffPermissions={inviteStaffPerms}
+                onChangeAllowedTabs={setInviteAllowedTabs}
+                onChangeStaffPermissions={setInviteStaffPerms}
+                onResetToRoleDefault={() => {
+                  const preset = getPresetForRole(inviteForm.role, roleTabsPresets, roleStaffPresets)
+                  setInviteAllowedTabs(preset.allowedTabs)
+                  setInviteStaffPerms(preset.staffPermissions)
+                }}
+                saveAsRoleDefault={inviteSaveAsRoleDefault}
+                onChangeSaveAsRoleDefault={setInviteSaveAsRoleDefault}
+                canUpdateRoleDefaults={canUpdateRoleDefaults}
+                dynamicTabLabel={dynamicTabLabel}
+              />
 
               {inviteError && (
                 <div
@@ -1095,12 +1192,13 @@ export default function KlinikPersonelTab() {
               <button
                 type="submit"
                 disabled={sendingInvite || !smtpStatus.ready}
+                className="btn-clinic-primary"
                 style={{
                   padding: '9px 24px',
                   borderRadius: 8,
-                  background: '#2563eb',
+                  background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
                   color: '#ffffff',
-                  border: 'none',
+                  border: '1px solid #1d4ed8',
                   cursor: sendingInvite || !smtpStatus.ready ? 'not-allowed' : 'pointer',
                   fontSize: '0.86rem',
                   fontWeight: 700,
@@ -1121,13 +1219,13 @@ export default function KlinikPersonelTab() {
         </div>
       )}
 
-      {/* ── MODAL 2: Personel Düzenleme / Dondurma / KVKK Kaldırma Modalı (Yeni Randevu 460px Standart Modal) ── */}
+      {/* ── MODAL 2: Personel Düzenleme / Rol & Yetki / Dondurma Modalı (Yeni Randevu 460px Standart Modal) ── */}
       {editingUser && (
         <div
           style={{
             position: 'fixed',
             inset: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.6)',
+            background: 'var(--modal-overlay, rgba(15, 23, 42, 0.6))',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -1143,7 +1241,7 @@ export default function KlinikPersonelTab() {
             onSubmit={handleUpdateUser}
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: 'calc(100vw - 24px)',
+              width: 'min(460px, calc(100vw - 24px))',
               maxWidth: 460,
               maxHeight: '90vh',
               background: 'var(--card-bg)',
@@ -1284,33 +1382,36 @@ export default function KlinikPersonelTab() {
                     </label>
                     {editingUser.role === 'yonetici' ? (
                       <input
-                        value="Yönetici (Seed User)"
+                        value="İşletme Yöneticisi"
                         disabled
                         style={{ ...inputStyle, opacity: 0.75, cursor: 'not-allowed' }}
                       />
                     ) : (
                       <select
                         value={editForm.role}
-                        onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
+                        onChange={(e) => handleEditRoleChange(e.target.value)}
                         style={{ ...inputStyle, cursor: 'pointer' }}
                       >
-                        <option value="hekim">Hekim</option>
-                        <option value="host">Kayıt / Resepsiyon</option>
+                        {STAFF_ROLE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
                       </select>
                     )}
                   </div>
                 </div>
 
-                {editForm.role === 'hekim' && (
+                {editForm.role !== 'yonetici' && (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <div>
                       <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>
-                        Uzmanlık
+                        Ünvan / Uzmanlık
                       </label>
                       <input
                         value={editForm.specialty}
                         onChange={(e) => setEditForm({ ...editForm, specialty: e.target.value })}
-                        placeholder="Örn: Ortodonti"
+                        placeholder="Örn: Müşteri Temsilcisi, Uzman"
                         style={inputStyle}
                       />
                     </div>
@@ -1331,6 +1432,23 @@ export default function KlinikPersonelTab() {
                   </div>
                 )}
               </div>
+
+              <StaffRolePermissionsSection
+                role={editingUser.role === 'yonetici' ? 'yonetici' : editForm.role}
+                allowedTabs={editAllowedTabs}
+                staffPermissions={editStaffPerms}
+                onChangeAllowedTabs={setEditAllowedTabs}
+                onChangeStaffPermissions={setEditStaffPerms}
+                onResetToRoleDefault={() => {
+                  const preset = getPresetForRole(editForm.role, roleTabsPresets, roleStaffPresets)
+                  setEditAllowedTabs(preset.allowedTabs)
+                  setEditStaffPerms(preset.staffPermissions)
+                }}
+                saveAsRoleDefault={editSaveAsRoleDefault}
+                onChangeSaveAsRoleDefault={setEditSaveAsRoleDefault}
+                canUpdateRoleDefaults={canUpdateRoleDefaults}
+                dynamicTabLabel={dynamicTabLabel}
+              />
 
               {/* Hesap Dondurma / Aktifleştirme Kartı */}
               {(() => {
@@ -1354,7 +1472,7 @@ export default function KlinikPersonelTab() {
                           Hesap Durumu ({editForm.active ? 'Aktif' : 'Donduruldu'})
                         </div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--foreground-3)' }}>
-                          Dondurulan personel sisteme giriş yapamaz, geçmiş tıbbi kayıtları korunur.
+                          Dondurulan çalışan sisteme giriş yapamaz, geçmiş kayıtları korunur.
                         </div>
                       </div>
                       <button
@@ -1362,7 +1480,7 @@ export default function KlinikPersonelTab() {
                         onClick={() => {
                           if (freezeLocked) {
                             toast.error(
-                              '⚠️ Yönetici hesabı yalnızca satışçı tarafından Klinikler sekmesinden ilgili klinik altında dondurulabilir.'
+                              '⚠️ Yönetici hesabı yalnızca satışçı tarafından İşletmeler sekmesinden ilgili işletme altında dondurulabilir.'
                             )
                             return
                           }
@@ -1400,11 +1518,11 @@ export default function KlinikPersonelTab() {
                       >
                         <ShieldAlert size={14} style={{ flexShrink: 0 }} />
                         <span>
-                          Yönetici (Seed User) hesabı yalnızca satışçı tarafından Klinikler sekmesinden ilgili klinik altında dondurulabilir.
+                          İşletme yöneticisi hesabı yalnızca satışçı tarafından İşletmeler sekmesinden ilgili işletme altında dondurulabilir.
                         </span>
                       </div>
                     )}
-                    {!editForm.active && editingUser.active && editForm.role === 'hekim' && (
+                    {!editForm.active && editingUser.active && (editForm.role === 'hekim' || editForm.role === 'calisan') && (
                       <div
                         style={{
                           padding: '8px 10px',
@@ -1417,7 +1535,7 @@ export default function KlinikPersonelTab() {
                           lineHeight: 1.4,
                         }}
                       >
-                        ⚠️ Hekim hesabı dondurulduğunda, gelecekteki aktif randevuları boşa çıkarılır ve ana takvimde turuncu renkli &quot;Doktor ayrıldı, atama bekliyor&quot; uyarısıyla gösterilir.
+                        ⚠️ Çalışan hesabı dondurulduğunda, gelecekteki aktif randevuları boşa çıkarılır ve ana takvimde turuncu renkli &quot;Çalışan ayrıldı, atama bekliyor&quot; uyarısıyla gösterilir.
                       </div>
                     )}
                   </div>
@@ -1494,12 +1612,13 @@ export default function KlinikPersonelTab() {
                 <button
                   type="submit"
                   disabled={isSavingUser}
+                  className="btn-clinic-primary"
                   style={{
                     padding: '9px 24px',
                     borderRadius: 8,
-                    background: '#2563eb',
+                    background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
                     color: '#ffffff',
-                    border: 'none',
+                    border: '1px solid #1d4ed8',
                     cursor: isSavingUser ? 'not-allowed' : 'pointer',
                     fontSize: '0.86rem',
                     fontWeight: 700,
@@ -1518,10 +1637,10 @@ export default function KlinikPersonelTab() {
       {confirmFreezeUser && (
         <ConfirmModal
           isOpen={true}
-          title={confirmFreezeUser.role === 'hekim' ? 'Hekim Hesabını Dondur' : 'Personel Hesabını Dondur'}
+          title={confirmFreezeUser.role === 'hekim' || confirmFreezeUser.role === 'calisan' ? 'Çalışan Hesabını Dondur' : 'Personel Hesabını Dondur'}
           message={
-            confirmFreezeUser.role === 'hekim'
-              ? `"${confirmFreezeUser.name}" adlı hekimin hesabını dondurmak istediğinize emin misiniz? Hekimin aktif oturumları kapatılır ve gelecekteki tüm aktif randevuları boşa çıkarılarak ana takvimde turuncu renkli "Doktor ayrıldı, atama bekliyor" uyarısıyla gösterilir.`
+            confirmFreezeUser.role === 'hekim' || confirmFreezeUser.role === 'calisan'
+              ? `"${confirmFreezeUser.name}" adlı çalışanın hesabını dondurmak istediğinize emin misiniz? Aktif oturumları kapatılır ve gelecekteki tüm aktif randevuları boşa çıkarılarak ana takvimde turuncu renkli "Çalışan ayrıldı, atama bekliyor" uyarısıyla gösterilir.`
               : `"${confirmFreezeUser.name}" adlı personelin hesabını dondurmak istediğinize emin misiniz? Dondurulan personel sisteme giriş yapamaz, geçmiş kayıtları korunur.`
           }
           confirmText="Evet, Hesabı Dondur"
@@ -1537,7 +1656,7 @@ export default function KlinikPersonelTab() {
         <ConfirmModal
           isOpen={true}
           title="Personeli KVKK Uyumlu Kaldır"
-          message={`"${confirmDeleteUser.name}" adlı personeli sistemden kaldırmak istediğinize emin misiniz? Geçmiş tıbbi/randevu kayıtları varsa KVKK gereği kişisel bilgileri anonimleştirilerek arşivlenir, yoksa tamamen silinir.`}
+          message={`"${confirmDeleteUser.name}" adlı personeli sistemden kaldırmak istediğinize emin misiniz? Geçmiş randevu ve işlem kayıtları varsa KVKK gereği kişisel bilgileri anonimleştirilerek arşivlenir, yoksa tamamen silinir.`}
           confirmText="Evet, KVKK Uyumlu Kaldır"
           cancelText="Vazgeç"
           variant="danger"

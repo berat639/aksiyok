@@ -5,6 +5,8 @@ import {
   evolutionConnectionState,
   normalizeEvolutionQr,
   normalizePhone,
+  parseEvolutionContactsList,
+  parseEvolutionContactsWebhook,
   parseEvolutionMessages,
   parseN8nInboundMessages,
   parseN8nStatusUpdates,
@@ -142,5 +144,48 @@ describe('WhatsApp safety helpers', () => {
     })).toEqual([
       { providerMessageId: 'wamid.2', status: 'read' },
     ])
+  })
+})
+
+describe('Evolution telefon rehberi (findContacts & CONTACTS_UPSERT) ayrıştırma', () => {
+  test('/chat/findContacts yanıtından kayıtlı kişileri ayıklar, grupları ve klinik numarasını dışlar', () => {
+    const contacts = parseEvolutionContactsList([
+      { remoteJid: '905321112233@s.whatsapp.net', name: 'Dr. Kemal', pushName: 'Kemal' },
+      { remoteJid: '905334445566@s.whatsapp.net', pushName: 'Diş Deposu' },
+      { remoteJid: '905009998877@s.whatsapp.net', pushName: 'Kendi Hattım' },
+      { remoteJid: '120363000000@g.us', name: 'Klinik Grubu' },
+      { remoteJid: '905441112233@s.whatsapp.net', pushName: '+90 544 111 22 33' },
+      { remoteJid: '905442223344@s.whatsapp.net', pushName: 'Yabancı', isMyContact: false },
+    ], '+905009998877')
+
+    expect(contacts).toEqual([
+      {
+        phone: '+905321112233',
+        phoneLast10: '5321112233',
+        remoteJid: '905321112233@s.whatsapp.net',
+        contactName: 'Dr. Kemal',
+        explicitAddressBook: true,
+      },
+      {
+        phone: '+905334445566',
+        phoneLast10: '5334445566',
+        remoteJid: '905334445566@s.whatsapp.net',
+        contactName: 'Diş Deposu',
+        explicitAddressBook: false,
+      },
+    ])
+  })
+
+  test('CONTACTS_UPSERT webhook olayında yalnızca rehberde kayıtlı (name/isMyContact) kişileri alır', () => {
+    const entries = parseEvolutionContactsWebhook({
+      event: 'contacts.upsert',
+      data: [
+        { id: '905327778899@s.whatsapp.net', name: 'Ahmet Laboratuvar', notify: 'Ahmet' },
+        { id: '905320001122@s.whatsapp.net', notify: 'Sadece WhatsApp Profili' },
+      ],
+    })
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.contactName).toBe('Ahmet Laboratuvar')
+    expect(entries[0]?.phone).toBe('+905327778899')
   })
 })

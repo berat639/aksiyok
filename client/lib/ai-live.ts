@@ -18,6 +18,46 @@ import {
   type TurnDetectionMode,
 } from './turn-detector'
 
+export function hasSpokenFarewell(text: string, customCloseMessage?: string): boolean {
+  const raw = String(text || '').trim()
+  const normalize = (value: string) =>
+    String(value || '')
+      .toLocaleLowerCase('tr-TR')
+      .replace(/[.,!?;:()[\]{}"']/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+  const normalized = normalize(raw)
+  if (!normalized) return false
+
+  if (customCloseMessage) {
+    const customNorm = normalize(customCloseMessage)
+    if (customNorm.length >= 10 && normalized.includes(customNorm)) {
+      return true
+    }
+  }
+
+  // Soru ile biten veya karşılama cümlesi olan ifadeler kapanış sayılmaz ("İyi günler, nasıl yardımcı olabilirim?" vb.)
+  if (
+    raw.endsWith('?') ||
+    /\b(?:hoş\s*geldiniz|nasıl\s+yardımcı\s+olabilirim)\b/u.test(normalized)
+  ) {
+    return /\b(?:hoşça\s*kalın|hoşçakalın|görüş(?:meyi|memizi)\s+sonlandır)\b/u.test(normalized)
+  }
+
+  return [
+    /\bhoşça\s*kalın\b/u,
+    /\bhoşçakalın\b/u,
+    /\bgüle\s*güle\b/u,
+    /\biyi\s+(?:günler|akşamlar|geceler)\b/u,
+    /\bsağlıklı\s+günler\b/u,
+    /\bkendinize\s+iyi\s+bakın\b/u,
+    /\bgörüş(?:meyi|memizi)\s+sonlandır/u,
+    /\bbaşka\s+bir\s+zaman\s+(?:tekrar\s+)?görüş/u,
+    /\bgörüşmek\s+(?:üzere|dileğiyle)\b/u,
+  ].some(pattern => pattern.test(normalized))
+}
+
 export type LiveChatCallbacks = {
   onAudioChunk: (base64Data: string) => void
   onText: (text: string) => void
@@ -26,6 +66,8 @@ export type LiveChatCallbacks = {
   onError: (error: string) => void
   onInterrupted: () => void
   onInteractionStatus?: (status: 'IN_PROGRESS' | 'IDLE') => void
+  /** Asistan görüşmeyi sonlandırdığında (cagriySonlandir) mikrofonu ve oturumu kapatmak için tetiklenir. */
+  onHangup?: (opts: { alreadySpokeFarewell: boolean }) => void
   /** Kullanıcının konuşmasının yazıya dökümü (sesli modda). */
   onUserText?: (text: string) => void
   /** LiveKit + Türkçe SOV sıra algılayıcı sonucu */
@@ -69,6 +111,7 @@ async function handleToolCall(
   args: Record<string, unknown>,
   flowSession?: { id: string; token: string; revision?: number },
   sessionKey?: string,
+  legacyCollectedFields?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const token = flowSession?.token || sessionKey
   const post = async (path: string, body: Record<string, unknown>) => {
@@ -89,6 +132,10 @@ async function handleToolCall(
   switch (name) {
     case 'akisBilgisiGuncelle': {
       if (!flowSession) return { success: false, message: 'Akışla çalışma bu görüşmede açık değil.' }
+      const rawNested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+      const flatFields = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'yeni_kisi'))
+      const mergedFields = { ...flatFields, ...rawNested }
+      if (legacyCollectedFields) Object.assign(legacyCollectedFields, mergedFields)
       let result: Record<string, unknown>
       try {
         const response = await fetch(`/api/flow-sessions/${flowSession.id}/events`, {
@@ -97,7 +144,7 @@ async function handleToolCall(
           body: JSON.stringify({
             id: `${Date.now()}-${Math.random()}`,
             revision: flowSession.revision,
-            fields: (args.bilgiler || {}) as Record<string, unknown>,
+            fields: mergedFields,
             intent: args.yeni_kisi === true ? 'new_person' : 'continue',
           }),
         })
@@ -107,7 +154,7 @@ async function handleToolCall(
       return result
     }
     case 'randevuOlustur': {
-      if (!flowSession) return post('/api/tools/create-appointment', args)
+      if (!flowSession) return post('/api/tools/create-appointment', { ...(legacyCollectedFields || {}), ...args })
       try {
         const response = await fetch(`/api/flow-sessions/${flowSession.id}/actions`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', 'x-flow-session-key': flowSession.token },
@@ -126,31 +173,64 @@ async function handleToolCall(
           return await response.json()
         } catch { return { success: false, message: 'Not kaydedilirken bir hata oluştu.' } }
       }
-      return post('/api/tools/patient-note', args)
+      return post('/api/tools/patient-note', { ...(legacyCollectedFields || {}), ...args })
+    }
+    case 'veriTablosunaKaydet': {
+      const rawNested = (args.bilgiler && typeof args.bilgiler === 'object') ? (args.bilgiler as Record<string, unknown>) : {}
+      const extraArgs = Object.fromEntries(Object.entries(args).filter(([k]) => k !== 'bilgiler' && k !== 'hedef_tablo_id'))
+      if (legacyCollectedFields) Object.assign(legacyCollectedFields, extraArgs, rawNested)
+      if (flowSession) {
+        try {
+          const response = await fetch(`/api/flow-sessions/${flowSession.id}/actions`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-flow-session-key': flowSession.token },
+            body: JSON.stringify({ name, args }),
+          })
+          return await response.json()
+        } catch { return { success: false, message: 'Veri tablosuna kayıt yapılırken bir hata oluştu.' } }
+      }
+      return post('/api/tools/save-dynamic-record', {
+        ...(legacyCollectedFields || {}),
+        ...extraArgs,
+        ...(args.hedef_tablo_id ? { hedef_tablo_id: args.hedef_tablo_id } : {}),
+        bilgiler: { ...(legacyCollectedFields || {}), ...extraArgs, ...rawNested },
+      })
     }
     case 'searchKnowledgeBase': return post('/api/tools/search-knowledge', { sorgu: args.sorgu })
     case 'musteriSorgula': {
       const res = await post('/api/tools/customer-query', { telefon: args.telefon })
-      if (flowSession && res && typeof res === 'object' && 'kayitli' in res) {
-        try {
-          const evRes = await fetch(`/api/flow-sessions/${flowSession.id}/events`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-flow-session-key': flowSession.token },
-            body: JSON.stringify({
-              id: `${Date.now()}-${Math.random()}`,
-              revision: flowSession.revision,
-              fields: {
-                telefon: String(args.telefon || ''),
-                kayitli: res.kayitli ? 'true' : 'false',
-                'caller.isKnownPatient': res.kayitli ? 'true' : 'false',
-                ...(typeof res.musteri_adi === 'string' && res.musteri_adi ? { musteri_adi: res.musteri_adi } : {}),
-              },
-              intent: 'continue',
-            }),
+      if (res && typeof res === 'object' && 'kayitli' in res) {
+        const dynFields = (res.dinamik_alanlar && typeof res.dinamik_alanlar === 'object')
+          ? (res.dinamik_alanlar as Record<string, unknown>)
+          : {}
+        if (legacyCollectedFields) {
+          Object.assign(legacyCollectedFields, {
+            ...dynFields,
+            ...(args.telefon ? { telefon: String(args.telefon) } : {}),
+            ...(typeof res.musteri_adi === 'string' && res.musteri_adi ? { musteri_adi: res.musteri_adi } : {}),
           })
-          const evJson = await evRes.json().catch(() => null)
-          if (evJson && typeof evJson.revision === 'number') flowSession.revision = evJson.revision
-        } catch {}
+        }
+        if (flowSession) {
+          try {
+            const evRes = await fetch(`/api/flow-sessions/${flowSession.id}/events`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-flow-session-key': flowSession.token },
+              body: JSON.stringify({
+                id: `${Date.now()}-${Math.random()}`,
+                revision: flowSession.revision,
+                fields: {
+                  ...dynFields,
+                  telefon: String(args.telefon || ''),
+                  kayitli: res.kayitli ? 'true' : 'false',
+                  'caller.isKnownPatient': res.kayitli ? 'true' : 'false',
+                  ...(typeof res.musteri_adi === 'string' && res.musteri_adi ? { musteri_adi: res.musteri_adi } : {}),
+                },
+                intent: 'continue',
+              }),
+            })
+            const evJson = await evRes.json().catch(() => null)
+            if (evJson && typeof evJson.revision === 'number') flowSession.revision = evJson.revision
+          } catch {}
+        }
       }
       return res
     }
@@ -190,6 +270,8 @@ async function handleToolCall(
 export class AiLiveSession {
   private session: Session | null = null
   private textAi: GoogleGenAI | null = null
+  private _useServerTextChat = false
+  private _serverTextHistory: Array<{ role: 'user' | 'model'; text: string }> = []
   private textConfig: SessionConfig | null = null
   private textHistory: Array<Record<string, unknown>> = []
   private textQueue: Promise<void> = Promise.resolve()
@@ -198,8 +280,13 @@ export class AiLiveSession {
   private _sendGuard = false
   private flowSession?: { id: string; token: string; revision?: number }
   private sessionKey?: string
+  private legacyCollectedFields: Record<string, unknown> = {}
   private toolHandler?: SessionConfig['toolHandler']
   private _interactionInProgress = false
+  private _pendingToolCalls = 0
+  private _closingSession = false
+  private _hangupToolCalled = false
+  private _offTopicCloseMessage?: string
   private _turnMode: TurnDetectionMode = 'semantic'
   private _lastAssistantTranscript = ''
   private _currentModelTranscript = ''
@@ -232,8 +319,13 @@ export class AiLiveSession {
     const modelName = config.model || 'gemini-3.8-live'
     this.flowSession = config.flowSession
     this.sessionKey = config.flowSession?.token || config.sessionKey
+    this.legacyCollectedFields = {}
     this.toolHandler = config.toolHandler
     this._interactionInProgress = false
+    this._pendingToolCalls = 0
+    this._closingSession = false
+    this._hangupToolCalled = false
+    this._offTopicCloseMessage = config.offTopicCloseMessage
     this._turnMode = config.turnDetectionMode === 'standard' ? 'standard' : 'semantic'
     this._lastAssistantTranscript = ''
     this._currentModelTranscript = ''
@@ -245,11 +337,15 @@ export class AiLiveSession {
 
     // Gemini Live is an audio session. Requesting TEXT from it causes
     // "response modalities (TEXT) is not supported". Keep text chat on the
-    // regular content-generation API, while voice continues to use Live.
+    // server chat endpoint when using ephemeral/server mode, while preserving
+    // direct SDK fallback for non-ephemeral unit test keys.
     if (mode === 'text') {
-      this.textAi = new GoogleGenAI({ apiKey })
+      const useServerChat = !apiKey || apiKey === '__server__' || apiKey.startsWith('auth_tokens/')
+      this._useServerTextChat = useServerChat
+      this.textAi = useServerChat ? null : new GoogleGenAI({ apiKey })
       this.textConfig = config
       this.textHistory = []
+      this._serverTextHistory = []
       this.textQueue = Promise.resolve()
       this._sendGuard = false
       this._isConnected = true
@@ -264,7 +360,12 @@ export class AiLiveSession {
     const effectiveSystemPrompt = wrapWithTurkishLanguageLock(baseSystemPrompt)
 
     return new Promise<void>((resolve, reject) => {
-      const ai = new GoogleGenAI({ apiKey })
+      const isEphemeral = apiKey.startsWith('auth_tokens/')
+      const ai = new GoogleGenAI(
+        isEphemeral
+          ? { apiKey, httpOptions: { apiVersion: 'v1alpha' } }
+          : { apiKey },
+      )
       let resolved = false
       const finishConnect = () => {
         if (!resolved && this.session && this._isConnected) {
@@ -358,7 +459,7 @@ export class AiLiveSession {
   }
 
   sendAudio(base64PCM: string) {
-    if (!this.session || !this._isConnected || this._sendGuard) return
+    if (!this.session || !this._isConnected || this._sendGuard || this._closingSession) return
     try {
       this.session.sendRealtimeInput({
         audio: { data: base64PCM, mimeType: 'audio/pcm;rate=16000' },
@@ -372,9 +473,11 @@ export class AiLiveSession {
   sendText(text: string) {
     if (!this._isConnected || this._sendGuard) return
 
-    if (this.textAi && this.textConfig) {
+    if ((this._useServerTextChat || this.textAi) && this.textConfig) {
       // Greeting and a quickly typed first message must retain their order.
-      this.textQueue = this.textQueue.then(() => this.sendTextChat(text))
+      this.textQueue = this.textQueue.then(() =>
+        this._useServerTextChat ? this.sendServerTextChat(text) : this.sendTextChat(text),
+      )
       return
     }
 
@@ -390,12 +493,60 @@ export class AiLiveSession {
     } catch { /* ignore */ }
   }
 
+  private async sendServerTextChat(text: string): Promise<void> {
+    const config = this.textConfig
+    if (!config || !this._isConnected || this._sendGuard) return
+
+    try {
+      const res = await fetch('/api/web-assistant/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.sessionKey ? { 'x-flow-session-key': this.sessionKey } : {}),
+        },
+        body: JSON.stringify({
+          message: text,
+          history: this._serverTextHistory,
+          systemPrompt: config.systemPrompt,
+        }),
+      })
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
+      if (!res.ok) {
+        throw new Error(
+          typeof data.error === 'string' && data.error.trim()
+            ? data.error
+            : 'Yazılı asistan şu anda yanıt veremedi.',
+        )
+      }
+      const reply = typeof data.reply === 'string' ? data.reply.trim() : ''
+      this._serverTextHistory.push({ role: 'user', text })
+      if (reply) {
+        this._serverTextHistory.push({ role: 'model', text: reply })
+      }
+      if (this._serverTextHistory.length > 30) {
+        this._serverTextHistory = this._serverTextHistory.slice(-30)
+      }
+      if (reply) this.callbacks.onText(reply)
+      this.callbacks.onTurnComplete()
+      if (data.hangup === true) {
+        this.callbacks.onHangup?.({ alreadySpokeFarewell: true })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Yazılı asistan yanıt veremedi.'
+      console.error('[Server text chat] Error:', error)
+      this._isConnected = false
+      this.callbacks.onConnectionChange(false)
+      this.callbacks.onError(message)
+    }
+  }
+
   private async sendTextChat(text: string): Promise<void> {
     const ai = this.textAi
     const config = this.textConfig
     if (!ai || !config || !this._isConnected || this._sendGuard) return
 
     this.textHistory.push({ role: 'user', parts: [{ text }] })
+    let hangupTriggeredInTurn = false
 
     try {
       // A tool can require one or more model round trips before it produces
@@ -430,7 +581,16 @@ export class AiLiveSession {
           }
           if (answer) this.callbacks.onText(answer)
           this.callbacks.onTurnComplete()
+          if (hangupTriggeredInTurn) {
+            this.callbacks.onHangup?.({ alreadySpokeFarewell: true })
+          }
           return
+        }
+
+        if (functionCalls.some(call => call.name === 'cagriySonlandir')) {
+          hangupTriggeredInTurn = true
+          this._closingSession = true
+          this._hangupToolCalled = true
         }
 
         // Preserve exact candidate.content.parts so thought: true and
@@ -467,14 +627,19 @@ export class AiLiveSession {
 
   disconnect() {
     this._isConnected = false
+    this._closingSession = false
+    this._pendingToolCalls = 0
     if (this.session) {
       try { this.session.close() } catch { /* */ }
       this.session = null
     }
     this.textAi = null
+    this._useServerTextChat = false
+    this._serverTextHistory = []
     this.textConfig = null
     this.textHistory = []
     this.textQueue = Promise.resolve()
+    this.legacyCollectedFields = {}
     this.toolHandler = undefined
     if (this.flowSession) {
       const { id, token } = this.flowSession
@@ -485,10 +650,11 @@ export class AiLiveSession {
 
   get connected() { return this._isConnected }
   get interactionInProgress() { return this._interactionInProgress }
+  get hasPendingToolCalls() { return this._pendingToolCalls > 0 }
 
   private runTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (this.toolHandler) return this.toolHandler(name, args)
-    return handleToolCall(name, args, this.flowSession, this.sessionKey)
+    return handleToolCall(name, args, this.flowSession, this.sessionKey, this.legacyCollectedFields)
   }
 
   private triggerEnglishGuard() {
@@ -511,30 +677,70 @@ export class AiLiveSession {
     // Tool calls
     if (message.toolCall?.functionCalls?.length) {
       for (const fc of message.toolCall.functionCalls) {
-        this.runTool(fc.name ?? '', (fc.args ?? {}) as Record<string, unknown>)
+        const toolName = fc.name ?? ''
+        const isHangupTool = toolName === 'cagriySonlandir'
+        let alreadySpokeFarewell = false
+
+        if (isHangupTool) {
+          const alreadyClosing = this._hangupToolCalled
+          this._closingSession = true
+          this._hangupToolCalled = true
+          alreadySpokeFarewell =
+            alreadyClosing ||
+            hasSpokenFarewell(this._currentModelTranscript, this._offTopicCloseMessage) ||
+            hasSpokenFarewell(this._lastAssistantTranscript, this._offTopicCloseMessage)
+        }
+
+        this._pendingToolCalls += 1
+        this.runTool(toolName, (fc.args ?? {}) as Record<string, unknown>)
           .then((result) => {
+            if (isHangupTool) {
+              this.callbacks.onHangup?.({ alreadySpokeFarewell })
+              if (alreadySpokeFarewell) {
+                // Veda cümlesi zaten söylendiyse modele ikinci kez veda ettirmemek için yanıt gönderme
+                return
+              }
+            } else if (this._closingSession) {
+              return
+            }
+
             if (this.session && this._isConnected) {
+              const responsePayload = isHangupTool
+                ? {
+                    ...result,
+                    success: true,
+                    message:
+                      typeof result.message === 'string' && result.message.trim() && result.message !== 'Görüşme sonlandırılıyor.'
+                        ? result.message
+                        : 'Görüşme sonlandırılıyor. Yalnızca tek bir kısa veda cümlesi ("Sağlıklı günler dilerim, hoşça kalın.") söyle ve başka araç çağırmadan dur.',
+                    _dil_kurali: 'YALNIZCA TÜRKÇE KONUŞ. İngilizce tek kelime bile kullanma.',
+                  }
+                : {
+                    ...result,
+                    _dil_kurali: 'YALNIZCA TÜRKÇE KONUŞ. İngilizce tek kelime bile kullanma.',
+                  }
               try {
                 this.session.sendToolResponse({
                   functionResponses: [{
                     id: fc.id,
-                    name: fc.name ?? '',
-                    response: {
-                      ...result,
-                      _dil_kurali: 'YALNIZCA TÜRKÇE KONUŞ. İngilizce tek kelime bile kullanma.',
-                    },
+                    name: toolName,
+                    response: responsePayload,
                   }],
                 })
               } catch { /* */ }
             }
           })
           .catch(() => {
-            if (this.session && this._isConnected) {
+            if (isHangupTool) {
+              this.callbacks.onHangup?.({ alreadySpokeFarewell })
+              return
+            }
+            if (!this._closingSession && this.session && this._isConnected) {
               try {
                 this.session.sendToolResponse({
                   functionResponses: [{
                     id: fc.id,
-                    name: fc.name ?? '',
+                    name: toolName,
                     response: {
                       success: false,
                       message: 'Araç çalıştırılamadı. Yalnızca Türkçe yanıt ver.',
@@ -544,6 +750,9 @@ export class AiLiveSession {
                 })
               } catch { /* */ }
             }
+          })
+          .finally(() => {
+            this._pendingToolCalls = Math.max(0, this._pendingToolCalls - 1)
           })
       }
     }

@@ -4,6 +4,7 @@ import {
   evaluateConditionNode,
   evaluateConditionRule,
   flowToPromptText,
+  flowToToolFields,
   type ConversationFlow,
   type FlowNode,
 } from '../db/repositories/flows'
@@ -351,5 +352,169 @@ describe('Diagram Conditions & Actions — Full End-to-End Verification', () => 
     expect(step.fields.tarih).toBe('2026-11-04')
     expect(step.fields.saat).toBe('14:00')
     expect(step.fields.islem_turu).toBe('Diş kontrolü')
+  })
+
+  test('Dynamic Table columns work across all assistants (inbound, outbound, web, whatsapp), preserve custom AI question, and evaluate compound conditions + save_record', async () => {
+    const customQuestion = 'Tedavimizden memnuniyetinizi 1 ile 10 arasında kendi cümlenizle paylaşır mısınız?'
+    const dynamicFlow: ConversationFlow = {
+      id: 'dynamic-table-flow',
+      name: 'Dinamik Müşteri ve Anket Akışı',
+      isActive: true,
+      createdAt: '',
+      updatedAt: '',
+      nodes: [
+        { id: 'start', type: 'START', position: { x: 0, y: 0 }, data: { label: 'Karşılama' } },
+        {
+          id: 'field_survey_score',
+          type: 'FIELD',
+          position: { x: 0, y: 120 },
+          data: {
+            label: 'Anket · Memnuniyet Puanı',
+            fieldName: 'anket__memnuniyet_puani',
+            fieldType: 'number',
+            description: customQuestion,
+            required: true,
+            sourceTableId: 'tbl_anket',
+            sourceTableSlug: 'anket',
+            sourceTableName: 'Anket',
+            sourceColumnId: 'col_puan',
+            sourceColumnSlug: 'memnuniyet_puani',
+            sourceColumnName: 'Memnuniyet Puanı',
+            sourceColumnType: 'number',
+          },
+        },
+        {
+          id: 'cond_dynamic_compound',
+          type: 'CONDITION',
+          position: { x: 0, y: 240 },
+          data: {
+            label: '2 Koşullu Yönlendirme',
+            conditionField: 'musteriler__ozel_uye',
+            operator: 'equals',
+            conditionValue: 'true',
+            conditionLogic: 'AND',
+            rules: [
+              {
+                field: 'musteriler__ozel_uye',
+                operator: 'equals',
+                value: 'true',
+                sourceTableName: 'Müşteriler',
+                sourceColumnName: 'Özel Üye',
+              },
+              {
+                field: 'anket__memnuniyet_puani',
+                operator: 'gte',
+                value: '8',
+                sourceTableName: 'Anket',
+                sourceColumnName: 'Memnuniyet Puanı',
+              },
+              {
+                field: 'musteriler__ilgilenilen_islemler',
+                operator: 'contains',
+                value: 'İmplant',
+                sourceTableName: 'Müşteriler',
+                sourceColumnName: 'İlgilenilen İşlemler',
+              },
+              {
+                field: 'musteriler__toplam_harcama',
+                operator: 'gt',
+                value: '2000',
+                sourceTableName: 'Müşteriler',
+                sourceColumnName: 'Toplam Harcama',
+              },
+            ],
+          },
+        },
+        {
+          id: 'act_save_dyn',
+          type: 'ACTION',
+          position: { x: -120, y: 360 },
+          data: {
+            action: 'save_record',
+            targetTableId: 'tbl_anket',
+            targetTableName: 'Anket',
+            label: '💾 Anket Tablosuna Kaydet',
+          },
+        },
+        {
+          id: 'act_low_score_note',
+          type: 'ACTION',
+          position: { x: 120, y: 360 },
+          data: {
+            action: 'save_patient_note',
+            label: '🗒️ Hastadan Not Al',
+          },
+        },
+        {
+          id: 'end_ok',
+          type: 'END',
+          position: { x: 0, y: 480 },
+          data: { label: 'Bitiş', message: 'Geri bildiriminiz için çok teşekkür ederiz.' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 'start', target: 'field_survey_score' },
+        { id: 'e2', source: 'field_survey_score', target: 'cond_dynamic_compound' },
+        { id: 'e3', source: 'cond_dynamic_compound', sourceHandle: 'true', target: 'act_save_dyn' },
+        { id: 'e4', source: 'cond_dynamic_compound', sourceHandle: 'false', target: 'act_low_score_note' },
+        { id: 'e5', source: 'act_save_dyn', target: 'end_ok' },
+        { id: 'e6', source: 'act_low_score_note', target: 'end_ok' },
+      ],
+    }
+
+    // Prompt ve araç şemasında kullanıcının kendi yazdığı AI Sorusu birebir korunmalı
+    const toolSchema = flowToToolFields(dynamicFlow)
+    expect(toolSchema.properties['anket__memnuniyet_puani']?.description).toContain(customQuestion)
+    const prompt = flowToPromptText(dynamicFlow)
+    expect(prompt).toContain(customQuestion)
+    expect(prompt).toContain('Anket · Memnuniyet Puanı')
+    expect(prompt).toContain('VERİ TABLOSUNA KAYDET (Anket)')
+
+    // Her 4 asistan yönünde (inbound, outbound, web, whatsapp) aynı dinamik akış çalışmalı
+    for (const [direction, channel] of [
+      ['inbound', 'phone'],
+      ['outbound', 'phone'],
+      ['web', 'web_socket'],
+      ['whatsapp', 'whatsapp'],
+    ] as const) {
+      const engine = FlowEngine.fromMemory(dynamicFlow, {
+        direction,
+        channel,
+        initialFields: {
+          musteriler__ad_soyad: 'Zeynep Aydın',
+          musteriler__telefon: '05321112233',
+          musteriler__ozel_uye: 'true',
+          musteriler__ilgilenilen_islemler: ['İmplant', 'Beyazlatma'],
+          musteriler__toplam_harcama: '3.450,00 ₺',
+        },
+      })
+
+      // 1) İlk adımda kullanıcının dokunulmamış özel AI Sorusu döner ve ad/telefon köprülenir
+      const askStep = await engine.accept({ fields: {} })
+      expect(askStep.next?.nodeId).toBe('field_survey_score')
+      expect(askStep.next?.prompt).toContain(customQuestion)
+      expect(askStep.fields.musteri_adi).toBe('Zeynep Aydın')
+      expect(askStep.fields.telefon).toBe('05321112233')
+
+      // 2) Kullanıcı 9 puan verdiğinde 4'lü dinamik koşul (boolean + number + multiselect + currency) EVET dalından save_record -> END'e ilerler
+      const highStep = await engine.accept({ fields: { anket__memnuniyet_puani: '9' } })
+      expect(highStep.completed).toBe(true)
+      expect(highStep.next?.nodeId).toBe('end_ok')
+      expect(highStep.next?.prompt).toContain('Geri bildiriminiz için çok teşekkür ederiz.')
+    }
+
+    // Düşük puan verildiğinde HAYIR dalına (act_low_score_note) yönlenir
+    const lowEngine = FlowEngine.fromMemory(dynamicFlow, {
+      direction: 'outbound',
+      channel: 'phone',
+      initialFields: {
+        musteriler__ozel_uye: 'true',
+        musteriler__ilgilenilen_islemler: ['İmplant'],
+        musteriler__toplam_harcama: '3500',
+      },
+    })
+    const lowStep = await lowEngine.accept({ fields: { anket__memnuniyet_puani: '4' } })
+    expect(lowStep.completed).toBeUndefined()
+    expect(lowStep.next?.nodeId).toBe('act_low_score_note')
   })
 })

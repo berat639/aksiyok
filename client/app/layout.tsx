@@ -11,7 +11,7 @@ import { Toaster } from 'react-hot-toast'
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="tr" suppressHydrationWarning>
+    <html lang="tr" translate="no" suppressHydrationWarning>
       <body suppressHydrationWarning>
         <ThemeProvider>
           {children}

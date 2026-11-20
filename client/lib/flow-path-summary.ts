@@ -8,6 +8,7 @@
  * Yol sayısı 200 ile sınırlıdır; döngüler tek yolda bir adımı iki kez gezmez.
  */
 import { ACTION_LABELS as GLOSSARY_ACTION_LABELS, FIELD_LABELS, LOGIC_LABELS, OPERATOR_LABELS } from './ui-glossary'
+import { formatDynamicTableExistsLabel, isDynamicTableExistsField } from './flow-dynamic-fields'
 
 export const MAX_PATHS = 200
 const MAX_SHOWN_PATHS = 5
@@ -93,15 +94,15 @@ function pad2(v: string): string {
   return Number.isFinite(n) && v.trim() !== '' ? String(Math.trunc(n)).padStart(2, '0') : v
 }
 
-function valueText(field: string, value: string | undefined): string {
+function valueText(field: string, value: string | undefined, isBooleanRule = false): string {
   const raw = String(value ?? '').trim()
   const key = canonicalField(field)
   const low = raw.toLocaleLowerCase('tr-TR')
-  if (BOOLEAN_FIELDS.has(field) || BOOLEAN_FIELDS.has(key) || low === 'true' || low === 'false') {
-    if (low === 'true') return 'Evet'
-    if (low === 'false') return 'Hayır'
+  if (isBooleanRule || BOOLEAN_FIELDS.has(field) || BOOLEAN_FIELDS.has(key)) {
+    if (low === 'true' || low === 'evet' || low === '1') return 'Evet'
+    if (low === 'false' || low === 'hayır' || low === 'hayir' || low === '0') return 'Hayır'
   }
-  if (key === 'time.hour') return pad2(raw)
+  if (key === 'time.hour' || key === 'saat') return pad2(raw)
   if (key === 'time.weekday') {
     const n = Number(raw)
     if (n >= 1 && n <= 7) return WEEKDAYS[n - 1]
@@ -109,6 +110,10 @@ function valueText(field: string, value: string | undefined): string {
   if (key === 'call.direction') {
     if (low === 'inbound') return 'Gelen arama'
     if (low === 'outbound') return 'Giden arama'
+  }
+  if (key === 'call.channel') {
+    if (low === 'phone' || low === 'voice') return 'Sesli arama'
+    if (low === 'whatsapp') return 'WhatsApp'
   }
   return raw || '…'
 }
@@ -118,6 +123,12 @@ export interface Rule {
   operator: string
   value?: string
   valueTo?: string
+  fieldLabel?: string
+  sourceTableId?: string
+  sourceTableName?: string
+  sourceColumnId?: string
+  sourceColumnName?: string
+  sourceColumnType?: string
 }
 
 const INVERSE: Record<string, string> = {
@@ -125,12 +136,27 @@ const INVERSE: Record<string, string> = {
   notEquals: 'equals',
   contains: 'notContains',
   notContains: 'contains',
+  existsInTable: 'notExistsInTable',
+  notExistsInTable: 'existsInTable',
   isEmpty: 'notEmpty',
   notEmpty: 'isEmpty',
   gt: 'lte',
   lte: 'gt',
   gte: 'lt',
   lt: 'gte',
+}
+
+function resolveRuleFieldLabel(rule: Rule, fieldNames: Record<string, string>): string {
+  const field = rule.field
+  const key = canonicalField(field)
+  if (Object.prototype.hasOwnProperty.call(FIELD_LABELS, key)) return (FIELD_LABELS as Record<string, string>)[key]
+  if (isDynamicTableExistsField(field, rule.sourceColumnId) && rule.sourceTableName) {
+    return formatDynamicTableExistsLabel(rule.sourceTableName)
+  }
+  if (fieldNames[field]) return fieldNames[field]
+  if (rule.sourceTableName && rule.sourceColumnName) return `${rule.sourceTableName} · ${rule.sourceColumnName}`
+  if (rule.fieldLabel) return rule.fieldLabel
+  return fieldText(field, fieldNames)
 }
 
 /** Bir kuralı Türkçe cümleye çevirir. `negate` true ise tersini anlatır. */
@@ -142,31 +168,38 @@ export function describeRule(rule: Rule, fieldNames: Record<string, string> = {}
   }
   let op = rule.operator
   let neg = negate
+  const label = resolveRuleFieldLabel(rule, fieldNames)
+  const isTableExists = isDynamicTableExistsField(field, rule.sourceColumnId)
+  const isBoolField =
+    isTableExists ||
+    BOOLEAN_FIELDS.has(field) ||
+    BOOLEAN_FIELDS.has(canonicalField(field)) ||
+    rule.sourceColumnType === 'boolean'
   const rawBool = String(rule.value ?? '').trim().toLocaleLowerCase('tr-TR')
-  if ((op === 'equals' || op === 'notEquals') && (rawBool === 'true' || rawBool === 'false')) {
+  if ((op === 'equals' || op === 'notEquals') && (isBoolField || rawBool === 'true' || rawBool === 'false') && (rawBool === 'true' || rawBool === 'false' || rawBool === 'evet' || rawBool === 'hayır' || rawBool === 'hayir')) {
     // Evet/Hayır sorusunda tersi doğrudan karşıt cevaptır: "Kayıtlı hasta mı? Hayır".
     const matches = (op === 'equals') !== negate
-    const answer = (rawBool === 'true') === matches ? 'Evet' : 'Hayır'
-    return `${fieldText(field, fieldNames)} ${answer}`
+    const isTruthy = rawBool === 'true' || rawBool === 'evet'
+    const answer = isTruthy === matches ? 'Evet' : 'Hayır'
+    return `${label} ${answer}`
   }
   if (neg && INVERSE[op]) {
     op = INVERSE[op]
     neg = false
   }
-  const label = fieldText(field, fieldNames)
   const opText = LOCAL_OPERATOR_LABELS[op] || op
   let text: string
-  if (op === 'isEmpty' || op === 'notEmpty') {
+  if (op === 'isEmpty' || op === 'notEmpty' || op === 'existsInTable' || op === 'notExistsInTable') {
     text = `${label} ${opText}`
   } else if (op === 'between') {
-    text = `${label} ${valueText(field, rule.value)}–${valueText(field, rule.valueTo)} ${opText}`
+    text = `${label} ${valueText(field, rule.value, isBoolField)}–${valueText(field, rule.valueTo, isBoolField)} ${opText}`
   } else if (op === 'in') {
-    const items = String(rule.value || '').split(',').map(s => s.trim()).filter(Boolean).map(v => valueText(field, v))
+    const items = String(rule.value || '').split(',').map(s => s.trim()).filter(Boolean).map(v => valueText(field, v, isBoolField))
     text = `${label} ${items.join(', ')} ${opText}`
-  } else if ((op === 'equals' || op === 'notEquals') && (BOOLEAN_FIELDS.has(field) || BOOLEAN_FIELDS.has(canonicalField(field)))) {
-    text = `${label} ${valueText(field, rule.value)}${op === 'notEquals' ? ' değilse' : ''}`
+  } else if ((op === 'equals' || op === 'notEquals') && isBoolField) {
+    text = `${label} ${valueText(field, rule.value, true)}${op === 'notEquals' ? ' değilse' : ''}`
   } else {
-    text = `${label} ${valueText(field, rule.value)} ${opText}`
+    text = `${label} ${valueText(field, rule.value, isBoolField)} ${opText}`
   }
   return neg ? `${text} değil` : text
 }
@@ -177,12 +210,34 @@ export function getConditionRules(data: Record<string, any> | undefined): { rule
   const logic: 'AND' | 'OR' = d.conditionLogic === 'OR' ? 'OR' : 'AND'
   if (Array.isArray(d.rules) && d.rules.length > 0) {
     return {
-      rules: d.rules.map((r: any) => ({ field: String(r.field || ''), operator: String(r.operator || 'equals'), value: r.value, valueTo: r.valueTo })),
+      rules: d.rules.map((r: any) => ({
+        field: String(r.field || ''),
+        operator: String(r.operator || 'equals'),
+        value: r.value,
+        valueTo: r.valueTo,
+        fieldLabel: r.fieldLabel ? String(r.fieldLabel) : undefined,
+        sourceTableId: r.sourceTableId ? String(r.sourceTableId) : undefined,
+        sourceTableName: r.sourceTableName ? String(r.sourceTableName) : undefined,
+        sourceColumnId: r.sourceColumnId ? String(r.sourceColumnId) : undefined,
+        sourceColumnName: r.sourceColumnName ? String(r.sourceColumnName) : undefined,
+        sourceColumnType: r.sourceColumnType ? String(r.sourceColumnType) : undefined,
+      })),
       logic,
     }
   }
   return {
-    rules: [{ field: String(d.conditionField || ''), operator: String(d.operator || 'equals'), value: d.conditionValue, valueTo: d.conditionValueTo }],
+    rules: [{
+      field: String(d.conditionField || ''),
+      operator: String(d.operator || 'equals'),
+      value: d.conditionValue,
+      valueTo: d.conditionValueTo,
+      fieldLabel: d.conditionFieldLabel ? String(d.conditionFieldLabel) : undefined,
+      sourceTableId: d.sourceTableId ? String(d.sourceTableId) : undefined,
+      sourceTableName: d.sourceTableName ? String(d.sourceTableName) : undefined,
+      sourceColumnId: d.sourceColumnId ? String(d.sourceColumnId) : undefined,
+      sourceColumnName: d.sourceColumnName ? String(d.sourceColumnName) : undefined,
+      sourceColumnType: d.sourceColumnType ? String(d.sourceColumnType) : undefined,
+    }],
     logic,
   }
 }
@@ -412,23 +467,59 @@ function nextTexts(node: FlowNodeLike, edges: FlowEdgeLike[], nodeMap: Map<strin
   return { lines, warnings }
 }
 
-/** Soru adımlarından alan adı → görünen ad eşlemesi. */
+/** Soru ve koşul adımlarından alan adı → görünen Türkçe ad eşlemesi. */
 export function collectFieldNames(nodes: FlowNodeLike[]): Record<string, string> {
   const out: Record<string, string> = {}
   for (const n of nodes) {
-    if (n.type === 'fieldNode' && n.data?.fieldName && n.data?.label) out[String(n.data.fieldName)] = String(n.data.label)
+    const d = n.data || {}
+    if (n.type === 'fieldNode' && d.fieldName) {
+      const fKey = String(d.fieldName)
+      if (d.sourceTableName && d.sourceColumnName) {
+        out[fKey] = `${String(d.sourceTableName)} · ${String(d.sourceColumnName)}`
+      } else if (d.label) {
+        out[fKey] = String(d.label)
+      }
+    }
+    if (n.type === 'conditionNode') {
+      if (d.conditionField && !out[String(d.conditionField)]) {
+        if (d.sourceTableName && d.sourceColumnName) {
+          out[String(d.conditionField)] = `${String(d.sourceTableName)} · ${String(d.sourceColumnName)}`
+        } else if (d.conditionFieldLabel) {
+          out[String(d.conditionField)] = String(d.conditionFieldLabel)
+        }
+      }
+      if (Array.isArray(d.rules)) {
+        for (const r of d.rules) {
+          if (!r?.field || out[String(r.field)]) continue
+          if (r.sourceTableName && r.sourceColumnName) {
+            out[String(r.field)] = `${String(r.sourceTableName)} · ${String(r.sourceColumnName)}`
+          } else if (r.fieldLabel) {
+            out[String(r.field)] = String(r.fieldLabel)
+          }
+        }
+      }
+    }
   }
   return out
 }
 
 /** Tek adımın özeti. */
-export function summarizeNode(nodes: FlowNodeLike[], edges: FlowEdgeLike[], nodeId: string): NodeSummary | null {
-  return summarizeFlow(nodes, edges)[nodeId] || null
+export function summarizeNode(
+  nodes: FlowNodeLike[],
+  edges: FlowEdgeLike[],
+  nodeId: string,
+  extraFieldNames?: Record<string, string>,
+): NodeSummary | null {
+  return summarizeFlow(nodes, edges, extraFieldNames)[nodeId] || null
 }
 
 /** Akıştaki her adımın özetini üretir (tek geçişte). */
-export function summarizeFlow(nodes: FlowNodeLike[], edges: FlowEdgeLike[]): Record<string, NodeSummary> {
-  const fieldNames = collectFieldNames(nodes)
+export function summarizeFlow(
+  nodes: FlowNodeLike[],
+  edges: FlowEdgeLike[],
+  extraFieldNames?: Record<string, string>,
+): Record<string, NodeSummary> {
+  const fieldNames = { ...(extraFieldNames || {}), ...collectFieldNames(nodes) }
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
   const { pathsByNode, inLoop, truncated } = traverse(nodes, edges, fieldNames)
   const result: Record<string, NodeSummary> = {}

@@ -12,7 +12,7 @@ export function encrypt(config: Config): Config { return { ...config, password: 
 export function decrypt(config: Config): Config { return { ...config, password: openSecret(config.password) } }
 export async function clinicExists(id: string) {
   const [c] = await db.execute(sql`SELECT id,name FROM clinics WHERE id=${id} AND is_active=true`)
-  if (!c) throw new SetupError('Aktif klinik bulunamadı', 404)
+  if (!c) throw new SetupError('Aktif işletme bulunamadı', 404)
   return c
 }
 export async function getRow(id: string, service: Service) {
@@ -36,10 +36,10 @@ export async function saveConfig(id: string, service: Service, input: Record<str
       for (const [kind,value] of claims) {
         if (kind === 'phone') {
           const legacy = await tx.execute(sql`SELECT clinic_id,phone_number FROM clinic_phone_numbers WHERE clinic_id<>${id} AND is_active=true`)
-          if (legacy.some(p => { try { return phone(String(p.phone_number)) === value } catch { return false } })) throw new SetupError('Numara başka bir kliniğe atanmış',409)
+          if (legacy.some(p => { try { return phone(String(p.phone_number)) === value } catch { return false } })) throw new SetupError('Numara başka bir işletmeye atanmış',409)
         }
         const [owner] = await tx.execute(sql`SELECT clinic_id FROM integration_claims WHERE kind=${kind} AND value=${value}`)
-        if (owner && owner.clinic_id !== id) throw new SetupError('Numara veya SIP hesabı başka bir kliniğe atanmış',409)
+        if (owner && owner.clinic_id !== id) throw new SetupError('Numara veya SIP hesabı başka bir işletmeye atanmış',409)
       }
       await tx.execute(sql`DELETE FROM integration_claims WHERE clinic_id=${id}`)
       for (const [kind,value] of claims) await tx.execute(sql`INSERT INTO integration_claims(kind,value,clinic_id) VALUES(${kind},${value},${id}) ON CONFLICT DO NOTHING`)
@@ -145,7 +145,7 @@ export async function ensureClinicInheritedIntegrations(id: string) {
         1,
         ${`inherited-${id}-${service}`},
         'delivery',
-        ${service === 'smtp' ? String(cloned.fromAddress || cloned.username || 'klinik@thinpine.com') : '+905000000000'},
+        ${service === 'smtp' ? String(cloned.fromAddress || cloned.username || 'app@axamaz.com') : '+905000000000'},
         'confirmed',
         'Platform varsayılan kurumsal bağlantı ayarları otomatik tanımlandı',
         now(),

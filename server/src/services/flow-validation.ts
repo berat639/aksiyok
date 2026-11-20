@@ -34,6 +34,21 @@ export const FLOW_EVENT_TRIGGERS = new Set([
   'on_whatsapp_message',
 ])
 
+function hasIncompleteConditionRule(items: unknown[]): boolean {
+  for (const item of items) {
+    if (!item || typeof item !== 'object') return true
+    const rec = item as Record<string, unknown>
+    if ('logic' in rec && Array.isArray(rec.rules)) {
+      if (rec.rules.length === 0 || hasIncompleteConditionRule(rec.rules)) return true
+      continue
+    }
+    if (!String(rec.field || '').trim() || !String(rec.operator || '').trim()) {
+      return true
+    }
+  }
+  return false
+}
+
 /** Pure graph validation. It reports issues and never mutates a saved flow. */
 export function validateConversationFlow(nodes: FlowNode[], edges: FlowEdge[]): FlowValidationIssue[] {
   const issues: FlowValidationIssue[] = []
@@ -73,7 +88,10 @@ export function validateConversationFlow(nodes: FlowNode[], edges: FlowEdge[]): 
     if (node.type === 'CONDITION') {
       const hasRules = Array.isArray(node.data.rules) && node.data.rules.length > 0
       const hasGroup = node.data.conditionGroup && Array.isArray(node.data.conditionGroup.rules) && node.data.conditionGroup.rules.length > 0
-      if (!hasRules && !hasGroup && (!node.data.conditionField || !node.data.operator)) {
+      const invalidCompound =
+        (hasRules && hasIncompleteConditionRule(node.data.rules as unknown[])) ||
+        (hasGroup && hasIncompleteConditionRule(node.data.conditionGroup!.rules as unknown[]))
+      if (invalidCompound || (!hasRules && !hasGroup && (!node.data.conditionField || !node.data.operator))) {
         issues.push({ nodeId: node.id, level: 'error', message: 'Yönlendirme için kontrol edilecek bilgiyi seçin.' })
       } else if (
         !hasRules &&

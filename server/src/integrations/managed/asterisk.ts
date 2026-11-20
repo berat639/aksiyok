@@ -27,7 +27,7 @@ export async function registered(id: string) {
 async function writeSections(target: Section[]) {
   const filename = 'managed/clinics.conf'
   const existing = await sendAmiAction({Action:'GetConfig',Filename:filename})
-  if (!existing.success) throw new SetupError('Asterisk yönetilen yapılandırma desteği hazır değil',503)
+  if (!existing.success) throw new SetupError('Santral yönetilen yapılandırma desteği hazır değil',503)
   const names = [...(existing.raw || '').matchAll(/Category-\d+: ([^\r\n]+)/g)].map(m => m[1])
   const operations: Record<string,string>[] = []
   const add = (values: Record<string,string>) => { operations.push(values) }
@@ -48,7 +48,7 @@ async function writeSections(target: Section[]) {
       for (const [key,value] of Object.entries(values)) action[`${key}-${suffix}`] = value
     })
     const result = await sendAmiAction(action,15000)
-    if (!result.success) throw new SetupError('Asterisk yapılandırması uygulanamadı',503)
+    if (!result.success) throw new SetupError('Santral yapılandırması uygulanamadı',503)
   }
   await command('pjsip reload')
 }
@@ -81,7 +81,7 @@ export async function reconcileAsterisk() {
     }
     // Persist the last successful snapshot; never log secret-bearing AMI frames.
     const before = await sendAmiAction({Action:'GetConfig',Filename:'managed/clinics.conf'})
-    if (!before.success) throw new SetupError('Asterisk güncellemesi gerekli',503)
+    if (!before.success) throw new SetupError('Santral güncellemesi gerekli',503)
     const snapshot = parseConfig(before.raw || '')
     if (JSON.stringify(snapshot) !== JSON.stringify(desired)) {
       try {
@@ -89,10 +89,10 @@ export async function reconcileAsterisk() {
         const registrations = await command('pjsip show registrations')
         for (const row of desired.filter(s => s.fields.type === 'registration')) {
           const prefix = row.name.replace(/-registration$/, '')
-          if (!registrations.includes(prefix)) throw new SetupError('Asterisk SIP kayıt yapılandırması yüklenemedi',503)
+          if (!registrations.includes(prefix)) throw new SetupError('Santral SIP kayıt yapılandırması yüklenemedi',503)
         }
         const endpoints = await command('pjsip show endpoints')
-        for (const row of desired.filter(s => s.fields.type === 'endpoint')) if (!endpoints.includes(row.name)) throw new SetupError('Asterisk endpoint doğrulanamadı',503)
+        for (const row of desired.filter(s => s.fields.type === 'endpoint')) if (!endpoints.includes(row.name)) throw new SetupError('Santral dahili hattı doğrulanamadı',503)
       } catch (error) { await writeSections(snapshot).catch(() => {}); throw error }
     }
     // The old singleton trunk is retired only after at least one generated

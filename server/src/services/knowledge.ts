@@ -5,7 +5,7 @@ import { embedText as ragEmbedText, retrieveTopK } from '../rag'
 import { searchByText } from '../db/repositories/knowledge'
 import { listDoctors } from '../db/repositories/dental'
 import { getClinicWorkingHours } from '../db/repositories/settings'
-import { currentClinicId } from '../tenancy/context'
+import { currentBusinessTemplate, currentClinicId } from '../tenancy/context'
 
 export type KnowledgeSearchResult = {
   id?: string
@@ -23,7 +23,7 @@ export interface SearchKnowledgeOptions {
 const DAY_NAMES_TR = ['Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi', 'Pazar']
 
 const DOCTOR_OR_CLINIC_QUERY_RE =
-  /\b(hekim\w*|doktor\w*|uzman\w*|branş\w*|brans\w*|kadro\w*|ortodont\w*|implant\w*|cerrah\w*|pedodont\w*|endodont\w*|protez\w*|periodont\w*|diş\s*hekim\w*|dis\s*hekim\w*|çalışma\s+saat\w*|calisma\s+saat\w*|mesai\w*|kaça\s+kadar|kaca\s+kadar|kaçta\s+açıl\w*|kacta\s+acil\w*|açık\s+mı|acik\s+mi|klinik\w*|kliniğ\w*|pine)\b/iu
+  /\b(ekip\w*|çalışan\w*|calisan\w*|personel\w*|danışman\w*|danisman\w*|temsilci\w*|yetkili\w*|görevli\w*|gorevli\w*|işletme\w*|isletme\w*|şirket\w*|sirket\w*|ofis\w*|şube\w*|sube\w*|adres\w*|hekim\w*|doktor\w*|uzman\w*|branş\w*|brans\w*|kadro\w*|ortodont\w*|implant\w*|cerrah\w*|pedodont\w*|endodont\w*|protez\w*|periodont\w*|diş\s*hekim\w*|dis\s*hekim\w*|çalışma\s+saat\w*|calisma\s+saat\w*|mesai\w*|kaça\s+kadar|kaca\s+kadar|kaçta\s+açıl\w*|kacta\s+acil\w*|açık\s+mı|acik\s+mi|klinik\w*|kliniğ\w*|pine)\b/iu
 
 const META_DIALOGUE_DOC_TITLE_RE =
   /^(?:doğal\s+diyalog(?:\s+ve\s+konuşma)?|konuşma\s+kuralları|diyalog\s+kuralları|sistem\s+kuralları)$/iu
@@ -40,7 +40,9 @@ export async function buildClinicRosterAndHoursText(explicitClinicId?: string): 
   const clinicId = explicitClinicId ?? currentClinicId()
   if (!clinicId) return ''
 
-  const cached = rosterCache.get(clinicId)
+  const isDental = currentBusinessTemplate() === 'dental_clinic'
+  const cacheKey = `${clinicId}:${isDental ? 'dental' : 'general'}`
+  const cached = rosterCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) {
     return cached.text
   }
@@ -57,21 +59,31 @@ export async function buildClinicRosterAndHoursText(explicitClinicId?: string): 
       const openDays = Array.isArray(workingHours.workingDays) && workingHours.workingDays.length > 0
         ? workingHours.workingDays.map(d => DAY_NAMES_TR[d] || '').filter(Boolean).join(', ')
         : 'Pazartesi - Cumartesi'
-      lines.push(`Klinik Çalışma Günleri ve Saatleri: ${openDays} günleri ${workingHours.startTime} - ${workingHours.endTime} saatleri arasında hizmet vermektedir.`)
+      lines.push(
+        isDental
+          ? `Klinik Çalışma Günleri ve Saatleri: ${openDays} günleri ${workingHours.startTime} - ${workingHours.endTime} saatleri arasında hizmet vermektedir.`
+          : `İşletme Çalışma Günleri ve Saatleri: ${openDays} günleri ${workingHours.startTime} - ${workingHours.endTime} saatleri arasında hizmet vermektedir.`,
+      )
     }
 
     if (doctors.length > 0) {
       const docList = doctors
         .map(d => {
-          const spec = d.specialty && d.specialty.trim() ? ` — Uzmanlık / Branş: ${d.specialty.trim()}` : ' — Diş Hekimi'
+          const spec = d.specialty && d.specialty.trim()
+            ? (isDental ? ` — Uzmanlık / Branş: ${d.specialty.trim()}` : ` — Görev / Uzmanlık: ${d.specialty.trim()}`)
+            : (isDental ? ' — Diş Hekimi' : '')
           return `• ${d.name}${spec}`
         })
         .join('\n')
-      lines.push(`Kliniğimizde Görev Yapan Hekimlerimiz (${doctors.length} Hekim):\n${docList}`)
+      lines.push(
+        isDental
+          ? `Kliniğimizde Görev Yapan Hekimlerimiz (${doctors.length} Hekim):\n${docList}`
+          : `İşletmemizde Görev Yapan Ekip Üyelerimiz (${doctors.length} Çalışan):\n${docList}`,
+      )
     }
 
     const text = lines.join('\n\n')
-    rosterCache.set(clinicId, { text, expiresAt: Date.now() + ROSTER_CACHE_TTL_MS })
+    rosterCache.set(cacheKey, { text, expiresAt: Date.now() + ROSTER_CACHE_TTL_MS })
     return text
   } catch {
     return ''
@@ -87,7 +99,8 @@ export async function searchKnowledge(
     ? { limit: optionsOrLimit }
     : optionsOrLimit
   const limit = opts.limit ?? 5
-  const direction = opts.direction || (opts.channel === 'whatsapp' ? 'whatsapp' : 'inbound')
+  // Tüm kanallar (gelen, giden, web, WhatsApp) ortak bilgi tabanından beslenir
+  const direction = 'all'
 
   const allResults: KnowledgeSearchResult[] = []
   const seenIds = new Set<string>()
@@ -101,7 +114,9 @@ export async function searchKnowledge(
         seenIds.add('__live_clinic_roster__')
         allResults.push({
           id: '__live_clinic_roster__',
-          documentName: 'Klinik Hekim Kadrosu ve Çalışma Saatleri',
+          documentName: currentBusinessTemplate() === 'dental_clinic'
+            ? 'Klinik Hekim Kadrosu ve Çalışma Saatleri'
+            : 'İşletme Ekip Kadrosu ve Çalışma Saatleri',
           chunkText: liveRosterText,
           score: 0.99,
         })
@@ -149,7 +164,9 @@ export async function searchKnowledge(
     if (liveRosterText) {
       allResults.push({
         id: '__live_clinic_roster__',
-        documentName: 'Klinik Hekim Kadrosu ve Çalışma Saatleri',
+        documentName: currentBusinessTemplate() === 'dental_clinic'
+          ? 'Klinik Hekim Kadrosu ve Çalışma Saatleri'
+          : 'İşletme Ekip Kadrosu ve Çalışma Saatleri',
         chunkText: liveRosterText,
         score: 0.85,
       })

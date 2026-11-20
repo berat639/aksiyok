@@ -1,36 +1,10 @@
 import { pgTable, uuid, text, boolean, integer, bigint, timestamp, date, primaryKey, jsonb, uniqueIndex, index, bigserial } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
 
-export const accounts = pgTable('accounts', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  name: text('name').notNull(),
-  credentials: text('credentials').notNull(),
-  projectId: text('project_id').notNull(),
-  location: text('location').notNull().default('europe-west1'),
-  isActive: boolean('is_active').default(true),
-  priority: integer('priority').default(0),
-  dailyTokenLimit: bigint('daily_token_limit', { mode: 'number' }).default(1000000),
-  monthlyTokenLimit: bigint('monthly_token_limit', { mode: 'number' }).default(30000000),
-  maxConcurrentSessions: integer('max_concurrent_sessions').default(20),
-  createdAt: timestamp('created_at', { withTimezone: true }).default(sql`now()`),
-})
-
-export const accountUsage = pgTable('account_usage', {
-  accountId: uuid('account_id').references(() => accounts.id),
-  date: date('date').notNull(),
-  promptTokens: bigint('prompt_tokens', { mode: 'number' }).default(0),
-  responseTokens: bigint('response_tokens', { mode: 'number' }).default(0),
-  totalTokens: bigint('total_tokens', { mode: 'number' }).default(0),
-  sessionCount: integer('session_count').default(0),
-  concurrentSessions: integer('concurrent_sessions').default(0),
-}, (table) => ({
-  pk: primaryKey({ columns: [table.accountId, table.date] }),
-}))
-
 export const sessions = pgTable('sessions', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   clinicId: uuid('clinic_id').notNull().references(() => clinics.id),
-  accountId: uuid('account_id').references(() => accounts.id),
+  accountId: uuid('account_id'),
   startedAt: timestamp('started_at', { withTimezone: true }).default(sql`now()`),
   endedAt: timestamp('ended_at', { withTimezone: true }),
   totalTokens: bigint('total_tokens', { mode: 'number' }).default(0),
@@ -84,17 +58,12 @@ export const flowSessions = pgTable('flow_sessions', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 }, (t) => [index('flow_sessions_expiry_idx').on(t.expiresAt)])
 
-export const businessSettings = pgTable('business_settings', {
-  key: text('key').primaryKey(),
-  value: text('value').notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
-})
-
 // ── Dental Clinic: Patients, Calendar ────────────────────────────────────────
 
 export const clinics = pgTable('clinics', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   name: text('name').notNull(),
+  businessTemplate: text('business_template').notNull().default('general'),
   netgsmUsercode: text('netgsm_usercode'),
   netgsmPassword: text('netgsm_password'),
   smsSenderId: text('sms_sender_id'),
@@ -132,6 +101,14 @@ export const clinics = pgTable('clinics', {
   geminiKeyLast4: text('gemini_key_last4'),
   geminiKeyUpdatedAt: timestamp('gemini_key_updated_at', { withTimezone: true }),
   geminiKeyUpdatedBy: uuid('gemini_key_updated_by').references(() => users.id),
+  // Subscription & SaaS Plan Entitlements
+  planId: text('plan_id').notNull().default('kurumsal'),
+  planStatus: text('plan_status').notNull().default('active'),
+  trialEndsAt: timestamp('trial_ends_at', { withTimezone: true }),
+  currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
+  maxUsers: integer('max_users').notNull().default(999),
+  iyzicoSubscriptionRef: text('iyzico_subscription_ref'),
+  iyzicoCustomerRef: text('iyzico_customer_ref'),
 })
 
 export const clinicAiUsageDaily = pgTable('clinic_ai_usage_daily', {
@@ -206,9 +183,29 @@ export const whatsappConversations = pgTable('whatsapp_conversations', {
   history: jsonb('history').notNull().default([]),
   lastMessageAt: timestamp('last_message_at', { withTimezone: true }).defaultNow(),
   lastInboundAt: timestamp('last_inbound_at', { withTimezone: true }),
+  senderPushName: text('sender_push_name'),
+  activeDynamicContext: jsonb('active_dynamic_context').$type<{
+    rowIds: string[]
+    matchedUrl: string | null
+    tableName?: string | null
+    updatedAt: string
+  } | null>(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 }, (t) => [uniqueIndex('wa_conversation_identity').on(t.clinicId, t.instanceName, t.remoteJid)])
+
+export const whatsappContacts = pgTable('whatsapp_contacts', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  phone: text('phone').notNull(),
+  phoneLast10: text('phone_last10').notNull(),
+  remoteJid: text('remote_jid'),
+  contactName: text('contact_name').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('wa_contacts_clinic_phone10_idx').on(t.clinicId, t.phoneLast10),
+  index('wa_contacts_clinic_jid_idx').on(t.clinicId, t.remoteJid),
+])
 
 export const whatsappMessages = pgTable('whatsapp_messages', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
@@ -382,7 +379,10 @@ export const treatmentCatalog = pgTable('treatment_catalog', {
 export const patientConsentRequests = pgTable('patient_consent_requests', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   clinicId: uuid('clinic_id').notNull().references(() => clinics.id),
-  patientId: uuid('patient_id').notNull().references(() => patients.id),
+  patientId: uuid('patient_id').references(() => patients.id),
+  dynamicRowId: uuid('dynamic_row_id'),
+  recipientName: text('recipient_name'),
+  recipientPhone: text('recipient_phone'),
   deliveryChannel: text('delivery_channel').notNull(),
   tokenHash: text('token_hash').notNull().unique(),
   requestKey: text('request_key').notNull(),
@@ -405,6 +405,17 @@ export const patientConsentPreferences = pgTable('patient_consent_preferences', 
   requestId: uuid('request_id').notNull().references(() => patientConsentRequests.id),
   respondedAt: timestamp('responded_at', { withTimezone: true }).notNull(),
 }, (t) => [primaryKey({ columns: [t.clinicId, t.patientId, t.channel] })])
+
+export const contactChannelPreferences = pgTable('contact_channel_preferences', {
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  phoneLast10: text('phone_last10').notNull(),
+  channel: text('channel').notNull(),
+  status: text('status').notNull(),
+  textVersion: text('text_version').notNull(),
+  requestId: uuid('request_id').references(() => patientConsentRequests.id, { onDelete: 'set null' }),
+  dynamicRowId: uuid('dynamic_row_id'),
+  respondedAt: timestamp('responded_at', { withTimezone: true }).notNull(),
+}, (t) => [primaryKey({ columns: [t.clinicId, t.phoneLast10, t.channel] })])
 
 export const planAttachments = pgTable('plan_attachments', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
@@ -466,50 +477,9 @@ export const clinicFinanceSettings = pgTable('clinic_finance_settings', {
   mersisNumber: text('mersis_number'),
   address: text('address'),
   email: text('email'),
-  invoicePrefix: text('invoice_prefix').notNull().default('KLC'),
+  invoicePrefix: text('invoice_prefix').notNull().default('FTR'),
   eDocumentProvider: text('e_document_provider').notNull().default('none'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
-})
-
-export const financialDocuments = pgTable('financial_documents', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
-  patientId: uuid('patient_id').references(() => patients.id),
-  paymentId: uuid('payment_id').references(() => patientPayments.id),
-  documentType: text('document_type').notNull().default('e_archive_draft'),
-  status: text('status').notNull().default('draft'),
-  documentNumber: text('document_number').notNull(),
-  issueDate: text('issue_date').notNull(),
-  dueDate: text('due_date'),
-  recipientName: text('recipient_name').notNull(),
-  recipientIdentifier: text('recipient_identifier'),
-  recipientAddress: text('recipient_address'),
-  currency: text('currency').notNull().default('TRY'),
-  subtotal: integer('subtotal').notNull().default(0),
-  taxTotal: integer('tax_total').notNull().default(0),
-  grandTotal: integer('grand_total').notNull().default(0),
-  provider: text('provider'),
-  providerDocumentId: text('provider_document_id'),
-  notes: text('notes'),
-  createdBy: uuid('created_by').references(() => users.id),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
-}, (table) => ({
-  clinicDocumentNumber: uniqueIndex('financial_documents_clinic_number_idx').on(table.clinicId, table.documentNumber),
-  clinicIssueDate: index('financial_documents_clinic_issue_date_idx').on(table.clinicId, table.issueDate),
-}))
-
-export const financialDocumentLines = pgTable('financial_document_lines', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  documentId: uuid('document_id').notNull().references(() => financialDocuments.id, { onDelete: 'cascade' }),
-  lineNo: integer('line_no').notNull(),
-  description: text('description').notNull(),
-  quantity: integer('quantity').notNull().default(1),
-  unitPrice: integer('unit_price').notNull(),
-  taxRate: integer('tax_rate').notNull().default(0),
-  netAmount: integer('net_amount').notNull(),
-  taxAmount: integer('tax_amount').notNull().default(0),
-  totalAmount: integer('total_amount').notNull(),
 })
 
 // Credentials are encrypted at rest by the finance API. Provider adapters can
@@ -527,27 +497,6 @@ export const onlinePaymentProviders = pgTable('online_payment_providers', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({
   clinicProvider: uniqueIndex('online_payment_providers_clinic_provider_idx').on(table.clinicId, table.provider),
-}))
-
-export const onlinePaymentTransactions = pgTable('online_payment_transactions', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
-  paymentId: uuid('payment_id').references(() => patientPayments.id),
-  provider: text('provider').notNull(),
-  providerTransactionId: text('provider_transaction_id'),
-  idempotencyKey: text('idempotency_key').notNull(),
-  status: text('status').notNull().default('prepared'),
-  amount: integer('amount').notNull(),
-  currency: text('currency').notNull().default('TRY'),
-  checkoutUrl: text('checkout_url'),
-  callbackPayload: jsonb('callback_payload'),
-  expiresAt: timestamp('expires_at', { withTimezone: true }),
-  paidAt: timestamp('paid_at', { withTimezone: true }),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
-}, (table) => ({
-  idempotency: uniqueIndex('online_payment_transactions_idempotency_idx').on(table.clinicId, table.idempotencyKey),
-  providerTransaction: uniqueIndex('online_payment_transactions_provider_transaction_idx').on(table.provider, table.providerTransactionId),
 }))
 
 export const completedWorks = pgTable('completed_works', {
@@ -592,18 +541,6 @@ export const knowledgeDocChunks = pgTable('knowledge_doc_chunks', {
   index('knowledge_doc_chunks_clinic_idx').on(t.clinicId),
 ])
 
-export const recordings = pgTable('recordings', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').references(() => clinics.id),
-  sessionId: text('session_id'),
-  filename: text('filename').notNull(),
-  startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
-  endedAt: timestamp('ended_at', { withTimezone: true }).notNull(),
-  durationMs: bigint('duration_ms', { mode: 'number' }).notNull(),
-  sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-})
-
 export const knowledgeCategories = pgTable('knowledge_categories', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   clinicId: uuid('clinic_id').notNull().references(() => clinics.id),
@@ -618,15 +555,9 @@ export const knowledgeCategories = pgTable('knowledge_categories', {
 export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect
 export type NewKnowledgeDocument = typeof knowledgeDocuments.$inferInsert
 
-export type Account = typeof accounts.$inferSelect
-export type NewAccount = typeof accounts.$inferInsert
-export type AccountUsage = typeof accountUsage.$inferSelect
 export type Session = typeof sessions.$inferSelect
 export type Appointment = typeof appointments.$inferSelect
 export type NewAppointment = typeof appointments.$inferInsert
-export type BusinessSetting = typeof businessSettings.$inferSelect
-export type Recording = typeof recordings.$inferSelect
-export type NewRecording = typeof recordings.$inferInsert
 
 export type KnowledgeCategory = typeof knowledgeCategories.$inferSelect
 
@@ -639,20 +570,25 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash').notNull(),
   name: text('name').notNull(),
   avatar: text('avatar'),
-  role: text('role').notNull().default('host'),
+  role: text('role').notNull().default('calisan'),
   specialty: text('specialty'),
   color: text('color'),
   active: boolean('active').notNull().default(true),
   isPlatformAdmin: boolean('is_platform_admin').notNull().default(false),
+  googleSub: text('google_sub'),
+  phoneVerifiedAt: timestamp('phone_verified_at', { withTimezone: true }),
+  emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
-})
+}, (t) => [
+  uniqueIndex('users_google_sub_uniq').on(t.googleSub).where(sql`${t.googleSub} IS NOT NULL`),
+])
 
 export const clinicMemberships = pgTable('clinic_memberships', {
   clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  role: text('role').notNull().default('host'),
+  role: text('role').notNull().default('calisan'),
   active: boolean('active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
@@ -666,7 +602,7 @@ export const staffInvitations = pgTable('staff_invitations', {
   clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
   email: text('email').notNull(),
   name: text('name').notNull(),
-  role: text('role').notNull().default('hekim'),
+  role: text('role').notNull().default('calisan'),
   specialty: text('specialty'),
   color: text('color'),
   tokenHash: text('token_hash').notNull().unique(),
@@ -836,18 +772,6 @@ export const waitingList = pgTable('waiting_list', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 })
 
-export const attendance = pgTable('attendance', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').references(() => clinics.id),
-  userId: uuid('user_id').notNull().references(() => users.id),
-  date: text('date').notNull(),
-  clockIn: timestamp('clock_in', { withTimezone: true }),
-  clockOut: timestamp('clock_out', { withTimezone: true }),
-  totalHours: integer('total_hours'),
-  notes: text('notes'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-})
-
 export const toothRecords = pgTable('tooth_records', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   clinicId: uuid('clinic_id').references(() => clinics.id),
@@ -859,18 +783,6 @@ export const toothRecords = pgTable('tooth_records', {
   notes: text('notes'),
   recordedBy: uuid('recorded_by').references(() => users.id),
   date: text('date').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-})
-
-export const procedureTemplates = pgTable('procedure_templates', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').references(() => clinics.id),
-  doctorId: uuid('doctor_id').references(() => users.id),
-  name: text('name').notNull(),
-  defaultDurationMin: integer('default_duration_min').notNull().default(30),
-  defaultCost: integer('default_cost').notNull().default(0),
-  toothSurfaces: text('tooth_surfaces'),
-  category: text('category').notNull().default('genel'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 })
 
@@ -913,27 +825,6 @@ export const patientDiseases = pgTable('patient_diseases', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 })
 
-export const doctorAvailability = pgTable('doctor_availability', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').references(() => clinics.id),
-  doctorId: uuid('doctor_id').notNull().references(() => users.id),
-  dayOfWeek: integer('day_of_week').notNull(),
-  startTime: text('start_time').notNull(),
-  endTime: text('end_time').notNull(),
-  isActive: boolean('is_active').notNull().default(true),
-})
-
-export const calendarBlocks = pgTable('calendar_blocks', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').references(() => clinics.id),
-  doctorId: uuid('doctor_id').notNull().references(() => users.id),
-  date: text('date').notNull(),
-  startTime: text('start_time').notNull(),
-  endTime: text('end_time').notNull(),
-  reason: text('reason'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-})
-
 export const materialUsages = pgTable('material_usages', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   clinicId: uuid('clinic_id').references(() => clinics.id),
@@ -955,15 +846,6 @@ export const installmentPlans = pgTable('installment_plans', {
   paidCount: integer('paid_count').notNull().default(0),
   installments: jsonb('installments').notNull().default([]),
   status: text('status').notNull().default('active'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-})
-
-export const revenueTargets = pgTable('revenue_targets', {
-  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
-  clinicId: uuid('clinic_id').references(() => clinics.id),
-  month: integer('month').notNull(),
-  year: integer('year').notNull(),
-  targetAmount: integer('target_amount').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 })
 
@@ -1004,3 +886,234 @@ export type VipAssistant = typeof vipAssistants.$inferSelect
 export type NewVipAssistant = typeof vipAssistants.$inferInsert
 export type DoctorLeave = typeof doctorLeaves.$inferSelect
 export type NewDoctorLeave = typeof doctorLeaves.$inferInsert
+
+// ── Dynamic Tables & Relations Studio ────────────────────────────────────────
+
+export const dynamicTables = pgTable('dynamic_tables', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  icon: text('icon').notNull().default('table'),
+  color: text('color').notNull().default('#0284c7'),
+  description: text('description'),
+  origin: text('origin').notNull().default('manual'),
+  canvasX: integer('canvas_x').notNull().default(80),
+  canvasY: integer('canvas_y').notNull().default(80),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('dynamic_tables_clinic_slug_unique').on(t.clinicId, t.slug),
+  index('dynamic_tables_clinic_sort_idx').on(t.clinicId, t.sortOrder, t.createdAt),
+])
+
+export const dynamicColumns = pgTable('dynamic_columns', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  tableId: uuid('table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  slug: text('slug').notNull(),
+  fieldType: text('field_type').notNull().default('text'),
+  isPrimaryTitle: boolean('is_primary_title').notNull().default(false),
+  isRequired: boolean('is_required').notNull().default(false),
+  isUnique: boolean('is_unique').notNull().default(false),
+  showInTable: boolean('show_in_table').notNull().default(true),
+  width: integer('width').notNull().default(180),
+  sortOrder: integer('sort_order').notNull().default(0),
+  config: jsonb('config').notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('dynamic_columns_table_slug_unique').on(t.tableId, t.slug),
+  index('dynamic_columns_table_sort_idx').on(t.tableId, t.sortOrder, t.createdAt),
+])
+
+export const dynamicRelations = pgTable('dynamic_relations', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  sourceTableId: uuid('source_table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  sourceColumnId: uuid('source_column_id').notNull().references(() => dynamicColumns.id, { onDelete: 'cascade' }),
+  targetTableId: uuid('target_table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  inverseColumnId: uuid('inverse_column_id').references(() => dynamicColumns.id, { onDelete: 'set null' }),
+  cardinality: text('cardinality').notNull().default('one_to_many'),
+  onDelete: text('on_delete').notNull().default('set_null'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('dynamic_relations_clinic_idx').on(t.clinicId, t.sourceTableId, t.targetTableId),
+])
+
+export const dynamicRows = pgTable('dynamic_rows', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  tableId: uuid('table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  displayTitle: text('display_title').notNull().default(''),
+  values: jsonb('values').notNull().default({}),
+  isArchived: boolean('is_archived').notNull().default(false),
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('dynamic_rows_table_active_idx').on(t.clinicId, t.tableId, t.isArchived, t.createdAt),
+])
+
+export const dynamicRowLinks = pgTable('dynamic_row_links', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  relationId: uuid('relation_id').notNull().references(() => dynamicRelations.id, { onDelete: 'cascade' }),
+  sourceRowId: uuid('source_row_id').notNull().references(() => dynamicRows.id, { onDelete: 'cascade' }),
+  targetRowId: uuid('target_row_id').notNull().references(() => dynamicRows.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('dynamic_row_links_unique').on(t.relationId, t.sourceRowId, t.targetRowId),
+  index('dynamic_row_links_source_idx').on(t.clinicId, t.sourceRowId),
+  index('dynamic_row_links_target_idx').on(t.clinicId, t.targetRowId),
+])
+
+export const dynamicAppointmentConfigs = pgTable('dynamic_appointment_configs', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  tableId: uuid('table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').notNull().default(true),
+  titleColumnId: uuid('title_column_id').references(() => dynamicColumns.id, { onDelete: 'set null' }),
+  phoneColumnId: uuid('phone_column_id').references(() => dynamicColumns.id, { onDelete: 'set null' }),
+  emailColumnId: uuid('email_column_id').references(() => dynamicColumns.id, { onDelete: 'set null' }),
+  isRequiredInAppointment: boolean('is_required_in_appointment').notNull().default(false),
+  allowMultiple: boolean('allow_multiple').notNull().default(false),
+  includeRelatedTables: boolean('include_related_tables').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('dynamic_appointment_configs_clinic_table_unique').on(t.clinicId, t.tableId),
+  index('dynamic_appointment_configs_clinic_idx').on(t.clinicId, t.enabled),
+])
+
+export const dynamicAppointmentLinks = pgTable('dynamic_appointment_links', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  appointmentId: uuid('appointment_id').notNull().references(() => dentalAppointments.id, { onDelete: 'cascade' }),
+  tableId: uuid('table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  rowId: uuid('row_id').notNull().references(() => dynamicRows.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('dynamic_appointment_links_appt_row_unique').on(t.appointmentId, t.rowId),
+  index('dynamic_appointment_links_appt_idx').on(t.clinicId, t.appointmentId),
+  index('dynamic_appointment_links_row_idx').on(t.clinicId, t.rowId),
+])
+
+export const dynamicModuleConfigs = pgTable('dynamic_module_configs', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  tableId: uuid('table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  moduleRole: text('module_role').notNull(),
+  enabled: boolean('enabled').notNull().default(true),
+  mapping: jsonb('mapping').notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('dynamic_module_configs_clinic_table_unique').on(t.clinicId, t.tableId),
+  index('dynamic_module_configs_clinic_role_idx').on(t.clinicId, t.moduleRole, t.enabled),
+])
+
+export type DynamicTable = typeof dynamicTables.$inferSelect
+export type DynamicColumn = typeof dynamicColumns.$inferSelect
+export type DynamicRelation = typeof dynamicRelations.$inferSelect
+export type DynamicRow = typeof dynamicRows.$inferSelect
+export type DynamicAppointmentConfig = typeof dynamicAppointmentConfigs.$inferSelect
+export type DynamicModuleConfig = typeof dynamicModuleConfigs.$inferSelect
+
+export const flowAiMessages = pgTable('flow_ai_messages', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  direction: text('direction').notNull().default('inbound'),
+  role: text('role').notNull(),
+  content: text('content').notNull(),
+  appliedFlow: boolean('applied_flow').notNull().default(false),
+  nodeCount: integer('node_count'),
+  edgeCount: integer('edge_count'),
+  changeSummary: text('change_summary'),
+  previousFlow: jsonb('previous_flow'),
+  createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('flow_ai_messages_clinic_dir_created_idx').on(t.clinicId, t.direction, t.createdAt),
+])
+
+export type FlowAiMessage = typeof flowAiMessages.$inferSelect
+
+// ── Public Onboarding, OAuth, Subscriptions & Billing ────────────────────────
+
+export const authOtpChallenges = pgTable('auth_otp_challenges', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  target: text('target').notNull(),
+  channel: text('channel').notNull(),
+  purpose: text('purpose').notNull(),
+  codeHash: text('code_hash').notNull(),
+  payload: jsonb('payload'),
+  attempts: integer('attempts').notNull().default(0),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  consumedAt: timestamp('consumed_at', { withTimezone: true }),
+  ipAddress: text('ip_address'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('auth_otp_challenges_target_purpose_idx').on(t.target, t.purpose, t.createdAt),
+])
+
+export const oauthStates = pgTable('oauth_states', {
+  state: text('state').primaryKey(),
+  mode: text('mode').notNull(),
+  planId: text('plan_id'),
+  redirectAfter: text('redirect_after'),
+  codeVerifier: text('code_verifier'),
+  ipAddress: text('ip_address'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const upgradeRequests = pgTable('upgrade_requests', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').references(() => clinics.id, { onDelete: 'cascade' }),
+  requestedBy: uuid('requested_by').references(() => users.id, { onDelete: 'set null' }),
+  requestType: text('request_type').notNull(),
+  requestedPlan: text('requested_plan').notNull().default('pro'),
+  contactName: text('contact_name'),
+  contactEmail: text('contact_email'),
+  contactPhone: text('contact_phone'),
+  companyName: text('company_name'),
+  notes: text('notes'),
+  status: text('status').notNull().default('pending'),
+  handledBy: uuid('handled_by').references(() => users.id, { onDelete: 'set null' }),
+  handledAt: timestamp('handled_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('upgrade_requests_status_created_idx').on(t.status, t.createdAt),
+  index('upgrade_requests_clinic_created_idx').on(t.clinicId, t.createdAt),
+])
+
+export const subscriptionPayments = pgTable('subscription_payments', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+  planId: text('plan_id').notNull(),
+  provider: text('provider').notNull().default('iyzico'),
+  conversationId: text('conversation_id').notNull().unique(),
+  token: text('token'),
+  paymentId: text('payment_id'),
+  amountNet: integer('amount_net').notNull(),
+  vatRate: integer('vat_rate').notNull().default(20),
+  amountGross: integer('amount_gross').notNull(),
+  currency: text('currency').notNull().default('TRY'),
+  status: text('status').notNull().default('initiated'),
+  consentsSnapshot: jsonb('consents_snapshot').notNull().default({}),
+  rawEvent: jsonb('raw_event'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('subscription_payments_clinic_created_idx').on(t.clinicId, t.createdAt),
+])
+
+export type AuthOtpChallenge = typeof authOtpChallenges.$inferSelect
+export type OAuthStateRow = typeof oauthStates.$inferSelect
+export type UpgradeRequestRow = typeof upgradeRequests.$inferSelect
+export type SubscriptionPaymentRow = typeof subscriptionPayments.$inferSelect

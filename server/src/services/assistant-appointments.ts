@@ -7,7 +7,7 @@ import { getClinicWorkingHours } from '../db/repositories/settings'
 import { type DbTransaction } from '../db/repositories/whatsapp'
 import { normalizePhone } from '../integrations/whatsapp'
 import { broadcastSSE } from '../events'
-import { currentClinicId, runWithTenantContext } from '../tenancy/context'
+import { currentBusinessTemplate, currentClinicId, runWithTenantContext } from '../tenancy/context'
 
 const TR_MONTHS: Record<string, string> = {
   ocak: '01', subat: '02', şubat: '02', mart: '03', nisan: '04',
@@ -294,7 +294,8 @@ export async function validateAppointmentWorkingHoursAndLeave(params: {
       const clinicDayIndex = (calendarDate.getUTCDay() + 6) % 7
       if (Array.isArray(workingHours.workingDays) && workingHours.workingDays.length > 0 && !workingHours.workingDays.includes(clinicDayIndex)) {
         const openDaysLabel = workingHours.workingDays.map(d => DAY_NAMES_TR[d] || '').filter(Boolean).join(', ')
-        throw new Error(`Kliniğimiz ${DAY_NAMES_TR[clinicDayIndex]} günleri kapalıdır (Açık günler: ${openDaysLabel}). Lütfen başka bir gün seçin.`)
+        const orgLabel = currentBusinessTemplate() === 'dental_clinic' ? 'Kliniğimiz' : 'İşletmemiz'
+        throw new Error(`${orgLabel} ${DAY_NAMES_TR[clinicDayIndex]} günleri kapalıdır (Açık günler: ${openDaysLabel}). Lütfen başka bir gün seçin.`)
       }
     }
 
@@ -309,7 +310,8 @@ export async function validateAppointmentWorkingHoursAndLeave(params: {
       : (reqMin >= startMin && reqMin < endMin)
 
     if (!withinHours) {
-      throw new Error(`Seçilen saat (${time}) kliniğimizin çalışma saatleri (${workingHours.startTime} - ${workingHours.endTime}) dışındadır. Lütfen mesai saatleri içinde bir saat seçin.`)
+      const orgGenitive = currentBusinessTemplate() === 'dental_clinic' ? 'kliniğimizin' : 'işletmemizin'
+      throw new Error(`Seçilen saat (${time}) ${orgGenitive} çalışma saatleri (${workingHours.startTime} - ${workingHours.endTime}) dışındadır. Lütfen mesai saatleri içinde bir saat seçin.`)
     }
   }
 
@@ -318,13 +320,13 @@ export async function validateAppointmentWorkingHoursAndLeave(params: {
     for (const leave of leaves) {
       if (leave.isFullDay) {
         const subNote = leave.substituteDoctorName ? ` Yerine ${leave.substituteDoctorName} hizmet vermektedir.` : ''
-        throw new Error(`${leave.doctorName || 'Seçilen hekim'} ${date} tarihinde tam gün izinlidir.${subNote}`)
+        throw new Error(`${leave.doctorName || 'Seçilen çalışan'} ${date} tarihinde tam gün izinlidir.${subNote}`)
       }
       const lStart = timeToMinutes(leave.startTime)
       const lEnd = timeToMinutes(leave.endTime)
       if (reqMin >= lStart && reqMin < lEnd) {
         const subNote = leave.substituteDoctorName ? ` Yerine ${leave.substituteDoctorName} hizmet vermektedir.` : ''
-        throw new Error(`${leave.doctorName || 'Seçilen hekim'} ${date} tarihinde ${leave.startTime}-${leave.endTime} saatleri arasında izinlidir.${subNote}`)
+        throw new Error(`${leave.doctorName || 'Seçilen çalışan'} ${date} tarihinde ${leave.startTime}-${leave.endTime} saatleri arasında izinlidir.${subNote}`)
       }
     }
   }
@@ -385,8 +387,8 @@ export async function getClinicAvailabilityReport(params: {
   ])
 
   const hoursLine = workingHours
-    ? `Klinik Çalışma Saatleri: ${workingHours.startTime} - ${workingHours.endTime}`
-    : 'Klinik Çalışma Saatleri: 08:00 - 20:00'
+    ? `İşletme Çalışma Saatleri: ${workingHours.startTime} - ${workingHours.endTime}`
+    : 'İşletme Çalışma Saatleri: 08:00 - 20:00'
 
   let closedDayWarning = ''
   if (workingHours && targetDate && /^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
@@ -394,7 +396,7 @@ export async function getClinicAvailabilityReport(params: {
     if (Number.isFinite(dt.getTime())) {
       const dayIdx = (dt.getUTCDay() + 6) % 7
       if (workingHours.workingDays.length > 0 && !workingHours.workingDays.includes(dayIdx)) {
-        closedDayWarning = `⚠️ UYARI: Kliniğimiz ${targetDate} (${DAY_NAMES_TR[dayIdx]}) günü kapalıdır.`
+        closedDayWarning = `⚠️ UYARI: İşletmemiz ${targetDate} (${DAY_NAMES_TR[dayIdx]}) günü kapalıdır.`
       }
     }
   }
@@ -408,7 +410,7 @@ export async function getClinicAvailabilityReport(params: {
         : ''
       return `${d.name}${d.specialty ? ` (${d.specialty})` : ''}${leaveTag}`
     })
-    doctorsLine = `Aktif Hekimler: ${docSummaries.join(', ')}`
+    doctorsLine = `Aktif Çalışanlar: ${docSummaries.join(', ')}`
   }
 
   const dentalSlots = rows.map(r => ({
@@ -422,7 +424,7 @@ export async function getClinicAvailabilityReport(params: {
   if (closedDayWarning) {
     return {
       count: totalCount,
-      sonuc: `${headerParts.join('\n')}\nBu tarihte klinik kapalı olduğu için randevu verilemez.`,
+      sonuc: `${headerParts.join('\n')}\nBu tarihte işletme kapalı olduğu için randevu verilemez.`,
     }
   }
 
@@ -464,10 +466,22 @@ export async function createAssistantAppointment(fields: Record<string, unknown>
   })
 
   const run = async (tx: DbTransaction) => {
-    const name = String(fields.musteri_adi || fields.ad_soyad || fields.hasta_adi || '').trim()
-    const phone = normalizePhone(String(fields.telefon || ''))
+    const dynamicEntries = Object.entries(fields)
+      .filter(([key, val]) => key.includes('__') && !key.endsWith('____kayitli') && !key.startsWith('_') && val !== null && val !== undefined && String(val).trim().length > 0)
+      .map(([key, val]) => ({
+        slug: key.split('__').slice(1).join('__').toLowerCase(),
+        value: String(val).trim(),
+      }))
+    const dynamicName = dynamicEntries.find((e) => /(ad_soyad|adsoyad|musteri_adi|hasta_adi|isim|^ad$|baslik)/i.test(e.slug))?.value || ''
+    const dynamicPhone = dynamicEntries.find((e) => /(telefon|phone|gsm|cep|tel_no)/i.test(e.slug))?.value || ''
+    const dynamicTopic =
+      dynamicEntries.find((e) => /(sikayet|talep|konu|hizmet|islem|tedavi|amac|lokasyon|oda|daire|butce|bolge|not|aciklama)/i.test(e.slug))?.value ||
+      dynamicEntries.find((e) => !/(ad_soyad|adsoyad|musteri_adi|hasta_adi|isim|^ad$|baslik|telefon|phone|gsm|cep|tel_no|tarih|saat|eposta|email)/i.test(e.slug))?.value ||
+      ''
+    const name = String(fields.musteri_adi || fields.ad_soyad || fields.hasta_adi || dynamicName || fields._dynamicCallerName || '').trim()
+    const phone = normalizePhone(String(fields.telefon || dynamicPhone || fields._callerPhone || ''))
     const start = appointmentTime(date, time)
-    if (name.length < 3 || /\[|\]|placeholder|örnek isim/i.test(name)) throw new Error('Gerçek hasta adı ve soyadı gerekli.')
+    if (name.length < 3 || /\[|\]|placeholder|örnek isim/i.test(name)) throw new Error('Gerçek ad ve soyad gerekli.')
     if (start.getTime() < Date.now() - 60_000) throw new Error('Geçmiş bir tarih için randevu oluşturulamaz.')
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${context.clinicId || 'voice'}:${phone}`}, 0))`)
     const end = new Date(start.getTime() + 15 * 60_000)
@@ -489,6 +503,7 @@ export async function createAssistantAppointment(fields: Record<string, unknown>
       fields.notlar ||
       fields.hastaNotu ||
       fields.not ||
+      dynamicTopic ||
       (rawRandevuTuru && rawRandevuTuru.toLowerCase() !== 'kontrol' ? rawRandevuTuru : '') ||
       ''
     ).trim()
@@ -524,5 +539,5 @@ export async function updateWhatsAppAppointment(tx: DbTransaction, args: Record<
   await tx.update(appointments).set({ date, time, data }).where(eq(appointments.id, id))
   const dentalId = (row.data as Record<string, unknown>)._dentalAppointmentId
   if (typeof dentalId === 'string') await tx.update(dentalAppointments).set({ startTime: start, endTime: new Date(start.getTime() + 15 * 60_000), timeConfirmed: false }).where(eq(dentalAppointments.id, dentalId))
-  return { success: true, id, message: `Randevu talebiniz ${date} ${time} olarak güncellendi; klinik onayı bekleniyor.` }
+  return { success: true, id, message: `Randevu talebiniz ${date} ${time} olarak güncellendi; işletme onayı bekleniyor.` }
 }

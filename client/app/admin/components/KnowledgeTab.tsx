@@ -8,12 +8,12 @@ import InfoTooltip from './ui/InfoTooltip'
 import KnowledgeDocList, { PAGE_SIZES, type SortDir, type SortKey, type ViewMode } from './knowledge/KnowledgeDocList'
 import KnowledgeDocPreview from './knowledge/KnowledgeDocPreview'
 import { useBackdropDismiss } from '../../../hooks/useBackdropDismiss'
-import { PhoneMaskedInput, normalizeTrPhone, formatTrPhoneDisplay } from '@/lib/phone-mask'
+import { PhoneMaskedInput, normalizeTrPhone } from '@/lib/phone-mask'
 import { TERM_LABELS } from '@/lib/ui-glossary'
 import {
-  CALL_DIRECTION_LABELS, CATEGORY_COLORS, CATEGORY_ICONS, CATEGORY_LABEL_MAX, CONTENT_MAX, GREETING_MAX, TITLE_MAX,
-  cleanContent, cleanTitle, isCompleteTrPhone, mapServerError, maskCategoryLabel, maskContent, maskGreeting, maskTitle,
-  matchesSearch, uniqueSlug, validateContent, validateFile, validateGreeting, validateTitle,
+  CATEGORY_COLORS, CATEGORY_ICONS, CATEGORY_LABEL_MAX, CONTENT_MAX, TITLE_MAX,
+  cleanContent, cleanTitle, isCompleteTrPhone, mapServerError, maskCategoryLabel, maskContent, maskTitle,
+  matchesSearch, uniqueSlug, validateContent, validateTitle,
   type CallDirection, type FieldKey,
 } from '@/lib/knowledge-input-rules'
 import d from '../../../styles/clinic-depth.module.css'
@@ -52,8 +52,6 @@ interface SaveData {
   active: boolean
   file?: File | null
 }
-
-const DIRECTIONS: CallDirection[] = ['both', 'inbound', 'outbound']
 
 // ── Small shared pieces ───────────────────────────────────────────────────────
 
@@ -122,7 +120,6 @@ function DocModal({ doc, onClose, onSave, saving, categories }: DocModalProps) {
   const [category, setCategory] = useState(doc?.category || 'genel')
   const [title, setTitle] = useState(doc?.title || '')
   const [content, setContent] = useState(doc?.content || '')
-  const [callDirection, setCallDirection] = useState<CallDirection>(doc?.callDirection || 'both')
   const [active, setActive] = useState(doc?.active !== false)
   const [errors, setErrors] = useState<Errors>({})
 
@@ -141,7 +138,7 @@ function DocModal({ doc, onClose, onSave, saving, categories }: DocModalProps) {
       category,
       title: cleanTitle(title),
       content: cleanContent(content),
-      callDirection,
+      callDirection: 'both',
       active,
       file: null,
     })
@@ -152,7 +149,7 @@ function DocModal({ doc, onClose, onSave, saving, categories }: DocModalProps) {
     <ModalShell
       icon={isEdit ? '✏️' : '📄'}
       title={isEdit ? 'Belge Düzenle' : 'Yeni Belge Ekle'}
-      subtitle="Bilgi bankası içeriğini kaydedin"
+      subtitle="Gelen arama, giden arama, web ve WhatsApp kanallarında ortak kullanılır"
       onClose={onClose}
       onSubmit={submit}
       footer={(
@@ -187,7 +184,7 @@ function DocModal({ doc, onClose, onSave, saving, categories }: DocModalProps) {
           <span className={s.label}>
             İçerik
             <InfoTooltip title="Bu metin ne işe yarar?">
-              Yapay zeka asistan, aramalarda bu metni okuyarak hastalara bilgi verir. Fiyat, çalışma saati, kampanya gibi bilgileri açık ve kısa yazın.
+              Yapay zeka asistan; gelen arama, giden arama, web ve WhatsApp kanallarının tümünde bu metni okuyarak bilgi verir. Fiyat, çalışma saati, kampanya gibi bilgileri açık ve kısa yazın.
             </InfoTooltip>
             <Counter value={content.length} max={CONTENT_MAX} />
           </span>
@@ -198,19 +195,9 @@ function DocModal({ doc, onClose, onSave, saving, categories }: DocModalProps) {
           <FieldError message={errors.content} />
         </label>
 
-        <div>
-          <div className={s.label}>
-            Kullanım yeri
-            <InfoTooltip title="Belge hangi aramalarda kullanılır?">
-              “Gelen arama”: hasta kliniği aradığında. “Giden arama”: asistan hastayı aradığında. “Her ikisi”: her iki durumda da kullanılır.
-            </InfoTooltip>
-          </div>
-          <Segment value={callDirection} onChange={setCallDirection} label="Kullanım yeri" options={DIRECTIONS.map(v => ({ value: v, label: CALL_DIRECTION_LABELS[v] }))} />
-        </div>
-
         <div className={s.switchRow}>
           <button type="button" role="switch" aria-checked={active} className={d.switch} onClick={() => setActive(!active)} aria-label="Aktif durumu" />
-          <span>{active ? 'Aktif — asistan bu belgeyi kullanır' : 'Pasif — asistan bu belgeyi kullanmaz'}</span>
+          <span>{active ? 'Aktif — asistan tüm kanallarda bu belgeyi kullanır' : 'Pasif — asistan bu belgeyi kullanmaz'}</span>
         </div>
         <FieldError message={errors.form} />
       </div>
@@ -325,7 +312,6 @@ export default function KnowledgeTab() {
   const [searchInput, setSearchInput] = useState('')
   const [query, setQuery] = useState('')
   const [catFilter, setCatFilter] = useState('all')
-  const [directionFilter, setDirectionFilter] = useState<'all' | CallDirection>('all')
   const [sortKey, setSortKey] = useState<SortKey>('updatedAt')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [page, setPage] = useState(1)
@@ -333,17 +319,7 @@ export default function KnowledgeTab() {
   const [view, setView] = useState<ViewMode>('list')
   const [urlReady, setUrlReady] = useState(false)
 
-  // Karşılama / arayan numara
-  const [greetingTab, setGreetingTab] = useState<'inbound' | 'outbound' | 'callerid'>('inbound')
-  const [greetingText, setGreetingText] = useState('')
-  const [greetingOutboundText, setGreetingOutboundText] = useState('')
   const [outboundCallerId, setOutboundCallerId] = useState('08503096119')
-  const [assignedCallerNumbers, setAssignedCallerNumbers] = useState<string[]>([])
-  const [greetingLoading, setGreetingLoading] = useState(true)
-  const [greetingSaving, setGreetingSaving] = useState(false)
-  const [callerIdSaving, setCallerIdSaving] = useState(false)
-  const [greetingErrors, setGreetingErrors] = useState<Errors>({})
-
   const [flowDirection, setFlowDirection] = useState<'inbound' | 'outbound' | 'web' | 'whatsapp'>('inbound')
 
   // Dış arama
@@ -365,8 +341,6 @@ export default function KnowledgeTab() {
     const q = p.get('kb_q') ?? ''
     setSearchInput(q); setQuery(q)
     setCatFilter(p.get('kb_cat') || 'all')
-    const dir = p.get('kb_dir')
-    if (dir === 'inbound' || dir === 'outbound' || dir === 'both') setDirectionFilter(dir)
     const sort = p.get('kb_sort')
     if (sort === 'title' || sort === 'category' || sort === 'updatedAt' || sort === 'active') setSortKey(sort)
     if (p.get('kb_order') === 'asc') setSortDir('asc')
@@ -387,14 +361,13 @@ export default function KnowledgeTab() {
     URL_KEYS.forEach(k => p.delete(k))
     if (query) p.set('kb_q', query)
     if (catFilter !== 'all') p.set('kb_cat', catFilter)
-    if (directionFilter !== 'all') p.set('kb_dir', directionFilter)
     if (sortKey !== 'updatedAt') p.set('kb_sort', sortKey)
     if (sortDir !== 'desc') p.set('kb_order', sortDir)
     if (page > 1) p.set('kb_page', String(page))
     if (pageSize !== PAGE_SIZES[0]) p.set('kb_size', String(pageSize))
     const qs = p.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
-  }, [urlReady, query, catFilter, directionFilter, sortKey, sortDir, page, pageSize])
+  }, [urlReady, query, catFilter, sortKey, sortDir, page, pageSize])
 
   // Arama gecikmesi (300 ms)
   useEffect(() => {
@@ -441,28 +414,37 @@ export default function KnowledgeTab() {
     setLoading(false)
   }, [])
 
-  const fetchGreeting = useCallback(async () => {
+  const fetchOutboundCallerId = useCallback(async () => {
     try {
-      const res = await fetch('/api/admin/settings/greeting')
+      const res = await fetch('/api/admin/settings/assistants')
       if (res.ok) {
-        const data = await res.json() as { greeting?: string; greetingOutbound?: string }
-        if (data.greeting) setGreetingText(data.greeting)
-        if (data.greetingOutbound) setGreetingOutboundText(data.greetingOutbound)
+        const data = await res.json() as { outbound?: { callerId?: string }; settings?: { outbound?: { callerId?: string } } }
+        const cid = data?.settings?.outbound?.callerId ?? data?.outbound?.callerId
+        if (cid) {
+          setOutboundCallerId(normalizeTrPhone(cid))
+          return
+        }
       }
       const callerRes = await fetch('/api/admin/settings/outbound-caller-id')
       if (callerRes.ok) {
-        const callerData = await callerRes.json() as { callerId?: string; assignedNumbers?: string[] }
-        if (Array.isArray(callerData.assignedNumbers)) {
-          const norms = [...new Set(callerData.assignedNumbers.map(n => normalizeTrPhone(n)).filter(Boolean))]
-          setAssignedCallerNumbers(norms)
-        }
+        const callerData = await callerRes.json() as { callerId?: string }
         if (callerData.callerId) setOutboundCallerId(normalizeTrPhone(callerData.callerId))
       }
     } catch { /* varsayılanlar kalır */ }
-    setGreetingLoading(false)
   }, [])
 
-  useEffect(() => { load(); fetchGreeting() }, [load, fetchGreeting])
+  useEffect(() => { load(); void fetchOutboundCallerId() }, [load, fetchOutboundCallerId])
+
+  useEffect(() => {
+    const onSettingsUpdated = (event: Event) => {
+      const nextCid = (event as CustomEvent)?.detail?.outbound?.callerId
+      if (typeof nextCid === 'string' && nextCid.trim()) {
+        setOutboundCallerId(normalizeTrPhone(nextCid))
+      }
+    }
+    window.addEventListener('clinic:assistant-settings-updated', onSettingsUpdated)
+    return () => window.removeEventListener('clinic:assistant-settings-updated', onSettingsUpdated)
+  }, [])
 
   const getCat = (slug: string) => categories.find(c => c.slug === slug)
 
@@ -470,10 +452,8 @@ export default function KnowledgeTab() {
   const filtered = useMemo(() => {
     const rows = docs.filter(doc => {
       const matchCat = catFilter === 'all' || doc.category === catFilter
-      const dir = doc.callDirection || 'both'
-      const matchDir = directionFilter === 'all' || dir === directionFilter
       const matchQ = !query || matchesSearch(`${doc.title} ${doc.content}`, query)
-      return matchCat && matchDir && matchQ
+      return matchCat && matchQ
     })
     const mul = sortDir === 'asc' ? 1 : -1
     const collator = new Intl.Collator('tr-TR')
@@ -486,7 +466,7 @@ export default function KnowledgeTab() {
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docs, catFilter, directionFilter, query, sortKey, sortDir, categories])
+  }, [docs, catFilter, query, sortKey, sortDir, categories])
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -499,8 +479,8 @@ export default function KnowledgeTab() {
     setPage(1)
   }
 
-  const hasFilters = !!query || catFilter !== 'all' || directionFilter !== 'all'
-  const clearFilters = () => { setSearchInput(''); setQuery(''); setCatFilter('all'); setDirectionFilter('all'); setPage(1) }
+  const hasFilters = !!query || catFilter !== 'all'
+  const clearFilters = () => { setSearchInput(''); setQuery(''); setCatFilter('all'); setPage(1) }
 
   // ── CRUD ───────────────────────────────────────────────────────────────────
   const handleSave = async (data: SaveData): Promise<{ field: FieldKey | 'form'; message: string } | null> => {
@@ -619,58 +599,7 @@ export default function KnowledgeTab() {
     } catch { showToast('Kategori silinemedi', 'error') }
   }
 
-  // ── Karşılama / arayan numara / dış arama ──────────────────────────────────
-  const handleSaveGreeting = async (type: 'inbound' | 'outbound') => {
-    const text = type === 'inbound' ? greetingText : greetingOutboundText
-    const check = validateGreeting(text)
-    if (!check.ok) { setGreetingErrors({ greeting: check.error }); return }
-    if (greetingSaving) return
-    setGreetingSaving(true)
-    setGreetingErrors({})
-    try {
-      const res = await fetch('/api/admin/settings/greeting', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(type === 'inbound' ? { greeting: text.trim() } : { greetingOutbound: text.trim() }),
-      })
-      if (res.ok) showToast(type === 'inbound' ? '✅ Gelen arama karşılama mesajı kaydedildi' : '✅ Giden arama karşılama mesajı kaydedildi')
-      else {
-        const data = await res.json().catch(() => ({})) as { error?: string }
-        const mapped = mapServerError(res.status, data.error || 'Kayıt başarısız')
-        setGreetingErrors({ [mapped.field === 'form' ? 'greeting' : mapped.field]: mapped.message })
-      }
-    } catch { setGreetingErrors({ greeting: 'Sunucuya ulaşılamadı. Tekrar deneyin.' }) }
-    setGreetingSaving(false)
-  }
-
-  const handleSaveCallerId = async (targetNumber?: string) => {
-    if (callerIdSaving) return
-    const numToSave = typeof targetNumber === 'string' ? normalizeTrPhone(targetNumber) : outboundCallerId
-    if (!isCompleteTrPhone(numToSave)) { setGreetingErrors({ callerId: 'Numarayı 11 hane olacak şekilde tam girin.' }); return }
-    setCallerIdSaving(true)
-    setGreetingErrors({})
-    try {
-      const res = await fetch('/api/admin/settings/outbound-caller-id', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callerId: numToSave }),
-      })
-      if (res.ok) {
-        const savedData = await res.json().catch(() => ({})) as { callerId?: string; assignedNumbers?: string[] }
-        if (savedData.callerId) setOutboundCallerId(normalizeTrPhone(savedData.callerId))
-        else setOutboundCallerId(numToSave)
-        if (Array.isArray(savedData.assignedNumbers)) {
-          setAssignedCallerNumbers([...new Set(savedData.assignedNumbers.map(n => normalizeTrPhone(n)).filter(Boolean))])
-        }
-        showToast('✅ Arayan numara kaydedildi')
-      } else {
-        const data = await res.json().catch(() => ({})) as { error?: string }
-        setGreetingErrors({ callerId: data.error || 'Kayıt başarısız' })
-      }
-    } catch { setGreetingErrors({ callerId: 'Sunucuya ulaşılamadı. Tekrar deneyin.' }) }
-    setCallerIdSaving(false)
-  }
-
+  // ── Dış arama ──────────────────────────────────────────────────────────────
   const handleOutboundCall = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!isCompleteTrPhone(callPhone)) { setCallErrors({ phone: 'Telefon numarasını 11 hane olacak şekilde tam girin.' }); return }
@@ -697,7 +626,6 @@ export default function KnowledgeTab() {
   const toggleSelect = (id: string) => setSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })
   const toggleAll = (ids: string[], on: boolean) => setSelected(prev => { const n = new Set(prev); ids.forEach(id => (on ? n.add(id) : n.delete(id))); return n })
 
-  const greetingValue = greetingTab === 'inbound' ? greetingText : greetingOutboundText
   const processedLabel = `${totalEmbedded}/${docs.length}`
 
   const confirmProps = (() => {
@@ -727,7 +655,7 @@ export default function KnowledgeTab() {
         <div className={s.spread}>
           <div>
             <h2 className={s.h2}>🧠 Bilgi Bankası ve Yapay Zeka Akışları</h2>
-            <p className={s.sub}>Gelen ve giden aramalar için bilgi belgeleri, karşılama mesajları ve senaryolar</p>
+            <p className={s.sub}>Gelen arama, giden arama, web ve WhatsApp asistanları için ortak bilgi belgeleri, karşılama mesajları ve senaryolar</p>
           </div>
           <div className={s.row}>
             {!loading && !loadError && (
@@ -752,8 +680,6 @@ export default function KnowledgeTab() {
             <span className={s.searchIcon}>🔍</span>
             <input className={`${d.input} ${s.searchInput}`} value={searchInput} onChange={e => setSearchInput(e.target.value)} placeholder="Belge başlığı veya içeriğinde ara…" aria-label="Belge ara" />
           </div>
-          <Segment value={directionFilter} onChange={v => { setDirectionFilter(v); setPage(1) }} label="Kullanım yeri süzgeci"
-            options={[{ value: 'all', label: 'Tümü' }, ...DIRECTIONS.map(v => ({ value: v, label: CALL_DIRECTION_LABELS[v] }))]} />
           <div style={{ marginLeft: 'auto' }}>
             <Segment value={view} onChange={changeView} label="Görünüm" options={[{ value: 'list', label: '☰ Liste' }, { value: 'cards', label: '▦ Kart' }]} />
           </div>
@@ -836,104 +762,13 @@ export default function KnowledgeTab() {
           )}
         </div>
 
-        {/* Sağ: karşılama ve ses ayarları */}
+        {/* Sağ: kanal asistanları ayarları */}
         <div className={s.stack}>
-          <div className={d.card}>
-            <div className={s.spread} style={{ marginBottom: 12 }}>
-              <div>
-                <h3 className={s.h3}>
-                  🗣️ Karşılama Mesajları ve Hat Ayarı
-                  <InfoTooltip title="Karşılama mesajı">
-                    Arama açıldığında asistanın söylediği ilk cümledir. Gelen ve giden aramalar için ayrı mesaj yazabilirsiniz. En az 3, en fazla {GREETING_MAX} karakter olmalıdır.
-                  </InfoTooltip>
-                </h3>
-                <p className={s.sub}>Gelen ve giden aramalar için ayrı açılış metinleri</p>
-              </div>
-              {greetingLoading && <div className={s.spinner} />}
-            </div>
-
-            <div className={d.segmentTrack} style={{ display: 'flex', marginBottom: 12 }} role="group" aria-label="Karşılama türü">
-              {([['inbound', `📥 ${TERM_LABELS.inbound}`], ['outbound', `📤 ${TERM_LABELS.outbound}`], ['callerid', '📞 Arayan Numara']] as const).map(([key, text]) => (
-                <button key={key} type="button" className={greetingTab === key ? d.segmentActive : d.segment} style={{ flex: 1 }} aria-pressed={greetingTab === key}
-                  onClick={() => { setGreetingTab(key); setGreetingErrors({}) }}>{text}</button>
-              ))}
-            </div>
-
-            {!greetingLoading && greetingTab !== 'callerid' && (
-              <div>
-                <label className={s.label} htmlFor="kb-greeting">
-                  {greetingTab === 'inbound' ? 'Hasta kliniği aradığında söylenecek ilk cümle' : 'Asistan hastayı aradığında söylenecek ilk cümle'}
-                  <Counter value={greetingValue.length} max={GREETING_MAX} />
-                </label>
-                <textarea id="kb-greeting" className={`${d.input} ${s.textarea} ${greetingErrors.greeting ? s.inputError : ''}`} rows={3} value={greetingValue}
-                  onChange={e => {
-                    const v = maskGreeting(e.target.value)
-                    if (greetingTab === 'inbound') setGreetingText(v); else setGreetingOutboundText(v)
-                    setGreetingErrors({})
-                  }}
-                  placeholder={greetingTab === 'inbound' ? 'Merhaba, hoş geldiniz! Size nasıl yardımcı olabilirim?' : 'Merhaba, kliniğimizden arıyorum. Tedavi sonrası memnuniyet anketimiz için uygun musunuz?'} />
-                <FieldError message={greetingErrors.greeting} />
-                <div className={s.row} style={{ justifyContent: 'flex-end', marginTop: 10 }}>
-                  <button type="button" className={d.btnPrimary} disabled={greetingSaving || !validateGreeting(greetingValue).ok} onClick={() => handleSaveGreeting(greetingTab as 'inbound' | 'outbound')}>
-                    {greetingSaving ? 'Kaydediliyor…' : greetingTab === 'inbound' ? 'Gelen karşılamayı kaydet' : 'Giden karşılamayı kaydet'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {!greetingLoading && greetingTab === 'callerid' && (
-              <div>
-                {assignedCallerNumbers.length > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div className={s.label}>
-                      Tanımlı Hat Numaraları
-                      <InfoTooltip title="Tanımlı hat numaraları">
-                        Klinik kurulumunda santrale tanımlanan hat numaralarıdır. Üzerine tıklayarak aktif arayan numarayı seçebilirsiniz.
-                      </InfoTooltip>
-                    </div>
-                    <div className={s.chipRow}>
-                      {assignedCallerNumbers.map(num => {
-                        const isSelected = normalizeTrPhone(outboundCallerId) === num
-                        return (
-                          <button
-                            key={num}
-                            type="button"
-                            className={isSelected ? s.chipActive : d.chip}
-                            aria-pressed={isSelected}
-                            disabled={callerIdSaving}
-                            onClick={() => {
-                              setOutboundCallerId(num)
-                              setGreetingErrors({})
-                              void handleSaveCallerId(num)
-                            }}
-                          >
-                            📞 {formatTrPhoneDisplay(num) || num}
-                            {isSelected ? ' · Aktif' : ''}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )}
-                <div className={s.label}>
-                  Arayan numara
-                  <InfoTooltip title="Arayan numara nedir?">
-                    Asistan dışarı arama yaparken karşı tarafın ekranında görünecek telefon hattı numarasıdır. 11 hane olarak, 0 ile başlayarak girin.
-                  </InfoTooltip>
-                </div>
-                <PhoneMaskedInput value={outboundCallerId} onValueChange={v => { setOutboundCallerId(v); setGreetingErrors({}) }} placeholder="0 (850) 309 61 19"
-                  className={`${d.input} ${greetingErrors.callerId ? s.inputError : ''}`} />
-                <FieldError message={greetingErrors.callerId} />
-                <div className={s.row} style={{ justifyContent: 'flex-end', marginTop: 10 }}>
-                  <button type="button" className={d.btnPrimary} disabled={callerIdSaving || !isCompleteTrPhone(outboundCallerId)} onClick={() => void handleSaveCallerId()}>
-                    {callerIdSaving ? 'Kaydediliyor…' : 'Arayan numarayı kaydet'}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <VoiceAiSettings onToast={showToast} />
+          <VoiceAiSettings
+            onToast={showToast}
+            activeDirection={flowDirection}
+            onDirectionChange={setFlowDirection}
+          />
         </div>
       </div>
 

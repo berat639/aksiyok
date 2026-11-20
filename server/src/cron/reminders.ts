@@ -69,7 +69,10 @@ export async function processReminders() {
         } else {
           const [template] = await db.select().from(notificationTemplates).where(and(eq(notificationTemplates.clinicId, clinic.id),
             eq(notificationTemplates.type, channel), eq(notificationTemplates.name, 'periodic_reminder'))).limit(1)
-          const message = (template?.content || 'Kontrol zamanınız geldi. Randevu için kliniğinizle iletişime geçebilirsiniz.')
+          const fallbackReminder = clinic.businessTemplate === 'dental_clinic'
+            ? 'Kontrol zamanınız geldi. Randevu için kliniğinizle iletişime geçebilirsiniz.'
+            : 'Hatırlatma zamanınız geldi. Randevu veya bilgi için işletmemizle iletişime geçebilirsiniz.'
+          const message = (template?.content || fallbackReminder)
             .replace(/\{\{hasta_adi\}\}/g, patient.name).replace(/\{\{islem\}\}/g, treatment.procedureName)
           if (channel === 'sms') {
             const config = await activeConfig(clinic.id, 'sms')
@@ -97,7 +100,7 @@ export async function processReminders() {
             if (!config?.callerId) throw new DeliveryConfigurationError('Telefon yapılandırması eksik')
             const { patientPhoneMatches } = await import('../db/repositories/whatsapp')
             const matches = await db.select({ id: patients.id }).from(patients).where(and(eq(patients.clinicId, clinic.id), patientPhoneMatches(patient.phone))).limit(2)
-            if (matches.length !== 1 || matches[0].id !== patient.id) throw new DeliveryConfigurationError('Telefon hasta eşleşmesi belirsiz')
+            if (matches.length !== 1 || matches[0].id !== patient.id) throw new DeliveryConfigurationError('Telefon kişi eşleşmesi belirsiz')
             const { initiateOutboundCall } = await import('../services/asterisk-ami')
             if (!await hasPatientConsent(clinic.id, patient.id, channel)) status = 'blocked'
             else {

@@ -44,3 +44,41 @@ test('user_intent koşulu ve webhook aksiyonu doğrulama ve prompt üretiminde d
   expect(issues.filter(i => i.level === 'error')).toHaveLength(0)
   expect(issues).toContainEqual(expect.objectContaining({ nodeId: 'webhook_node', level: 'warning' }))
 })
+
+test('çoklu koşul kurallarında (+ Koşul ekle) boş bırakılan alan doğrulama hatası verir; dolu dinamik tablo kuralları geçer', () => {
+  const incompleteCompound: FlowNode = {
+    id: 'cond_incomplete',
+    type: 'CONDITION',
+    position: { x: 0, y: 1 },
+    data: {
+      conditionField: 'musteriler__grup',
+      operator: 'equals',
+      conditionValue: 'VIP',
+      conditionLogic: 'AND',
+      rules: [
+        { field: 'musteriler__grup', operator: 'equals', value: 'VIP' },
+        { field: '', operator: 'equals', value: '' },
+      ],
+    },
+  }
+  const edges: FlowEdge[] = [
+    { id: 'e1', source: 'start', target: 'cond_incomplete' },
+    { id: 'e2', source: 'cond_incomplete', target: 'end', sourceHandle: 'true' },
+    { id: 'e3', source: 'cond_incomplete', target: 'end', sourceHandle: 'false' },
+  ]
+  const badIssues = validateConversationFlow([start, incompleteCompound, end], edges)
+  expect(badIssues).toContainEqual(expect.objectContaining({ nodeId: 'cond_incomplete', level: 'error' }))
+
+  const validCompound: FlowNode = {
+    ...incompleteCompound,
+    data: {
+      ...incompleteCompound.data,
+      rules: [
+        { field: 'musteriler__grup', operator: 'equals', value: 'VIP', sourceTableName: 'Müşteriler', sourceColumnName: 'Grup' },
+        { field: 'anket__puan', operator: 'gte', value: '8', sourceTableName: 'Anket', sourceColumnName: 'Puan' },
+      ],
+    },
+  }
+  const okIssues = validateConversationFlow([start, validCompound, end], edges)
+  expect(okIssues.filter(i => i.level === 'error')).toHaveLength(0)
+})

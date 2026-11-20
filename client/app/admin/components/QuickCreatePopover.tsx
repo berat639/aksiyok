@@ -1,16 +1,20 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { X, Search, Plus, ChevronRight } from 'lucide-react';
+import { Calendar, X } from 'lucide-react';
 import FancyHourPicker from './FancyHourPicker';
-import PatientConsentPanel from './PatientConsentPanel';
+import AppointmentDynamicRecordsSection, {
+  type AppointmentBookingContextData,
+  type AppointmentDynamicRecordsHandle,
+} from './dynamic-tables/AppointmentDynamicRecordsSection';
 import { useBackdropDismiss } from '../../../hooks/useBackdropDismiss';
-import { PhoneMaskedInput, matchesPhoneSearch } from '@/lib/phone-mask';
+import { useAuth } from '../../../lib/auth-context';
+import { PhoneMaskedInput } from '@/lib/phone-mask';
 
 interface Props {
   x: number;
   y: number;
   onClose: () => void;
-  onSave: (data: any) => void;
+  onSave: (data: any) => void | Promise<void>;
   defaultDate: string;
   defaultStartTime: string;
   defaultEndTime: string;
@@ -21,6 +25,8 @@ interface Props {
   shifts?: any[];
   doctorLeaves?: any[];
   isCentered?: boolean;
+  initialSelectedIdsByTable?: Record<string, string[]>;
+  initialBookingContext?: AppointmentBookingContextData | null;
 }
 
 export default function QuickCreatePopover({
@@ -32,46 +38,57 @@ export default function QuickCreatePopover({
   defaultStartTime,
   defaultEndTime,
   doctorId,
-  patients,
   doctors,
-  events = [],
   shifts = [],
   doctorLeaves = [],
   isCentered = false,
+  initialSelectedIdsByTable,
+  initialBookingContext,
 }: Props) {
+  const { user } = useAuth();
+  const isClinicSector = user?.businessTemplate === 'dental_clinic';
   const backdropDismiss = useBackdropDismiss(onClose);
+  const dynamicSectionRef = useRef<AppointmentDynamicRecordsHandle | null>(null);
 
-  // Top tab mode: 'select' (Hasta Randevu) | 'create' (Yeni Hasta Ekle)
-  const [patientMode, setPatientMode] = useState<'select' | 'create'>('select');
-  const [selectedPatientId, setSelectedPatientId] = useState<string>('');
-  const [createdPatientId, setCreatedPatientId] = useState<string>('');
-  const [patientSearchQuery, setPatientSearchQuery] = useState('');
+  // Dynamic Appointment Context
+  const [contextLoading, setContextLoading] = useState(!initialBookingContext);
+  const [bookingContext, setBookingContext] = useState<AppointmentBookingContextData>(
+    initialBookingContext || {
+      hasAnyDynamicTables: false,
+      linkedTables: [],
+      allTables: [],
+      relations: [],
+      rowLinks: [],
+    }
+  );
 
-  // New patient full form state
-  const [title, setTitle] = useState('');
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
-  const [phone, setPhone] = useState('');
-  const [tc, setTc] = useState('');
-  const [email, setEmail] = useState('');
-  const [gender, setGender] = useState('');
-  const [birthDate, setBirthDate] = useState('');
-  const [sms, setSms] = useState(true);
-  const [emailOpt, setEmailOpt] = useState(true);
-  const [waOpt, setWaOpt] = useState(true);
+  // Per-table selected row IDs (supports single OR multiple records per table)
+  const [selectedIdsByTable, setSelectedIdsByTable] = useState<Record<string, string[]>>(
+    () => initialSelectedIdsByTable || {}
+  );
 
-  const fullName = useMemo(() => {
-    return `${firstName.trim()} ${lastName.trim()}`.trim();
-  }, [firstName, lastName]);
+  useEffect(() => {
+    if (initialSelectedIdsByTable && Object.keys(initialSelectedIdsByTable).length > 0) {
+      setSelectedIdsByTable(initialSelectedIdsByTable);
+    }
+  }, [initialSelectedIdsByTable]);
 
-  // Appointment info
+  // Standalone / General Appointment Fields
+  const [customTitle, setCustomTitle] = useState('');
+  const [hasEditedCustomTitle, setHasEditedCustomTitle] = useState(false);
+  const [standalonePhone, setStandalonePhone] = useState('');
+  const [apptNotes, setApptNotes] = useState('');
+  const [appointmentType, setAppointmentType] = useState<string>('general');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Specialist / Staff & Time state
   const [selectedDoctorId, setSelectedDoctorId] = useState(doctorId || '');
   const [hasUserChangedTime, setHasUserChangedTime] = useState(false);
 
   const timeToNumber = (t: string) => {
     if (!t) return 9;
     const [h, m] = t.split(':').map(Number);
-    return h + (m === 30 ? 0.5 : 0);
+    return h + (m >= 30 ? 0.5 : 0);
   };
   const formatNumberTime = (val: number) => {
     const h = Math.floor(val).toString().padStart(2, '0');
@@ -83,6 +100,36 @@ export default function QuickCreatePopover({
     timeToNumber(defaultStartTime) || 9,
     timeToNumber(defaultEndTime) || 9.5,
   ]);
+
+  const loadBookingContext = useCallback(async (): Promise<AppointmentBookingContextData | null> => {
+    try {
+      const r = await fetch('/api/dynamic-tables/appointment-context');
+      const data = await r.json();
+      if (data?.error) return null;
+      const nextCtx: AppointmentBookingContextData = {
+        hasAnyDynamicTables: Boolean(data.hasAnyDynamicTables),
+        linkedTables: Array.isArray(data.linkedTables) ? data.linkedTables : [],
+        allTables: Array.isArray(data.allTables) ? data.allTables : [],
+        relations: Array.isArray(data.relations) ? data.relations : [],
+        rowLinks: Array.isArray(data.rowLinks) ? data.rowLinks : [],
+      };
+      setBookingContext(nextCtx);
+      return nextCtx;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    if (!initialBookingContext) setContextLoading(true);
+    loadBookingContext().finally(() => {
+      if (active) setContextLoading(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadBookingContext, initialBookingContext]);
 
   useEffect(() => {
     setSelectedDoctorId(doctorId || '');
@@ -96,62 +143,71 @@ export default function QuickCreatePopover({
     setHasUserChangedTime(false);
   }, [defaultStartTime, defaultEndTime, defaultDate]);
 
-  // Deduplicate and filter patients
-  const uniquePatients = useMemo(() => {
-    const map = new Map<string, any>();
-    patients.forEach((p) => {
-      if (!p?.name) return;
-      const key = `${p.name.trim().toLowerCase()}_${(p.phone || '').trim()}`;
-      if (!map.has(key)) {
-        map.set(key, p);
+  const allTableEntriesMap = useMemo(() => {
+    const map = new Map<string, (typeof bookingContext.allTables)[number]>();
+    for (const t of bookingContext.allTables) map.set(t.table.id, t);
+    for (const lt of bookingContext.linkedTables) map.set(lt.table.id, lt);
+    return map;
+  }, [bookingContext.allTables, bookingContext.linkedTables]);
+
+  // Auto-compose appointment title from selected dynamic rows across all tables unless manually edited
+  const autoComposedTitle = useMemo(() => {
+    const orderedIds = Array.from(
+      new Set([
+        ...bookingContext.linkedTables.map((lt) => lt.table.id),
+        ...Object.keys(selectedIdsByTable),
+      ])
+    );
+    const parts: string[] = [];
+    for (const tableId of orderedIds) {
+      const entry = allTableEntriesMap.get(tableId);
+      if (!entry) continue;
+      const selIds = selectedIdsByTable[tableId] || [];
+      for (const selId of selIds) {
+        const found = entry.rows.find((r) => r.id === selId);
+        if (found?.displayTitle) parts.push(found.displayTitle);
       }
-    });
-    return Array.from(map.values());
-  }, [patients]);
-
-  const filteredPatients = useMemo(() => {
-    const q = patientSearchQuery.trim().toLowerCase();
-    if (!q) return uniquePatients.slice(0, 10);
-    return uniquePatients
-      .filter(
-        (p) =>
-          p.name?.toLowerCase().includes(q) ||
-          matchesPhoneSearch(p.phone, patientSearchQuery)
-      )
-      .slice(0, 15);
-  }, [uniquePatients, patientSearchQuery]);
-
-  // Auto-update title when patient changes
-  useEffect(() => {
-    if (patientMode === 'select' && selectedPatientId) {
-      const p = uniquePatients.find((item) => item.id === selectedPatientId);
-      if (p) setTitle(p.name);
-    } else if (patientMode === 'create') {
-      setTitle(fullName || '');
-    } else if (patientMode === 'select' && !selectedPatientId) {
-      setTitle('');
     }
-  }, [patientMode, selectedPatientId, fullName, uniquePatients]);
+    return parts.slice(0, 4).join(' • ');
+  }, [bookingContext.linkedTables, allTableEntriesMap, selectedIdsByTable]);
 
-  // Smart doctor selection when a patient is newly selected (only if no initial doctorId was passed)
   useEffect(() => {
-    if (patientMode === 'select' && selectedPatientId && !doctorId && events && events.length > 0) {
-      const patientEvents = events.filter(
-        (e: any) => e.patientId === selectedPatientId && e.doctorId
+    if (!hasEditedCustomTitle && bookingContext.hasAnyDynamicTables) {
+      setCustomTitle(autoComposedTitle);
+    }
+  }, [autoComposedTitle, hasEditedCustomTitle, bookingContext.hasAnyDynamicTables]);
+
+  // Auto-adjust appointment duration if selected dynamic rows have a duration column (e.g. Süre (Dk), Seans Süresi)
+  useEffect(() => {
+    if (hasUserChangedTime) return;
+    let totalMinutes = 0;
+    for (const [tableId, rowIds] of Object.entries(selectedIdsByTable)) {
+      if (!rowIds || rowIds.length === 0) continue;
+      const entry = allTableEntriesMap.get(tableId);
+      if (!entry) continue;
+      const durCol = entry.columns.find(
+        (c) =>
+          c.fieldType === 'number' &&
+          /(süre|sure|dakika|\bdk\b)/i.test(c.name)
       );
-      if (patientEvents.length > 0) {
-        patientEvents.sort(
-          (a, b) =>
-            new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
-        );
-        const lastDoctorId = patientEvents[0].doctorId;
-        if (lastDoctorId) {
-          setSelectedDoctorId(lastDoctorId);
+      if (!durCol) continue;
+      for (const rowId of rowIds) {
+        const row = entry.rows.find((r) => r.id === rowId);
+        const val = Number(row?.values?.[durCol.id]);
+        if (Number.isFinite(val) && val > 0) {
+          totalMinutes += val;
         }
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPatientId]);
+    if (totalMinutes >= 15) {
+      const durationHours = Math.max(0.5, Math.ceil(totalMinutes / 30) * 0.5);
+      setTimeRange((prev) => {
+        const nextEnd = Math.min(24, prev[0] + durationHours);
+        if (nextEnd === prev[1]) return prev;
+        return [prev[0], nextEnd];
+      });
+    }
+  }, [selectedIdsByTable, allTableEntriesMap, hasUserChangedTime]);
 
   const selectedDoctorObj = useMemo(() => {
     if (!selectedDoctorId) return null;
@@ -171,9 +227,6 @@ export default function QuickCreatePopover({
     return dayShifts.filter((s: any) => s.userId === selectedDoctorId);
   }, [dayShifts, selectedDoctorId]);
 
-  // When opened via "Randevu Ekle" button (isCentered),
-  // if the initial default time is outside the shift and user hasn't touched the slider yet,
-  // snap the time range into the shift start.
   useEffect(() => {
     if (!isCentered || hasUserChangedTime) {
       return;
@@ -254,12 +307,12 @@ export default function QuickCreatePopover({
         (s: any) => !s.userId || !findDoctorLeaveConflict(s.userId)
       );
       if (!hasAvailableShiftDoctor) {
-        return `Seçilen saat aralığında (${formatNumberTime(timeRange[0])} - ${formatNumberTime(timeRange[1])}) vardiyası olan hekim(ler) izinlidir. Randevu eklenemez!`;
+        return `Seçilen saat aralığında (${formatNumberTime(timeRange[0])} - ${formatNumberTime(timeRange[1])}) vardiyası olan uzman/sorumlu izinlidir. Randevu eklenemez!`;
       }
       return null;
     }
 
-    const docName = selectedDoctorObj?.name ? `Dr. ${selectedDoctorObj.name}` : 'Seçilen hekim';
+    const docName = selectedDoctorObj?.name || 'Seçilen uzman';
     if (selectedDoctorShifts.length === 0) {
       return `${docName} için bu tarihte (${defaultDate}) tanımlı vardiya bulunmamaktadır. Randevu eklenemez!`;
     }
@@ -340,104 +393,133 @@ export default function QuickCreatePopover({
     }
   }, [x, y, isCentered]);
 
-  const selectedPatientObj = useMemo(() => {
-    return uniquePatients.find((p) => p.id === selectedPatientId);
-  }, [uniquePatients, selectedPatientId]);
+  const isStandaloneMode =
+    !bookingContext.hasAnyDynamicTables || bookingContext.linkedTables.length === 0;
 
-  const ensureCreatedPatient = async (): Promise<string | null> => {
-    if (!firstName.trim()) {
-      toast.error('Onam formu göndermek için önce hastanın adını girin.');
-      return null;
+  const isSaveDisabled = useMemo(() => {
+    if (contextLoading || isSubmitting) return true;
+    if (isStandaloneMode) {
+      return !customTitle.trim();
     }
-    if (createdPatientId) {
-      await fetch(`/api/dental/patients/${createdPatientId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
-          name: fullName,
-          phone,
-          tcIdentity: tc,
-          email,
-          gender,
-          birthDate,
-        }),
-      }).catch(() => { });
-      return createdPatientId;
-    }
-    const res = await fetch('/api/dental/patients', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
-        name: fullName,
-        phone,
-        tcIdentity: tc,
-        email,
-        gender,
-        birthDate,
-        smsOptOut: !sms,
-        emailOptOut: !emailOpt,
-        whatsappOptOut: !waOpt,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      toast.error(err.error || 'Hasta oluşturulamadı');
-      return null;
-    }
-    const pt = await res.json();
-    setCreatedPatientId(pt.id);
-    return pt.id;
-  };
+    return false;
+  }, [contextLoading, isSubmitting, isStandaloneMode, customTitle]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (isSubmitting) return;
     if (shiftValidationError) {
       toast.error(`⚠️ ${shiftValidationError}`);
       return;
     }
-    if (patientMode === 'select' && !selectedPatientId) {
-      toast.error('Lütfen listeden bir hasta seçin veya Yeni Hasta Ekle sekmesine geçin.');
-      return;
-    }
-    if (patientMode === 'create' && !firstName.trim()) {
-      toast.error('Lütfen hastanın adını girin.');
+
+    if (isStandaloneMode) {
+      if (!customTitle.trim()) {
+        toast.error('Lütfen randevu başlığını veya kişi adını girin.');
+        return;
+      }
+      setIsSubmitting(true);
+      try {
+        await onSave({
+          type: 'dynamic_appointment',
+          appointmentType,
+          intakeSource: 'standalone',
+          title: customTitle.trim(),
+          phone: standalonePhone.trim() || null,
+          notes: apptNotes.trim() || null,
+          doctorId: selectedDoctorId || null,
+          startTime: formatNumberTime(timeRange[0]),
+          endTime: formatNumberTime(timeRange[1]),
+          dynamicLinks: [],
+        });
+      } finally {
+        setIsSubmitting(false);
+      }
       return;
     }
 
-    let finalTitle =
-      title ||
-      (patientMode === 'select' ? selectedPatientObj?.name : fullName) ||
-      'Yeni Randevu';
-    if (!selectedDoctorId && !finalTitle.includes('Kontrol Randevusu')) {
-      finalTitle = `${finalTitle} - Kontrol Randevusu`;
-    }
+    setIsSubmitting(true);
+    try {
+      // 1. Auto-flush any open new-record forms or dirty inline field edits inside dynamic tables
+      let finalSelectedMap = selectedIdsByTable;
+      let latestCtx: AppointmentBookingContextData = bookingContext;
 
-    onSave({
-      type: 'patient_appointment',
-      title: finalTitle,
-      patientId: patientMode === 'select' ? selectedPatientId : (createdPatientId || undefined),
-      doctorId: selectedDoctorId || null,
-      startTime: formatNumberTime(timeRange[0]),
-      endTime: formatNumberTime(timeRange[1]),
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      name: fullName,
-      phone,
-      tc,
-      tcIdentity: tc,
-      email,
-      gender,
-      birthDate,
-      sms,
-      emailOpt,
-      waOpt,
-      smsOptOut: !sms,
-      emailOptOut: !emailOpt,
-      whatsappOptOut: !waOpt,
-    });
+      if (dynamicSectionRef.current) {
+        const flushed = await dynamicSectionRef.current.flushPendingChanges();
+        if (!flushed.ok) {
+          setIsSubmitting(false);
+          return;
+        }
+        finalSelectedMap = flushed.selectedIdsByTable;
+        const refreshed = await loadBookingContext();
+        if (refreshed) latestCtx = refreshed;
+      }
+
+      // 2. Check required dynamic tables after flush
+      for (const entry of latestCtx.linkedTables) {
+        const selIds = finalSelectedMap[entry.table.id] || [];
+        if (entry.config?.isRequiredInAppointment && selIds.length === 0) {
+          toast.error(`Lütfen "${entry.table.name}" bölümünden bir kayıt seçin veya alanları doldurup ekleyin.`);
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
+      // 3. Collect all dynamic links across linked + extra tables
+      const dynamicLinks: Array<{ tableId: string; rowId: string }> = [];
+      const seenRowIds = new Set<string>();
+      let primaryPhone: string | null = standalonePhone.trim() || null;
+      const composedParts: string[] = [];
+
+      const entryMap = new Map<string, (typeof latestCtx.allTables)[number]>();
+      for (const t of latestCtx.allTables) entryMap.set(t.table.id, t);
+      for (const lt of latestCtx.linkedTables) entryMap.set(lt.table.id, lt);
+
+      const orderedTableIds = Array.from(
+        new Set([
+          ...latestCtx.linkedTables.map((lt) => lt.table.id),
+          ...Object.keys(finalSelectedMap),
+        ])
+      );
+
+      for (const tableId of orderedTableIds) {
+        const rowIds = finalSelectedMap[tableId] || [];
+        const entry = entryMap.get(tableId);
+        for (const rowId of rowIds) {
+          if (!rowId || seenRowIds.has(rowId)) continue;
+          seenRowIds.add(rowId);
+          dynamicLinks.push({ tableId, rowId });
+          const rowObj = entry?.rows.find((r) => r.id === rowId);
+          if (rowObj?.displayTitle) composedParts.push(rowObj.displayTitle);
+          if (!primaryPhone && rowObj?.phone) primaryPhone = rowObj.phone;
+        }
+      }
+
+      const effectiveAutoTitle = composedParts.slice(0, 4).join(' • ');
+      const finalTitle =
+        (hasEditedCustomTitle ? customTitle.trim() : '') ||
+        effectiveAutoTitle ||
+        customTitle.trim();
+
+      if (!finalTitle && dynamicLinks.length === 0) {
+        toast.error('Lütfen en az bir tablo kaydı seçin/ekleyin veya randevu başlığı girin.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      await onSave({
+        type: 'dynamic_appointment',
+        appointmentType,
+        intakeSource: dynamicLinks.length > 0 ? 'dynamic_table' : 'standalone',
+        title: finalTitle || 'Yeni Randevu',
+        phone: primaryPhone,
+        notes: apptNotes.trim() || null,
+        doctorId: selectedDoctorId || null,
+        startTime: formatNumberTime(timeRange[0]),
+        endTime: formatNumberTime(timeRange[1]),
+        dynamicLinks,
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // Solid Theme Tokens
@@ -488,11 +570,9 @@ export default function QuickCreatePopover({
     color: textCol,
   };
 
-  const isSaveDisabled =
-    patientMode === 'select' ? !selectedPatientId : !firstName.trim();
-
   const effectiveCentered = isCentered || isMobileScreen;
   const effectiveWidth = isMobileScreen ? 'calc(100vw - 24px)' : modalWidth;
+  const activeTableCount = bookingContext.linkedTables.length;
 
   return (
     <>
@@ -501,7 +581,7 @@ export default function QuickCreatePopover({
           position: 'fixed',
           inset: 0,
           zIndex: 100004,
-          background: 'rgba(15, 23, 42, 0.6)',
+          background: 'var(--modal-overlay)',
         }}
         {...backdropDismiss}
       />
@@ -537,33 +617,36 @@ export default function QuickCreatePopover({
             background: subCardBg,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
             <div
               style={{
                 width: '32px',
                 height: '32px',
                 borderRadius: '8px',
-                background: brandBlue,
+                background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
                 color: '#ffffff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: '1rem',
                 boxShadow: 'var(--pc-clay-primary)',
+                flexShrink: 0,
               }}
             >
-              📅
+              <Calendar size={17} color="#ffffff" />
             </div>
-            <div>
+            <div style={{ minWidth: 0 }}>
               <div
                 style={{
                   fontSize: '1.02rem',
                   fontWeight: 700,
                   color: textCol,
                   lineHeight: 1.2,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
                 }}
               >
-                {title || 'Yeni Randevu'}
+                {customTitle || autoComposedTitle || 'Yeni Randevu'}
               </div>
               <div
                 style={{
@@ -572,11 +655,15 @@ export default function QuickCreatePopover({
                   marginTop: '2px',
                 }}
               >
-                Tarih: {defaultDate}
+                Tarih: {defaultDate} •{' '}
+                {isStandaloneMode
+                  ? 'Bağımsız Randevu'
+                  : `Randevu Akışı (${activeTableCount} Tablo)`}
               </div>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
             style={{
               background: inputBg,
@@ -590,477 +677,191 @@ export default function QuickCreatePopover({
               justifyContent: 'center',
               color: textCol,
               boxShadow: 'var(--pc-clay-btn)',
+              flexShrink: 0,
             }}
           >
             <X size={16} />
           </button>
         </div>
 
-        {/* Top Mode Tabs: Hasta Randevu | Yeni Hasta Ekle */}
-        <div
-          style={{
-            display: 'flex',
-            gap: '8px',
-            padding: '12px 20px',
-            borderBottom: `1px solid ${borderCol}`,
-            background: subCardBg,
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => setPatientMode('select')}
-            style={{
-              flex: 1,
-              padding: '8px 14px',
-              borderRadius: '8px',
-              fontSize: '0.84rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-              border:
-                patientMode === 'select'
-                  ? `1px solid ${brandBlue}`
-                  : `1px solid ${borderCol}`,
-              background: patientMode === 'select' ? brandBlue : cardBg,
-              color: patientMode === 'select' ? '#ffffff' : textCol,
-              boxShadow: patientMode === 'select' ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            Kayıtlı Hasta Randevu
-          </button>
-          <button
-            type="button"
-            onClick={() => setPatientMode('create')}
-            style={{
-              flex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '6px',
-              padding: '8px 14px',
-              borderRadius: '8px',
-              fontSize: '0.84rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-              border:
-                patientMode === 'create'
-                  ? `1px solid ${brandBlue}`
-                  : `1px solid ${borderCol}`,
-              background: patientMode === 'create' ? brandBlue : cardBg,
-              color: patientMode === 'create' ? '#ffffff' : textCol,
-              boxShadow: patientMode === 'create' ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            <Plus
-              size={15}
-              color={patientMode === 'create' ? '#ffffff' : 'currentColor'}
-            />
-            <span>Yeni Hasta Randevu</span>
-          </button>
-        </div>
-
         {/* Form Body */}
         <div
           style={{
-            padding: '18px 20px',
+            padding: '16px 20px',
             flex: 1,
             overflowY: 'auto',
             background: cardBg,
           }}
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {/* PATIENT SELECTION OR FULL NEW PATIENT FORM */}
-            <div
-              style={{
-                background: subCardBg,
-                padding: '14px',
-                borderRadius: '10px',
-                border: `1px solid ${borderCol}`,
-                boxShadow: 'var(--pc-neo-subcard)',
-              }}
-            >
-              {patientMode === 'select' ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px',
-                  }}
-                >
-                  <div
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            {contextLoading ? (
+              <div
+                style={{
+                  padding: '20px',
+                  textAlign: 'center',
+                  fontSize: '0.84rem',
+                  color: mutedCol,
+                  background: subCardBg,
+                  borderRadius: '10px',
+                  border: `1px solid ${borderCol}`,
+                }}
+              >
+                Dinamik tablo ve alan bağlantıları yükleniyor…
+              </div>
+            ) : isStandaloneMode ? (
+              /* ── CASE A: 0 Dynamic Tables -> Standalone Appointment ── */
+              <div
+                style={{
+                  background: subCardBg,
+                  padding: '14px',
+                  borderRadius: '10px',
+                  border: `1px solid ${borderCol}`,
+                  boxShadow: 'var(--pc-neo-subcard)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ fontSize: '0.86rem', fontWeight: 700, color: textCol }}>
+                    Randevu Bilgileri
+                  </span>
+                  <span
                     style={{
-                      fontSize: '0.88rem',
+                      fontSize: '0.7rem',
                       fontWeight: 700,
-                      color: textCol,
-                      marginBottom: '2px',
+                      padding: '2px 8px',
+                      borderRadius: 999,
+                      background: 'var(--pc-tint)',
+                      color: 'var(--pc-tint-fg)',
+                      border: '1px solid var(--pc-border)',
                     }}
                   >
-                    Hasta Seçimi
-                  </div>
-
-                  {!selectedPatientId ? (
-                    <>
-                      <div style={{ position: 'relative' }}>
-                        <Search
-                          size={16}
-                          style={{
-                            position: 'absolute',
-                            left: 12,
-                            top: 11,
-                            color: mutedCol,
-                          }}
-                        />
-                        <input
-                          type="text"
-                          placeholder="Kayıtlı Hasta Ara (Ad veya Telefon)..."
-                          value={patientSearchQuery}
-                          onChange={(e) => setPatientSearchQuery(e.target.value)}
-                          style={{ ...inputStyle, paddingLeft: '36px' }}
-                        />
-                      </div>
-
-                      {/* Search list */}
-                      <div
-                        style={{
-                          maxHeight: '180px',
-                          overflowY: 'auto',
-                          background: cardBg,
-                          border: `1px solid ${borderCol}`,
-                          borderRadius: '8px',
-                          padding: '4px',
-                        }}
-                      >
-                        {filteredPatients.map((p, idx) => (
-                          <div
-                            key={p.id || idx}
-                            onClick={() => setSelectedPatientId(p.id)}
-                            style={{
-                              padding: '9px 12px',
-                              cursor: 'pointer',
-                              borderRadius: '6px',
-                              marginBottom: '3px',
-                              background: inputBg,
-                              border: `1px solid ${borderCol}`,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.borderColor = brandBlue;
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.borderColor = borderCol;
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '10px',
-                              }}
-                            >
-                              <div
-                                style={{
-                                  width: '28px',
-                                  height: '28px',
-                                  borderRadius: '50%',
-                                  background: brandBlue,
-                                  color: '#ffffff',
-                                  fontSize: '0.75rem',
-                                  fontWeight: 700,
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                }}
-                              >
-                                {p.name.charAt(0).toUpperCase()}
-                              </div>
-                              <div>
-                                <div
-                                  style={{
-                                    fontWeight: 600,
-                                    fontSize: '0.86rem',
-                                    color: textCol,
-                                  }}
-                                >
-                                  {p.name}
-                                </div>
-                                {p.phone && (
-                                  <div
-                                    style={{
-                                      fontSize: '0.74rem',
-                                      color: mutedCol,
-                                    }}
-                                  >
-                                    📞 {p.phone}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                            <ChevronRight size={16} color={mutedCol} />
-                          </div>
-                        ))}
-                        {filteredPatients.length === 0 && (
-                          <div
-                            style={{
-                              padding: '14px',
-                              textAlign: 'center',
-                              fontSize: '0.84rem',
-                              color: mutedCol,
-                            }}
-                          >
-                            Eşleşen hasta bulunamadı. Üstteki &ldquo;Yeni Hasta Ekle&rdquo; sekmesinden yeni kayıt açabilirsiniz.
-                          </div>
-                        )}
-                      </div>
-                    </>
-                  ) : (
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        background: inputBg,
-                        padding: '12px 14px',
-                        borderRadius: '8px',
-                        border: `1.5px solid ${brandBlue}`,
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '10px',
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: '32px',
-                            height: '32px',
-                            borderRadius: '50%',
-                            background: brandBlue,
-                            color: '#ffffff',
-                            fontSize: '0.85rem',
-                            fontWeight: 700,
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                          }}
-                        >
-                          {selectedPatientObj?.name?.charAt(0).toUpperCase() || 'H'}
-                        </div>
-                        <div>
-                          <div
-                            style={{
-                              fontSize: '0.9rem',
-                              fontWeight: 700,
-                              color: textCol,
-                            }}
-                          >
-                            {selectedPatientObj?.name}
-                          </div>
-                          <div style={{ fontSize: '0.75rem', color: mutedCol }}>
-                            {selectedPatientObj?.phone
-                              ? `📞 ${selectedPatientObj.phone}`
-                              : 'Kayıtlı Hasta'}
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedPatientId('')}
-                        style={{
-                          background: cardBg,
-                          border: '1px solid var(--danger, #ef4444)',
-                          color: 'var(--danger, #ef4444)',
-                          padding: '6px 12px',
-                          borderRadius: '6px',
-                          fontSize: '0.75rem',
-                          cursor: 'pointer',
-                          fontWeight: 700,
-                        }}
-                      >
-                        Değiştir
-                      </button>
-                    </div>
-                  )}
-                  {selectedPatientId && (
-                    <div style={{ marginTop: 4 }}>
-                      <PatientConsentPanel patientId={selectedPatientId} />
-                    </div>
-                  )}
+                    Bağımsız Mod
+                  </span>
                 </div>
-              ) : (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px',
-                  }}
-                >
-                  <div
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '2px',
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: '0.88rem',
-                        fontWeight: 700,
-                        color: textCol,
-                      }}
-                    >
-                      Yeni Hasta Bilgileri
-                    </span>
-                  </div>
 
-                  {/* Ad & Soyad */}
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr 1fr',
-                      gap: '10px',
+                <div>
+                  <label style={labelStyle}>
+                    Randevu Başlığı / Kişi Adı <span style={{ color: 'var(--danger)' }}>*</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Örn: Ahmet Yılmaz - Ön Görüşme"
+                    value={customTitle}
+                    onChange={(e) => {
+                      setHasEditedCustomTitle(true);
+                      setCustomTitle(e.target.value);
                     }}
-                  >
-                    <div>
-                      <label style={labelStyle}>
-                        Ad <span style={{ color: 'var(--danger)' }}>*</span>
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Örn: Ahmet"
-                        value={firstName}
-                        onChange={(e) => setFirstName(e.target.value)}
-                        style={inputStyle}
-                        autoFocus
-                      />
-                    </div>
-                    <div>
-                      <label style={labelStyle}>
-                        Soyad <span style={{ color: 'var(--danger)' }}>*</span>
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Örn: Yılmaz"
-                        value={lastName}
-                        onChange={(e) => setLastName(e.target.value)}
-                        style={inputStyle}
-                      />
-                    </div>
-                  </div>
+                    style={inputStyle}
+                    autoFocus
+                  />
+                </div>
 
-                  {/* Telefon & TC Kimlik No */}
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr 1fr',
-                      gap: '10px',
-                    }}
-                  >
-                    <div>
-                      <label style={labelStyle}>Telefon</label>
-                      <PhoneMaskedInput
-                        placeholder="0 (5XX) XXX XX XX"
-                        value={phone}
-                        onValueChange={setPhone}
-                        style={inputStyle}
-                      />
-                    </div>
-                    <div>
-                      <label style={labelStyle}>TC Kimlik No</label>
-                      <input
-                        type="text"
-                        maxLength={11}
-                        placeholder="TC Kimlik No"
-                        value={tc}
-                        onChange={(e) => setTc(e.target.value)}
-                        style={inputStyle}
-                      />
-                    </div>
-                  </div>
-
-                  {/* E-posta */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                   <div>
-                    <label style={labelStyle}>E-posta</label>
-                    <input
-                      type="email"
-                      placeholder="ornek@email.com"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
+                    <label style={labelStyle}>İletişim Telefonu</label>
+                    <PhoneMaskedInput
+                      placeholder="0 (5XX) XXX XX XX"
+                      value={standalonePhone}
+                      onValueChange={setStandalonePhone}
                       style={inputStyle}
                     />
                   </div>
-
-                  {/* Cinsiyet & Doğum Tarihi */}
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr 1fr',
-                      gap: '10px',
-                    }}
-                  >
-                    <div>
-                      <label style={labelStyle}>Cinsiyet</label>
-                      <select
-                        value={gender}
-                        onChange={(e) => setGender(e.target.value)}
-                        style={inputStyle}
-                      >
-                        <option value="" style={selectOptionStyle}>
-                          Seçiniz (İsteğe Bağlı)
-                        </option>
-                        <option value="Kadın" style={selectOptionStyle}>
-                          Kadın
-                        </option>
-                        <option value="Erkek" style={selectOptionStyle}>
-                          Erkek
-                        </option>
-                      </select>
-                    </div>
-                    <div>
-                      <label style={labelStyle}>Doğum Tarihi</label>
-                      <input
-                        type="date"
-                        value={birthDate}
-                        onChange={(e) => setBirthDate(e.target.value)}
-                        style={inputStyle}
-                      />
-                    </div>
+                  <div>
+                    <label style={labelStyle}>Randevu Önceliği</label>
+                    <select
+                      value={appointmentType}
+                      onChange={(e) => setAppointmentType(e.target.value)}
+                      style={inputStyle}
+                    >
+                      <option value="general" style={selectOptionStyle}>Normal</option>
+                      <option value="priority" style={selectOptionStyle}>Öncelikli</option>
+                      <option value="urgent" style={selectOptionStyle}>Acil</option>
+                      <option value="kontrol" style={selectOptionStyle}>Takip / Kontrol</option>
+                    </select>
                   </div>
+                </div>
 
-                  {/* Bildirim Onamı (KVKK) */}
-                  <div style={{ marginTop: '2px' }}>
-                    <PatientConsentPanel
-                      patientId={createdPatientId || undefined}
-                      onEnsurePatient={ensureCreatedPatient}
-                      unsavedContact={{
-                        phone,
-                        email,
-                        smsOptOut: !sms,
-                        emailOptOut: !emailOpt,
-                        whatsappOptOut: !waOpt,
+                <div>
+                  <label style={labelStyle}>Kısa Not</label>
+                  <input
+                    type="text"
+                    placeholder="İsteğe bağlı randevu notu"
+                    value={apptNotes}
+                    onChange={(e) => setApptNotes(e.target.value)}
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+            ) : (
+              /* ── CASE B: Dynamic Tables Active -> Fast Booking Flow Records Only ── */
+              <>
+                <AppointmentDynamicRecordsSection
+                  ref={dynamicSectionRef}
+                  mode="quick-create"
+                  context={bookingContext}
+                  selectedIdsByTable={selectedIdsByTable}
+                  onChangeSelectedIdsByTable={setSelectedIdsByTable}
+                  onRefreshContext={async () => {
+                    await loadBookingContext();
+                  }}
+                />
+
+                {/* Editable Appointment Title, Priority & Note */}
+                <div
+                  style={{
+                    background: subCardBg,
+                    padding: '12px 14px',
+                    borderRadius: '10px',
+                    border: `1px solid ${borderCol}`,
+                    boxShadow: 'var(--pc-neo-subcard)',
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: '10px',
+                  }}
+                >
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <label style={labelStyle}>Randevu Başlığı (Seçilen kayıtlardan otomatik oluşur)</label>
+                    <input
+                      type="text"
+                      placeholder="Otomatik başlık veya özel görüşme konusu"
+                      value={customTitle}
+                      onChange={(e) => {
+                        setHasEditedCustomTitle(true);
+                        setCustomTitle(e.target.value);
                       }}
-                      onContactChange={(contact) => {
-                        if (contact.phone !== undefined && contact.phone !== null) setPhone(contact.phone);
-                        if (contact.email !== undefined && contact.email !== null) setEmail(contact.email);
-                      }}
-                      onConsentChange={(nextOptOuts) => {
-                        setSms(!nextOptOuts.smsOptOut);
-                        setEmailOpt(!nextOptOuts.emailOptOut);
-                        setWaOpt(!nextOptOuts.whatsappOptOut);
-                      }}
+                      style={inputStyle}
+                    />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Öncelik / Tür</label>
+                    <select
+                      value={appointmentType}
+                      onChange={(e) => setAppointmentType(e.target.value)}
+                      style={inputStyle}
+                    >
+                      <option value="general" style={selectOptionStyle}>Normal</option>
+                      <option value="priority" style={selectOptionStyle}>Öncelikli</option>
+                      <option value="urgent" style={selectOptionStyle}>Acil</option>
+                      <option value="kontrol" style={selectOptionStyle}>Takip / Kontrol</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Randevu Notu</label>
+                    <input
+                      type="text"
+                      placeholder="İsteğe bağlı not"
+                      value={apptNotes}
+                      onChange={(e) => setApptNotes(e.target.value)}
+                      style={inputStyle}
                     />
                   </div>
                 </div>
-              )}
-            </div>
+              </>
+            )}
 
-            {/* DOCTOR SELECTION */}
+            {/* SPECIALIST / STAFF SELECTION */}
             <div
               style={{
                 background: subCardBg,
@@ -1090,7 +891,9 @@ export default function QuickCreatePopover({
                     color: textCol,
                   }}
                 >
-                  İlgili Doktor (Opsiyonel)
+                  {isClinicSector
+                    ? 'İlgili Çalışan / Uzman (İsteğe Bağlı)'
+                    : 'İlgili Çalışan / Sorumlu (İsteğe Bağlı)'}
                 </label>
                 {!selectedDoctorId ? (
                   dayShifts.length === 0 ? (
@@ -1175,14 +978,14 @@ export default function QuickCreatePopover({
                 }}
               >
                 <option value="" style={selectOptionStyle}>
-                  ⚠️ Doktor Seçiniz (Atama Bekliyor)
+                  ⚠️ Seçiniz (Atama Bekliyor)
                 </option>
                 {doctors.map((d) => {
-                  const targetDate = String(defaultDate || '').slice(0, 10);
+                  const tDate = String(defaultDate || '').slice(0, 10);
                   const docShifts = (shifts || []).filter(
                     (s: any) =>
                       s.userId === d.id &&
-                      String(s.date || '').slice(0, 10) === targetDate
+                      String(s.date || '').slice(0, 10) === tDate
                   );
                   const shiftSuffix =
                     docShifts.length > 0
@@ -1190,26 +993,11 @@ export default function QuickCreatePopover({
                       : ' (Vardiya Yok)';
                   return (
                     <option key={d.id} value={d.id} style={selectOptionStyle}>
-                      Dr. {d.name}{shiftSuffix}
+                      {d.name}{shiftSuffix}
                     </option>
                   );
                 })}
               </select>
-              {!selectedDoctorId && (
-                <div
-                  style={{
-                    fontSize: '0.74rem',
-                    color: '#f59e0b',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 4,
-                  }}
-                >
-                  <span>
-                    ℹ️ Doktor seçilmezse randevu &ldquo;Doktor Atanmadı&rdquo; uyarısıyla açılır.
-                  </span>
-                </div>
-              )}
               {shiftValidationError && (
                 <div
                   style={{
@@ -1291,25 +1079,6 @@ export default function QuickCreatePopover({
             flexDirection: 'column',
           }}
         >
-          {shiftValidationError && (
-            <div
-              style={{
-                padding: '9px 20px',
-                borderBottom: `1px solid ${borderCol}`,
-                background: inputBg,
-                color: 'var(--danger, #ef4444)',
-                fontSize: '0.76rem',
-                fontWeight: 700,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                lineHeight: 1.3,
-              }}
-            >
-              <span style={{ flexShrink: 0 }}>⛔</span>
-              <span>{shiftValidationError}</span>
-            </div>
-          )}
           <div
             style={{
               padding: '14px 20px',
@@ -1337,13 +1106,14 @@ export default function QuickCreatePopover({
             </button>
             <button
               type="button"
-              onClick={handleSave}
+              disabled={isSaveDisabled || Boolean(shiftValidationError)}
+              onClick={() => void handleSave()}
               style={{
                 padding: '9px 24px',
                 borderRadius: '8px',
-                background: brandBlue,
+                background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
                 color: '#ffffff',
-                border: 'none',
+                border: '1px solid #1d4ed8',
                 cursor: isSaveDisabled || Boolean(shiftValidationError) ? 'not-allowed' : 'pointer',
                 fontWeight: 700,
                 fontSize: '0.86rem',
@@ -1352,7 +1122,9 @@ export default function QuickCreatePopover({
                 transition: 'all 0.15s ease',
               }}
             >
-              Kaydet
+              <span style={{ color: '#ffffff' }}>
+                {isSubmitting ? 'Kaydediliyor…' : 'Kaydet'}
+              </span>
             </button>
           </div>
         </div>

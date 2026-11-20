@@ -17,7 +17,7 @@ export async function importLegacyIntegrations() {
       if (clinic.netgsmUsercode) {} // SQL rows use snake_case.
       if (clinic.netgsm_usercode && clinic.netgsm_password && clinic.sms_sender_id) values.push({service:'sms',config:{username:String(clinic.netgsm_usercode),password:String(clinic.netgsm_password),senderId:String(clinic.sms_sender_id)}})
       if (settings['smtp.host'] && settings['smtp.user'] && settings['smtp.pass']) values.push({service:'smtp',config:{username:settings['smtp.user'],password:settings['smtp.pass'],host:settings['smtp.host'],port:Number(settings['smtp.port'])||587,secure:settings['smtp.secure']==='ssl'?'ssl':'tls',fromAddress:settings['smtp.user'],fromName:String(clinic.name)}})
-      const host = (process.env.TELEPHONY_CLINIC_HOSTNAME || (process.env.DEFAULT_CLINIC_HOSTS || 'pineclinic.thinpine.com').split(',')[0] || 'pineclinic.thinpine.com').trim().toLowerCase()
+      const host = (process.env.TELEPHONY_CLINIC_HOSTNAME || (process.env.DEFAULT_CLINIC_HOSTS || 'axamaz.com').split(',')[0] || 'axamaz.com').trim().toLowerCase()
       const [domain] = host ? await tx.execute(sql`SELECT hostname FROM clinic_domains WHERE clinic_id=${id} AND hostname=${host} AND is_active=true`) : []
       if ((domain || clinics.length === 1) && process.env.NETGSM_SIP_USER && process.env.NETGSM_SIP_PASSWORD) {
         const numberRows = await tx.execute(sql`SELECT phone_number FROM clinic_phone_numbers WHERE clinic_id=${id} AND is_active=true`)

@@ -8,30 +8,60 @@ import {
   clinics,
   knowledgeCategories,
   staffInvitations,
+  upgradeRequests,
   users,
 } from '../schema'
 import { DEFAULT_CATEGORIES } from './categories'
-import { invalidateTenantCache, isLocalHostname, normalizeHostname } from '../../tenancy/context'
+import {
+  invalidateTenantCache,
+  isLocalHostname,
+  normalizeHostname,
+  registerAllowedTenantHostname,
+} from '../../tenancy/context'
+import {
+  getDefaultCategoriesForTemplate,
+  normalizeBusinessTemplate,
+  type BusinessTemplate,
+} from '../../platform/roles'
 import { deleteAllUserSessions } from './users'
 import { ensureStaffInvitationsSchema, getClinicSmtpStatus } from '../../services/staff-invitations'
+import {
+  PLAN_CATALOG,
+  computeClinicEntitlements,
+  ensureSubscriptionSchema,
+  normalizePlanId,
+  normalizePlanStatus,
+  type PlanId,
+  type PlanStatus,
+} from '../../services/subscriptions'
 
 const DEFAULT_ROLE_PERMISSIONS = {
-  hekim: ['calendar', 'patients', 'knowledge'],
-  sekreter: ['calendar', 'patients', 'payments'],
-  asistan: ['calendar', 'patients'],
+  calisan: ['calendar', 'patients', 'knowledge', 'klinik'],
+  hekim: ['calendar', 'patients', 'knowledge', 'klinik'],
+  sekreter: ['calendar', 'patients', 'payments', 'klinik'],
+  host: ['calendar', 'patients', 'payments', 'klinik'],
+  asistan: ['calendar', 'patients', 'klinik'],
 }
 
 export interface CreatePlatformClinicInput {
   name: string
   hostname: string
   timezone?: string
+  businessTemplate?: BusinessTemplate
+  sourceClinicId?: string
 }
 
 export interface PlatformClinicRow {
   id: string
   name: string
   hostname: string
+  domains: string[]
+  businessTemplate: BusinessTemplate
   isActive: boolean
+  planId: PlanId
+  planStatus: PlanStatus
+  trialEndsAt: string | null
+  maxUsers: number
   createdAt: string
 }
 
@@ -45,7 +75,7 @@ export class ClinicProvisioningError extends Error {
 function validateClinicName(value: string): string {
   const name = value.trim().replace(/\s+/g, ' ')
   if (name.length < 2 || name.length > 120) {
-    throw new ClinicProvisioningError('Klinik adı 2 ile 120 karakter arasında olmalıdır.')
+    throw new ClinicProvisioningError('İşletme adı 2 ile 120 karakter arasında olmalıdır.')
   }
   return name
 }
@@ -53,10 +83,10 @@ function validateClinicName(value: string): string {
 function validateHostname(value: string): string {
   const hostname = normalizeHostname(value)
   if (!hostname || hostname.length > 253) {
-    throw new ClinicProvisioningError('Geçerli bir klinik hostname değeri girin.')
+    throw new ClinicProvisioningError('Geçerli bir alan adı (hostname) değeri girin.')
   }
   if (isLocalHostname(hostname)) {
-    throw new ClinicProvisioningError('Yeni klinik için localhost yerine clinic-a.localhost gibi ayrı bir hostname kullanın.')
+    throw new ClinicProvisioningError('Yeni işletme için localhost yerine ornek.axamaz.com veya firma-a.localhost gibi ayrı bir hostname kullanın.')
   }
 
   const labels = hostname.split('.')
@@ -81,11 +111,41 @@ function validateTimezone(value: string | undefined): string {
   }
 }
 
+function isSafeCloneableSettingKey(key: string): boolean {
+  const lower = key.toLowerCase()
+  const blockedPrefixes = [
+    'smtp',
+    'netgsm',
+    'whatsapp',
+    'evolution',
+    'gemini',
+    'api_key',
+    'google_calendar',
+    'telegram',
+    'branding.title',
+  ]
+  if (blockedPrefixes.some(p => lower.startsWith(p))) return false
+  if (lower.includes('secret') || lower.includes('password') || lower.includes('token')) return false
+  return true
+}
+
+async function getPlatformClinicRow(clinicId: string): Promise<PlatformClinicRow | null> {
+  const rows = await listPlatformClinics()
+  return rows.find(r => r.id === clinicId) ?? null
+}
+
 export async function listPlatformClinics(): Promise<PlatformClinicRow[]> {
+  await ensureSubscriptionSchema()
   const rows = await db
     .select({
       id: clinics.id,
       name: clinics.name,
+      businessTemplate: clinics.businessTemplate,
+      planId: clinics.planId,
+      planStatus: clinics.planStatus,
+      trialEndsAt: clinics.trialEndsAt,
+      currentPeriodEnd: clinics.currentPeriodEnd,
+      maxUsers: clinics.maxUsers,
       hostname: sql<string | null>`(
         SELECT domain.hostname
         FROM clinic_domains AS domain
@@ -94,19 +154,43 @@ export async function listPlatformClinics(): Promise<PlatformClinicRow[]> {
         ORDER BY domain.created_at
         LIMIT 1
       )`,
+      domains: sql<string[]>`COALESCE((
+        SELECT array_agg(domain.hostname ORDER BY domain.is_primary DESC, domain.created_at ASC)
+        FROM clinic_domains AS domain
+        WHERE domain.clinic_id = ${clinics.id} AND domain.is_active = true
+      ), ARRAY[]::text[])`,
       isActive: clinics.isActive,
       createdAt: clinics.createdAt,
     })
     .from(clinics)
     .orderBy(desc(clinics.createdAt))
 
-  return rows.map(row => ({
-    id: row.id,
-    name: row.name,
-    hostname: row.hostname || '',
-    isActive: row.isActive,
-    createdAt: row.createdAt?.toISOString() || '',
-  }))
+  const now = new Date()
+  return rows.map(row => {
+    const computed = computeClinicEntitlements({
+      planId: row.planId,
+      planStatus: row.planStatus,
+      trialEndsAt: row.trialEndsAt,
+      currentPeriodEnd: row.currentPeriodEnd,
+      maxUsers: row.maxUsers,
+      activeUsersCount: 0,
+      pendingInvitesCount: 0,
+      now,
+    })
+    return {
+      id: row.id,
+      name: row.name,
+      hostname: row.hostname || row.domains?.[0] || '',
+      domains: Array.isArray(row.domains) ? row.domains.filter(Boolean) : [],
+      businessTemplate: normalizeBusinessTemplate(row.businessTemplate),
+      isActive: row.isActive,
+      planId: computed.planId,
+      planStatus: computed.planStatus,
+      trialEndsAt: computed.trialEndsAt,
+      maxUsers: computed.maxUsers,
+      createdAt: row.createdAt?.toISOString() || '',
+    }
+  })
 }
 
 export async function createPlatformClinic(
@@ -126,11 +210,30 @@ export async function createPlatformClinic(
       .where(eq(clinicDomains.hostname, hostname))
       .limit(1)
     if (existingDomain) {
-      throw new ClinicProvisioningError('Bu hostname başka bir kliniğe bağlı.', 409)
+      throw new ClinicProvisioningError('Bu hostname başka bir işletmeye bağlı.', 409)
     }
 
-    const [clinic] = await tx.insert(clinics).values({ name, isActive: true }).returning()
-    if (!clinic) throw new ClinicProvisioningError('Klinik oluşturulamadı.', 500)
+    let sourceClinic: { id: string; businessTemplate: string } | null = null
+    if (input.sourceClinicId) {
+      const [src] = await tx
+        .select({ id: clinics.id, businessTemplate: clinics.businessTemplate })
+        .from(clinics)
+        .where(eq(clinics.id, input.sourceClinicId))
+        .limit(1)
+      if (!src) {
+        throw new ClinicProvisioningError('Kopyalanacak kaynak işletme/klinik bulunamadı.', 404)
+      }
+      sourceClinic = src
+    }
+
+    const businessTemplate = input.businessTemplate
+      ? normalizeBusinessTemplate(input.businessTemplate)
+      : sourceClinic
+        ? normalizeBusinessTemplate(sourceClinic.businessTemplate)
+        : 'general'
+
+    const [clinic] = await tx.insert(clinics).values({ name, businessTemplate, isActive: true }).returning()
+    if (!clinic) throw new ClinicProvisioningError('İşletme oluşturulamadı.', 500)
 
     await tx.insert(clinicDomains).values({
       clinicId: clinic.id,
@@ -146,11 +249,34 @@ export async function createPlatformClinic(
       active: true,
     }).onConflictDoNothing()
 
-    await tx.insert(knowledgeCategories).values(
-      DEFAULT_CATEGORIES.map(category => ({ ...category, clinicId: clinic.id })),
-    ).onConflictDoNothing()
+    let seededCategories = false
+    if (sourceClinic) {
+      const srcCategories = await tx
+        .select()
+        .from(knowledgeCategories)
+        .where(eq(knowledgeCategories.clinicId, sourceClinic.id))
+      if (srcCategories.length > 0) {
+        await tx.insert(knowledgeCategories).values(
+          srcCategories.map(cat => ({
+            clinicId: clinic.id,
+            slug: cat.slug,
+            label: cat.label,
+            icon: cat.icon,
+            color: cat.color,
+            sortOrder: cat.sortOrder,
+          })),
+        ).onConflictDoNothing()
+        seededCategories = true
+      }
+    }
+    if (!seededCategories) {
+      const templateCats = getDefaultCategoriesForTemplate(businessTemplate)
+      await tx.insert(knowledgeCategories).values(
+        (templateCats.length > 0 ? templateCats : DEFAULT_CATEGORIES).map(category => ({ ...category, clinicId: clinic.id })),
+      ).onConflictDoNothing()
+    }
 
-    await tx.insert(clinicSettings).values([
+    const defaultSettings: Array<{ clinicId: string; key: string; value: string }> = [
       { clinicId: clinic.id, key: 'branding.title', value: name },
       { clinicId: clinic.id, key: 'branding.subtitle', value: 'Randevu · Bilgi' },
       { clinicId: clinic.id, key: 'clinic.timezone', value: timezone },
@@ -159,7 +285,18 @@ export async function createPlatformClinic(
       { clinicId: clinic.id, key: 'ai.greeting_outbound', value: `Merhaba, ben ${name} asistanıyım.` },
       { clinicId: clinic.id, key: 'greeting_message_outbound', value: `Merhaba, ben ${name} asistanıyım.` },
       { clinicId: clinic.id, key: 'role_tab_permissions', value: JSON.stringify(DEFAULT_ROLE_PERMISSIONS) },
-    ]).onConflictDoNothing()
+    ]
+    if (sourceClinic) {
+      const srcSettings = await tx
+        .select({ key: clinicSettings.key, value: clinicSettings.value })
+        .from(clinicSettings)
+        .where(eq(clinicSettings.clinicId, sourceClinic.id))
+      for (const s of srcSettings) {
+        if (!isSafeCloneableSettingKey(s.key)) continue
+        defaultSettings.push({ clinicId: clinic.id, key: s.key, value: s.value })
+      }
+    }
+    await tx.insert(clinicSettings).values(defaultSettings).onConflictDoNothing()
 
     await tx.insert(auditLog).values({
       clinicId: clinic.id,
@@ -167,13 +304,19 @@ export async function createPlatformClinic(
       action: 'platform.clinic.create',
       targetType: 'clinic',
       targetId: clinic.id,
-      metadata: { hostname, timezone },
+      metadata: {
+        hostname,
+        timezone,
+        businessTemplate,
+        ...(sourceClinic ? { sourceClinicId: sourceClinic.id } : {}),
+      },
     })
 
     return clinic
   })
 
   invalidateTenantCache(hostname)
+  registerAllowedTenantHostname(hostname)
   try {
     const { ensureClinicInheritedIntegrations } = await import('../../integrations/managed/store')
     await ensureClinicInheritedIntegrations(created.id)
@@ -186,9 +329,156 @@ export async function createPlatformClinic(
     id: created.id,
     name: created.name,
     hostname,
+    domains: [hostname],
+    businessTemplate: normalizeBusinessTemplate(created.businessTemplate),
     isActive: created.isActive,
+    planId: normalizePlanId(created.planId, 'kurumsal'),
+    planStatus: normalizePlanStatus(created.planStatus, 'active'),
+    trialEndsAt: created.trialEndsAt?.toISOString() ?? null,
+    maxUsers: created.maxUsers ?? 999,
     createdAt: created.createdAt?.toISOString() || '',
   }
+}
+
+export async function updatePlatformClinic(
+  clinicId: string,
+  input: { name?: string; businessTemplate?: string },
+  actorUserId: string,
+): Promise<PlatformClinicRow> {
+  const [existing] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
+  if (!existing) {
+    throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  }
+
+  const patch: Partial<{ name: string; businessTemplate: string }> = {}
+  if (input.name !== undefined) {
+    patch.name = validateClinicName(input.name)
+  }
+  if (input.businessTemplate !== undefined) {
+    patch.businessTemplate = normalizeBusinessTemplate(input.businessTemplate)
+  }
+  if (Object.keys(patch).length > 0) {
+    await db.update(clinics).set(patch).where(eq(clinics.id, clinicId))
+    await db.insert(auditLog).values({
+      clinicId,
+      userId: actorUserId,
+      action: 'platform.clinic.update',
+      targetType: 'clinic',
+      targetId: clinicId,
+      metadata: patch,
+    })
+  }
+  invalidateTenantCache()
+  const row = await getPlatformClinicRow(clinicId)
+  if (!row) throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  return row
+}
+
+export async function addPlatformClinicDomain(
+  clinicId: string,
+  input: { hostname: string; isPrimary?: boolean },
+  actorUserId: string,
+): Promise<PlatformClinicRow> {
+  const hostname = validateHostname(input.hostname)
+  const [existing] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
+  if (!existing) {
+    throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  }
+
+  await db.transaction(async tx => {
+    const [collision] = await tx
+      .select({ clinicId: clinicDomains.clinicId })
+      .from(clinicDomains)
+      .where(eq(clinicDomains.hostname, hostname))
+      .limit(1)
+    if (collision && collision.clinicId !== clinicId) {
+      throw new ClinicProvisioningError('Bu alan adı başka bir işletmeye bağlı.', 409)
+    }
+
+    if (input.isPrimary) {
+      await tx
+        .update(clinicDomains)
+        .set({ isPrimary: false })
+        .where(eq(clinicDomains.clinicId, clinicId))
+    }
+
+    if (collision && collision.clinicId === clinicId) {
+      await tx
+        .update(clinicDomains)
+        .set({
+          isActive: true,
+          ...(input.isPrimary !== undefined ? { isPrimary: Boolean(input.isPrimary) } : {}),
+        })
+        .where(eq(clinicDomains.hostname, hostname))
+    } else {
+      await tx.insert(clinicDomains).values({
+        clinicId,
+        hostname,
+        isPrimary: Boolean(input.isPrimary),
+        isActive: true,
+      })
+    }
+
+    await tx.insert(auditLog).values({
+      clinicId,
+      userId: actorUserId,
+      action: 'platform.clinic.domain.add',
+      targetType: 'clinic_domain',
+      targetId: clinicId,
+      metadata: { hostname, isPrimary: Boolean(input.isPrimary) },
+    })
+  })
+
+  invalidateTenantCache(hostname)
+  registerAllowedTenantHostname(hostname)
+  const row = await getPlatformClinicRow(clinicId)
+  if (!row) throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  return row
+}
+
+export async function removePlatformClinicDomain(
+  clinicId: string,
+  hostnameInput: string,
+  actorUserId: string,
+): Promise<PlatformClinicRow> {
+  const hostname = normalizeHostname(hostnameInput)
+  const domains = await db
+    .select()
+    .from(clinicDomains)
+    .where(and(eq(clinicDomains.clinicId, clinicId), eq(clinicDomains.isActive, true)))
+  const target = domains.find(d => d.hostname === hostname)
+  if (!target) {
+    throw new ClinicProvisioningError('Alan adı bulunamadı.', 404)
+  }
+  if (domains.length <= 1) {
+    throw new ClinicProvisioningError('İşletmenin tek alan adı silinemez. Önce yeni alan adı ekleyin.', 400)
+  }
+
+  await db.transaction(async tx => {
+    await tx.delete(clinicDomains).where(and(eq(clinicDomains.clinicId, clinicId), eq(clinicDomains.hostname, hostname)))
+    if (target.isPrimary) {
+      const replacement = domains.find(d => d.hostname !== hostname)
+      if (replacement) {
+        await tx
+          .update(clinicDomains)
+          .set({ isPrimary: true })
+          .where(and(eq(clinicDomains.clinicId, clinicId), eq(clinicDomains.hostname, replacement.hostname)))
+      }
+    }
+    await tx.insert(auditLog).values({
+      clinicId,
+      userId: actorUserId,
+      action: 'platform.clinic.domain.remove',
+      targetType: 'clinic_domain',
+      targetId: clinicId,
+      metadata: { hostname },
+    })
+  })
+
+  invalidateTenantCache(hostname)
+  const row = await getPlatformClinicRow(clinicId)
+  if (!row) throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  return row
 }
 
 export interface PlatformClinicAdminRow {
@@ -209,7 +499,7 @@ export async function setPlatformClinicActive(
 ): Promise<PlatformClinicRow> {
   const [existing] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
   if (!existing) {
-    throw new ClinicProvisioningError('Klinik bulunamadı.', 404)
+    throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
   }
 
   const [updated] = await db
@@ -243,19 +533,23 @@ export async function setPlatformClinicActive(
 
   invalidateTenantCache()
 
-  const [domainRow] = await db
-    .select({ hostname: clinicDomains.hostname })
-    .from(clinicDomains)
-    .where(and(eq(clinicDomains.clinicId, clinicId), eq(clinicDomains.isPrimary, true)))
-    .limit(1)
-
-  return {
-    id: updated!.id,
-    name: updated!.name,
-    hostname: domainRow?.hostname || '',
-    isActive: updated!.isActive,
-    createdAt: updated!.createdAt?.toISOString() || '',
+  const row = await getPlatformClinicRow(clinicId)
+  if (!row) {
+    return {
+      id: updated!.id,
+      name: updated!.name,
+      hostname: '',
+      domains: [],
+      businessTemplate: normalizeBusinessTemplate(updated!.businessTemplate),
+      isActive: updated!.isActive,
+      planId: normalizePlanId(updated!.planId, 'kurumsal'),
+      planStatus: normalizePlanStatus(updated!.planStatus, 'active'),
+      trialEndsAt: updated!.trialEndsAt?.toISOString() ?? null,
+      maxUsers: updated!.maxUsers ?? 999,
+      createdAt: updated!.createdAt?.toISOString() || '',
+    }
   }
+  return row
 }
 
 export async function listPlatformClinicAdmins(clinicId: string) {
@@ -263,7 +557,7 @@ export async function listPlatformClinicAdmins(clinicId: string) {
 
   const [clinic] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
   if (!clinic) {
-    throw new ClinicProvisioningError('Klinik bulunamadı.', 404)
+    throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
   }
 
   const [domainRow] = await db
@@ -339,7 +633,7 @@ export async function assignPlatformClinicSeedAdmin(
 ): Promise<PlatformClinicAdminRow> {
   const [clinic] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
   if (!clinic) {
-    throw new ClinicProvisioningError('Klinik bulunamadı.', 404)
+    throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
   }
 
   const name = (input.name || '').trim()
@@ -365,7 +659,7 @@ export async function assignPlatformClinicSeedAdmin(
   if (existingUser) {
     if (existingUser.isPlatformAdmin) {
       throw new ClinicProvisioningError(
-        'Bu e-posta adresi satışçı / platform yöneticisi hesabına aittir. Klinik Seed Yöneticisi için ayrı bir e-posta kullanın.',
+        'Bu e-posta adresi satışçı / platform yöneticisi hesabına aittir. İşletme Seed Yöneticisi için ayrı bir e-posta kullanın.',
         400,
       )
     }
@@ -454,7 +748,7 @@ export async function setPlatformClinicAdminActive(
     .limit(1)
 
   if (!membership) {
-    throw new ClinicProvisioningError('Bu klinikte belirtilen yönetici kaydı bulunamadı.', 404)
+    throw new ClinicProvisioningError('Bu işletmede belirtilen yönetici kaydı bulunamadı.', 404)
   }
 
   const [targetUser] = await db.select().from(users).where(eq(users.id, targetUserId)).limit(1)
@@ -464,7 +758,7 @@ export async function setPlatformClinicAdminActive(
 
   if (!active && (targetUser.id === actorUserId || targetUser.isPlatformAdmin)) {
     throw new ClinicProvisioningError(
-      'Satışçı / Platform yöneticisi hesabı dondurulamaz. Yalnızca kliniğe atanan Seed User (Yönetici) hesapları dondurulabilir.',
+      'Satışçı / Platform yöneticisi hesabı dondurulamaz. Yalnızca işletmeye atanan Seed User (Yönetici) hesapları dondurulabilir.',
       400,
     )
   }
@@ -493,4 +787,209 @@ export async function setPlatformClinicAdminActive(
   })
 
   return { id: targetUserId, active }
+}
+
+export async function updatePlatformClinicPlan(
+  clinicId: string,
+  input: {
+    planId: PlanId
+    planStatus?: PlanStatus
+    maxUsers?: number
+    extendTrialDays?: number
+  },
+  actorUserId: string,
+): Promise<PlatformClinicRow> {
+  await ensureSubscriptionSchema()
+  const [existing] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
+  if (!existing) {
+    throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  }
+
+  const planId = normalizePlanId(input.planId, 'kurumsal')
+  const planDef = PLAN_CATALOG[planId]
+  let planStatus = input.planStatus
+    ? normalizePlanStatus(input.planStatus, planId === 'demo' ? 'trial' : 'active')
+    : planId === 'demo'
+      ? 'trial'
+      : 'active'
+
+  const maxUsers =
+    typeof input.maxUsers === 'number' && Number.isFinite(input.maxUsers) && input.maxUsers > 0
+      ? Math.round(input.maxUsers)
+      : planDef.maxUsers
+
+  const now = new Date()
+  let trialEndsAt = existing.trialEndsAt
+  if (typeof input.extendTrialDays === 'number' && input.extendTrialDays > 0) {
+    const baseMs = Math.max(now.getTime(), existing.trialEndsAt?.getTime() || 0)
+    trialEndsAt = new Date(baseMs + Math.round(input.extendTrialDays) * 24 * 60 * 60 * 1000)
+    if (planId === 'demo' && !input.planStatus) {
+      planStatus = 'trial'
+    }
+  } else if (planId === 'demo' && !trialEndsAt) {
+    trialEndsAt = new Date(now.getTime() + planDef.trialDays * 24 * 60 * 60 * 1000)
+  }
+
+  let currentPeriodEnd = existing.currentPeriodEnd
+  if (planId === 'pro' && planStatus === 'active' && (!currentPeriodEnd || currentPeriodEnd <= now)) {
+    currentPeriodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)
+  }
+
+  await db
+    .update(clinics)
+    .set({
+      planId,
+      planStatus,
+      maxUsers,
+      trialEndsAt,
+      currentPeriodEnd,
+    })
+    .where(eq(clinics.id, clinicId))
+
+  await db.insert(auditLog).values({
+    clinicId,
+    userId: actorUserId,
+    action: 'platform.clinic.plan.update',
+    targetType: 'clinic',
+    targetId: clinicId,
+    metadata: {
+      planId,
+      planStatus,
+      maxUsers,
+      extendTrialDays: input.extendTrialDays ?? null,
+    },
+  })
+
+  invalidateTenantCache()
+  const row = await getPlatformClinicRow(clinicId)
+  if (!row) throw new ClinicProvisioningError('İşletme bulunamadı.', 404)
+  return row
+}
+
+export async function listPlatformUpgradeRequests() {
+  await ensureSubscriptionSchema()
+  const rows = await db
+    .select({
+      id: upgradeRequests.id,
+      clinicId: upgradeRequests.clinicId,
+      clinicName: clinics.name,
+      clinicPlanId: clinics.planId,
+      clinicPlanStatus: clinics.planStatus,
+      requestedBy: upgradeRequests.requestedBy,
+      requesterName: users.name,
+      requesterEmail: users.email,
+      requesterPhone: users.phone,
+      requestType: upgradeRequests.requestType,
+      requestedPlan: upgradeRequests.requestedPlan,
+      contactName: upgradeRequests.contactName,
+      contactEmail: upgradeRequests.contactEmail,
+      contactPhone: upgradeRequests.contactPhone,
+      companyName: upgradeRequests.companyName,
+      notes: upgradeRequests.notes,
+      status: upgradeRequests.status,
+      handledBy: upgradeRequests.handledBy,
+      handledAt: upgradeRequests.handledAt,
+      createdAt: upgradeRequests.createdAt,
+      updatedAt: upgradeRequests.updatedAt,
+    })
+    .from(upgradeRequests)
+    .leftJoin(clinics, eq(upgradeRequests.clinicId, clinics.id))
+    .leftJoin(users, eq(upgradeRequests.requestedBy, users.id))
+    .orderBy(desc(upgradeRequests.createdAt))
+    .limit(200)
+
+  return rows.map((r) => ({
+    id: r.id,
+    clinicId: r.clinicId,
+    clinicName: r.clinicName || r.companyName || null,
+    clinicPlanId: r.clinicPlanId ? normalizePlanId(r.clinicPlanId, 'kurumsal') : null,
+    clinicPlanStatus: r.clinicPlanStatus || null,
+    requestedBy: r.requestedBy,
+    requesterName: r.requesterName || r.contactName || null,
+    requesterEmail: r.requesterEmail || r.contactEmail || null,
+    requesterPhone: r.requesterPhone || r.contactPhone || null,
+    requestType: r.requestType,
+    requestedPlan: r.requestedPlan,
+    contactName: r.contactName || r.requesterName || null,
+    contactEmail: r.contactEmail || r.requesterEmail || null,
+    contactPhone: r.contactPhone || r.requesterPhone || null,
+    companyName: r.companyName || r.clinicName || null,
+    notes: r.notes,
+    status: r.status,
+    handledBy: r.handledBy,
+    handledAt: r.handledAt?.toISOString() ?? null,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
+  }))
+}
+
+export async function updatePlatformUpgradeRequest(
+  requestId: string,
+  input: {
+    status: 'pending' | 'contacted' | 'approved' | 'rejected'
+    applyPlan?: PlanId
+  },
+  actorUserId: string,
+) {
+  await ensureSubscriptionSchema()
+  const now = new Date()
+
+  const updated = await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(upgradeRequests)
+      .where(eq(upgradeRequests.id, requestId))
+      .limit(1)
+
+    if (!existing) {
+      throw new ClinicProvisioningError('Yükseltme başvurusu bulunamadı.', 404)
+    }
+
+    const [saved] = await tx
+      .update(upgradeRequests)
+      .set({
+        status: input.status,
+        handledBy: actorUserId,
+        handledAt: now,
+        updatedAt: now,
+      })
+      .where(eq(upgradeRequests.id, requestId))
+      .returning()
+
+    if (input.applyPlan && existing.clinicId) {
+      const targetPlan = normalizePlanId(input.applyPlan, 'pro')
+      const planDef = PLAN_CATALOG[targetPlan]
+      await tx
+        .update(clinics)
+        .set({
+          planId: targetPlan,
+          planStatus: targetPlan === 'demo' ? 'trial' : 'active',
+          maxUsers: planDef.maxUsers,
+          ...(targetPlan === 'pro'
+            ? { currentPeriodEnd: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000) }
+            : {}),
+        })
+        .where(eq(clinics.id, existing.clinicId))
+    }
+
+    await tx.insert(auditLog).values({
+      clinicId: existing.clinicId,
+      userId: actorUserId,
+      action: 'platform.upgrade_request.update',
+      targetType: 'upgrade_request',
+      targetId: requestId,
+      metadata: {
+        status: input.status,
+        applyPlan: input.applyPlan ?? null,
+      },
+    })
+
+    return saved!
+  })
+
+  if (input.applyPlan) {
+    invalidateTenantCache()
+  }
+
+  return updated
 }

@@ -6,11 +6,14 @@ import { getSetting, setSetting } from '../db/repositories/settings'
 import type { Config } from '../integrations/managed/model'
 import { activeConfig, decrypt, getRow, resolveEffectiveConfig } from '../integrations/managed/store'
 import { sendEmail } from './email'
+import { coreRoleLabelTr, normalizePanelTabId } from '../platform/roles'
 
 const hashToken = (value: string) => createHash('sha256').update(value).digest('hex')
 
 export const DEFAULT_STAFF_KVKK_TEXT =
-  '6698 sayılı Kişisel Verilerin Korunması Kanunu (KVKK) kapsamında; kliniğimiz bünyesinde yürütülen sağlık hizmetleri, randevu ve vardiya planlaması, hasta tedavi süreçleri ve kurumsal iletişim faaliyetlerinin gerçekleştirilmesi amacıyla kimlik, iletişim, mesleki uzmanlık ve işlem güvenliği verilerimin işlenmesine, güvenli klinik sisteminde saklanmasına ve görevim kapsamında eriştiğim hasta/klinik verilerinin gizliliğini koruyacağıma ilişkin aydınlatma metnini okudum, anladım ve açık rızamla onaylıyorum.'
+  '6698 sayılı Kişisel Verilerin Korunması Kanunu (KVKK) kapsamında; işletmemiz bünyesinde yürütülen hizmet, operasyon, randevu ve vardiya planlaması, müşteri/danışan süreçleri ve kurumsal iletişim faaliyetlerinin gerçekleştirilmesi amacıyla kimlik, iletişim, mesleki uzmanlık ve işlem güvenliği verilerimin işlenmesine, güvenli işletme sisteminde saklanmasına ve görevim kapsamında eriştiğim kurumsal ve kişisel verilerin gizliliğini koruyacağıma ilişkin aydınlatma metnini okudum, anladım ve açık rızamla onaylıyorum.'
+
+export type ConfigurableStaffRoleKey = string
 
 export interface RoleStaffPermissions {
   viewShiftPlanner: boolean
@@ -18,31 +21,137 @@ export interface RoleStaffPermissions {
   manageLeaves: boolean
   editClinicWorkingHours: boolean
   manageStaff: boolean
+  manageDynamicTables: boolean
+  showOnCalendar?: boolean
 }
 
-export interface ClinicStaffPermissionsConfig {
-  hekim: RoleStaffPermissions
-  host: RoleStaffPermissions
+export type ClinicStaffPermissionsConfig = Record<string, RoleStaffPermissions>
+
+export interface UserAccessOverride {
+  allowedTabs: string[]
+  staffPermissions: RoleStaffPermissions
+}
+
+export interface ClinicUserPermissionsMap {
+  byUserId: Record<string, UserAccessOverride>
+  byInviteEmail: Record<string, UserAccessOverride>
+}
+
+export const ASSIGNABLE_PANEL_TABS = ['calendar', 'patients', 'payments', 'stok', 'knowledge', 'klinik'] as const
+
+export const DEFAULT_CUSTOM_ROLE_TABS: string[] = ['calendar', 'patients', 'klinik']
+
+export const DEFAULT_CUSTOM_ROLE_STAFF_PERMISSIONS: RoleStaffPermissions = {
+  viewShiftPlanner: true,
+  editShifts: false,
+  manageLeaves: true,
+  editClinicWorkingHours: false,
+  manageStaff: false,
+  manageDynamicTables: false,
+  showOnCalendar: true,
+}
+
+export const DEFAULT_ROLE_TAB_PERMISSIONS: Record<string, string[]> = {
+  calisan: ['calendar', 'patients', 'knowledge', 'klinik'],
+  hekim: ['calendar', 'patients', 'knowledge', 'klinik'],
+  sekreter: ['calendar', 'patients', 'payments', 'klinik'],
+  asistan: ['calendar', 'patients', 'klinik'],
 }
 
 export const DEFAULT_CLINIC_STAFF_PERMISSIONS: ClinicStaffPermissionsConfig = {
+  calisan: {
+    viewShiftPlanner: true,
+    editShifts: false,
+    manageLeaves: true,
+    editClinicWorkingHours: false,
+    manageStaff: false,
+    manageDynamicTables: false,
+    showOnCalendar: true,
+  },
   hekim: {
     viewShiftPlanner: true,
     editShifts: false,
     manageLeaves: true,
     editClinicWorkingHours: false,
     manageStaff: false,
+    manageDynamicTables: false,
+    showOnCalendar: true,
   },
   host: {
     viewShiftPlanner: true,
-    editShifts: false,
+    editShifts: true,
     manageLeaves: true,
     editClinicWorkingHours: false,
     manageStaff: false,
+    manageDynamicTables: false,
+    showOnCalendar: false,
+  },
+  sekreter: {
+    viewShiftPlanner: true,
+    editShifts: true,
+    manageLeaves: true,
+    editClinicWorkingHours: false,
+    manageStaff: false,
+    manageDynamicTables: false,
+    showOnCalendar: false,
+  },
+  asistan: {
+    viewShiftPlanner: true,
+    editShifts: false,
+    manageLeaves: false,
+    editClinicWorkingHours: false,
+    manageStaff: false,
+    manageDynamicTables: false,
+    showOnCalendar: false,
   },
 }
 
+export const FULL_ADMIN_STAFF_PERMISSIONS: RoleStaffPermissions = {
+  viewShiftPlanner: true,
+  editShifts: true,
+  manageLeaves: true,
+  editClinicWorkingHours: true,
+  manageStaff: true,
+  manageDynamicTables: true,
+  showOnCalendar: false,
+}
+
 const PERMISSIONS_SETTING_KEY = 'rbac.klinik_personel_permissions'
+const ROLE_TABS_SETTING_KEY = 'role_tab_permissions'
+const USER_ACCESS_SETTING_KEY = 'rbac.user_permissions'
+
+const RESERVED_ADMIN_ROLE_KEYS = new Set([
+  'yonetici',
+  'yönetici',
+  'super_admin',
+  'superadmin',
+  'moderator',
+  'moderatör',
+  'isletme yoneticisi',
+  'işletme yöneticisi',
+  'klinik yoneticisi',
+  'klinik yöneticisi',
+])
+
+export function isReservedAdminRole(role: string | undefined | null): boolean {
+  const cleaned = String(role || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLocaleLowerCase('tr-TR')
+  if (!cleaned) return false
+  return RESERVED_ADMIN_ROLE_KEYS.has(cleaned) || RESERVED_ADMIN_ROLE_KEYS.has(String(role || '').trim().toLowerCase())
+}
+
+export function normalizeConfigurableRole(role: string | undefined | null): string {
+  const cleaned = String(role || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLocaleLowerCase('tr-TR')
+  if (!cleaned) return 'calisan'
+  if (cleaned === 'host') return 'sekreter'
+  if (cleaned === 'uzman') return 'calisan'
+  return cleaned
+}
 
 let schemaReady: Promise<void> | undefined
 
@@ -85,7 +194,101 @@ function sanitizeRolePerms(raw: any, fallback: RoleStaffPermissions): RoleStaffP
     manageLeaves: typeof raw.manageLeaves === 'boolean' ? raw.manageLeaves : fallback.manageLeaves,
     editClinicWorkingHours: typeof raw.editClinicWorkingHours === 'boolean' ? raw.editClinicWorkingHours : fallback.editClinicWorkingHours,
     manageStaff: typeof raw.manageStaff === 'boolean' ? raw.manageStaff : fallback.manageStaff,
+    manageDynamicTables: typeof raw.manageDynamicTables === 'boolean' ? raw.manageDynamicTables : fallback.manageDynamicTables,
+    ...(typeof raw.showOnCalendar === 'boolean'
+      ? { showOnCalendar: raw.showOnCalendar }
+      : typeof fallback.showOnCalendar === 'boolean'
+        ? { showOnCalendar: fallback.showOnCalendar }
+        : {}),
   }
+}
+
+export function sanitizeAllowedTabs(raw: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(raw)) return [...fallback]
+  const validSet = new Set<string>(ASSIGNABLE_PANEL_TABS)
+  const canonicalToPanel: Record<string, string> = {
+    records: 'patients',
+    finance: 'payments',
+    inventory: 'stok',
+    team: 'klinik',
+  }
+  const cleaned = Array.from(
+    new Set(
+      raw
+        .map((item) => {
+          if (typeof item !== 'string') return ''
+          const normalized = normalizePanelTabId(item)
+          const rawTrimmed = item.trim().toLowerCase()
+          return validSet.has(rawTrimmed) ? rawTrimmed : (canonicalToPanel[normalized] || '')
+        })
+        .filter((item) => validSet.has(item)),
+    ),
+  )
+  return cleaned.length > 0 ? cleaned : ['calendar']
+}
+
+export async function getClinicRoleTabPermissions(clinicId: string): Promise<Record<string, string[]>> {
+  try {
+    const raw = await getSetting(ROLE_TABS_SETTING_KEY, clinicId)
+    if (!raw) {
+      return {
+        calisan: [...DEFAULT_ROLE_TAB_PERMISSIONS.calisan],
+        hekim: [...DEFAULT_ROLE_TAB_PERMISSIONS.hekim],
+        sekreter: [...DEFAULT_ROLE_TAB_PERMISSIONS.sekreter],
+        host: [...DEFAULT_ROLE_TAB_PERMISSIONS.sekreter],
+        asistan: [...DEFAULT_ROLE_TAB_PERMISSIONS.asistan],
+      }
+    }
+    const parsed = JSON.parse(raw)
+    const sekreterTabs = sanitizeAllowedTabs(
+      parsed?.sekreter ?? parsed?.host,
+      DEFAULT_ROLE_TAB_PERMISSIONS.sekreter,
+    )
+    const hekimTabs = sanitizeAllowedTabs(parsed?.hekim ?? parsed?.calisan, DEFAULT_ROLE_TAB_PERMISSIONS.hekim)
+    return {
+      calisan: sanitizeAllowedTabs(parsed?.calisan ?? parsed?.hekim, DEFAULT_ROLE_TAB_PERMISSIONS.calisan),
+      hekim: hekimTabs,
+      sekreter: sekreterTabs,
+      host: sanitizeAllowedTabs(parsed?.host ?? parsed?.sekreter, sekreterTabs),
+      asistan: sanitizeAllowedTabs(parsed?.asistan, DEFAULT_ROLE_TAB_PERMISSIONS.asistan),
+    }
+  } catch {
+    return {
+      calisan: [...DEFAULT_ROLE_TAB_PERMISSIONS.calisan],
+      hekim: [...DEFAULT_ROLE_TAB_PERMISSIONS.hekim],
+      sekreter: [...DEFAULT_ROLE_TAB_PERMISSIONS.sekreter],
+      host: [...DEFAULT_ROLE_TAB_PERMISSIONS.sekreter],
+      asistan: [...DEFAULT_ROLE_TAB_PERMISSIONS.asistan],
+    }
+  }
+}
+
+export async function saveClinicRoleTabPermissions(
+  clinicId: string,
+  input: any,
+): Promise<Record<string, string[]>> {
+  const current = await getClinicRoleTabPermissions(clinicId)
+  const sekreterTabs =
+    input?.sekreter !== undefined
+      ? sanitizeAllowedTabs(input.sekreter, current.sekreter)
+      : input?.host !== undefined
+        ? sanitizeAllowedTabs(input.host, current.host)
+        : current.sekreter
+  const calisanTabs = input?.calisan !== undefined
+    ? sanitizeAllowedTabs(input.calisan, current.calisan ?? current.hekim)
+    : (current.calisan ?? current.hekim)
+  const hekimTabs = input?.hekim !== undefined
+    ? sanitizeAllowedTabs(input.hekim, current.hekim)
+    : current.hekim
+  const next = {
+    calisan: calisanTabs,
+    hekim: hekimTabs,
+    sekreter: sekreterTabs,
+    host: sekreterTabs,
+    asistan: input?.asistan !== undefined ? sanitizeAllowedTabs(input.asistan, current.asistan) : current.asistan,
+  }
+  await setSetting(ROLE_TABS_SETTING_KEY, JSON.stringify(next), clinicId)
+  return next
 }
 
 export async function getClinicStaffPermissions(clinicId: string): Promise<ClinicStaffPermissionsConfig> {
@@ -93,9 +296,16 @@ export async function getClinicStaffPermissions(clinicId: string): Promise<Clini
     const raw = await getSetting(PERMISSIONS_SETTING_KEY, clinicId)
     if (!raw) return DEFAULT_CLINIC_STAFF_PERMISSIONS
     const parsed = JSON.parse(raw)
+    const sekreterPerms = sanitizeRolePerms(
+      parsed?.sekreter ?? parsed?.host,
+      DEFAULT_CLINIC_STAFF_PERMISSIONS.sekreter,
+    )
     return {
-      hekim: sanitizeRolePerms(parsed?.hekim, DEFAULT_CLINIC_STAFF_PERMISSIONS.hekim),
-      host: sanitizeRolePerms(parsed?.host, DEFAULT_CLINIC_STAFF_PERMISSIONS.host),
+      calisan: sanitizeRolePerms(parsed?.calisan ?? parsed?.hekim, DEFAULT_CLINIC_STAFF_PERMISSIONS.calisan),
+      hekim: sanitizeRolePerms(parsed?.hekim ?? parsed?.calisan, DEFAULT_CLINIC_STAFF_PERMISSIONS.hekim),
+      host: sanitizeRolePerms(parsed?.host ?? parsed?.sekreter, sekreterPerms),
+      sekreter: sekreterPerms,
+      asistan: sanitizeRolePerms(parsed?.asistan, DEFAULT_CLINIC_STAFF_PERMISSIONS.asistan),
     }
   } catch {
     return DEFAULT_CLINIC_STAFF_PERMISSIONS
@@ -103,24 +313,141 @@ export async function getClinicStaffPermissions(clinicId: string): Promise<Clini
 }
 
 export async function saveClinicStaffPermissions(clinicId: string, input: any): Promise<ClinicStaffPermissionsConfig> {
+  const current = await getClinicStaffPermissions(clinicId)
+  const sekreterPerms = sanitizeRolePerms(
+    input?.sekreter ?? input?.host,
+    current.sekreter,
+  )
   const next: ClinicStaffPermissionsConfig = {
-    hekim: sanitizeRolePerms(input?.hekim, DEFAULT_CLINIC_STAFF_PERMISSIONS.hekim),
-    host: sanitizeRolePerms(input?.host, DEFAULT_CLINIC_STAFF_PERMISSIONS.host),
+    calisan: input?.calisan ? sanitizeRolePerms(input.calisan, current.calisan ?? current.hekim) : (current.calisan ?? current.hekim),
+    hekim: input?.hekim ? sanitizeRolePerms(input.hekim, current.hekim) : current.hekim,
+    host: sekreterPerms,
+    sekreter: sekreterPerms,
+    asistan: input?.asistan ? sanitizeRolePerms(input.asistan, current.asistan) : current.asistan,
   }
   await setSetting(PERMISSIONS_SETTING_KEY, JSON.stringify(next), clinicId)
   return next
+}
+
+export async function getClinicUserPermissionsMap(clinicId: string): Promise<ClinicUserPermissionsMap> {
+  try {
+    const raw = await getSetting(USER_ACCESS_SETTING_KEY, clinicId)
+    if (!raw) return { byUserId: {}, byInviteEmail: {} }
+    const parsed = JSON.parse(raw)
+    return {
+      byUserId: parsed?.byUserId && typeof parsed.byUserId === 'object' ? parsed.byUserId : {},
+      byInviteEmail: parsed?.byInviteEmail && typeof parsed.byInviteEmail === 'object' ? parsed.byInviteEmail : {},
+    }
+  } catch {
+    return { byUserId: {}, byInviteEmail: {} }
+  }
+}
+
+async function persistClinicUserPermissionsMap(clinicId: string, map: ClinicUserPermissionsMap): Promise<void> {
+  await setSetting(USER_ACCESS_SETTING_KEY, JSON.stringify(map), clinicId)
+}
+
+export async function getEffectiveUserAccess(
+  clinicId: string,
+  target: { id?: string | null; role?: string | null },
+): Promise<UserAccessOverride> {
+  const role = target.role || 'sekreter'
+  if (role === 'yonetici' || role === 'moderator') {
+    return {
+      allowedTabs: [...ASSIGNABLE_PANEL_TABS, 'integrations'],
+      staffPermissions: { ...FULL_ADMIN_STAFF_PERMISSIONS },
+    }
+  }
+
+  const normalizedRole = normalizeConfigurableRole(role)
+  const [roleTabs, roleStaffPerms, userMap] = await Promise.all([
+    getClinicRoleTabPermissions(clinicId),
+    getClinicStaffPermissions(clinicId),
+    getClinicUserPermissionsMap(clinicId),
+  ])
+
+  const defaultTabs = roleTabs[normalizedRole] || DEFAULT_ROLE_TAB_PERMISSIONS[normalizedRole]
+  const defaultStaff = roleStaffPerms[normalizedRole] || DEFAULT_CLINIC_STAFF_PERMISSIONS[normalizedRole]
+
+  const override = target.id ? userMap.byUserId[target.id] : undefined
+  if (!override) {
+    return {
+      allowedTabs: [...defaultTabs],
+      staffPermissions: { ...defaultStaff },
+    }
+  }
+
+  return {
+    allowedTabs: sanitizeAllowedTabs(override.allowedTabs, defaultTabs),
+    staffPermissions: sanitizeRolePerms(override.staffPermissions, defaultStaff),
+  }
+}
+
+export async function saveUserAccessOverride(
+  clinicId: string,
+  userId: string,
+  input: { allowedTabs?: unknown; staffPermissions?: unknown },
+  fallbackRole: string,
+): Promise<UserAccessOverride> {
+  const normalizedRole = normalizeConfigurableRole(fallbackRole)
+  const [roleTabs, roleStaffPerms, userMap] = await Promise.all([
+    getClinicRoleTabPermissions(clinicId),
+    getClinicStaffPermissions(clinicId),
+    getClinicUserPermissionsMap(clinicId),
+  ])
+  const existing = userMap.byUserId[userId]
+  const fallbackTabs = existing?.allowedTabs || roleTabs[normalizedRole] || DEFAULT_ROLE_TAB_PERMISSIONS[normalizedRole]
+  const fallbackStaff = existing?.staffPermissions || roleStaffPerms[normalizedRole] || DEFAULT_CLINIC_STAFF_PERMISSIONS[normalizedRole]
+
+  const nextEntry: UserAccessOverride = {
+    allowedTabs: input.allowedTabs !== undefined ? sanitizeAllowedTabs(input.allowedTabs, fallbackTabs) : sanitizeAllowedTabs(fallbackTabs, DEFAULT_ROLE_TAB_PERMISSIONS[normalizedRole]),
+    staffPermissions: input.staffPermissions !== undefined ? sanitizeRolePerms(input.staffPermissions, fallbackStaff) : sanitizeRolePerms(fallbackStaff, DEFAULT_CLINIC_STAFF_PERMISSIONS[normalizedRole]),
+  }
+
+  userMap.byUserId[userId] = nextEntry
+  await persistClinicUserPermissionsMap(clinicId, userMap)
+  return nextEntry
+}
+
+export async function saveInviteAccessOverride(
+  clinicId: string,
+  email: string,
+  input: { allowedTabs?: unknown; staffPermissions?: unknown },
+  fallbackRole: string,
+): Promise<UserAccessOverride> {
+  const cleanEmail = String(email || '').toLowerCase().trim()
+  const normalizedRole = normalizeConfigurableRole(fallbackRole)
+  const [roleTabs, roleStaffPerms, userMap] = await Promise.all([
+    getClinicRoleTabPermissions(clinicId),
+    getClinicStaffPermissions(clinicId),
+    getClinicUserPermissionsMap(clinicId),
+  ])
+  const fallbackTabs = roleTabs[normalizedRole] || DEFAULT_ROLE_TAB_PERMISSIONS[normalizedRole]
+  const fallbackStaff = roleStaffPerms[normalizedRole] || DEFAULT_CLINIC_STAFF_PERMISSIONS[normalizedRole]
+
+  const nextEntry: UserAccessOverride = {
+    allowedTabs: input.allowedTabs !== undefined ? sanitizeAllowedTabs(input.allowedTabs, fallbackTabs) : [...fallbackTabs],
+    staffPermissions: input.staffPermissions !== undefined ? sanitizeRolePerms(input.staffPermissions, fallbackStaff) : { ...fallbackStaff },
+  }
+
+  if (cleanEmail) {
+    userMap.byInviteEmail[cleanEmail] = nextEntry
+    await persistClinicUserPermissionsMap(clinicId, userMap)
+  }
+  return nextEntry
 }
 
 export async function hasClinicStaffPermission(
   clinicId: string,
   userRole: string | undefined | null,
   permission: keyof RoleStaffPermissions,
+  userId?: string | null,
 ): Promise<boolean> {
   if (!userRole) return false
   if (userRole === 'yonetici' || userRole === 'moderator') return true
-  if (userRole !== 'hekim' && userRole !== 'host') return false
-  const config = await getClinicStaffPermissions(clinicId)
-  return Boolean(config[userRole]?.[permission])
+  if (!['calisan', 'hekim', 'host', 'sekreter', 'asistan'].includes(userRole)) return false
+  const effective = await getEffectiveUserAccess(clinicId, { id: userId, role: userRole })
+  return Boolean(effective.staffPermissions?.[permission])
 }
 
 export async function getClinicSmtpStatus(clinicId: string) {
@@ -143,7 +470,7 @@ export async function getClinicSmtpStatus(clinicId: string) {
         enabled: false,
         health,
         fromAddress: null,
-        error: 'Kliniğin E-posta (SMTP) entegrasyonu henüz tamamlanmamış. Yeni hekim veya personel davet edebilmek için önce E-posta entegrasyonunu tamamlamanız gerekmektedir.',
+        error: 'İşletmenin E-posta (SMTP) entegrasyonu henüz tamamlanmamış. Yeni çalışan davet edebilmek için önce E-posta entegrasyonunu tamamlamanız gerekmektedir.',
       }
     }
 
@@ -178,10 +505,8 @@ export async function getClinicSmtpStatus(clinicId: string) {
   }
 }
 
-function roleLabelTr(role: string): string {
-  if (role === 'hekim') return 'Hekim'
-  if (role === 'yonetici') return 'Yönetici'
-  return 'Kayıt / Resepsiyon Personeli'
+export function roleLabelTr(role: string, specialty?: string | null): string {
+  return coreRoleLabelTr(role, specialty)
 }
 
 export async function createStaffInvitation(input: {
@@ -198,7 +523,7 @@ export async function createStaffInvitation(input: {
 
   const cleanName = String(input.name || '').trim()
   const cleanEmail = String(input.email || '').toLowerCase().trim()
-  const cleanRole = String(input.role || 'hekim').trim()
+  const cleanRole = String(input.role || 'calisan').trim()
 
   if (!cleanName || cleanName.length < 2) {
     throw new Error('Personelin adı ve soyadı zorunludur.')
@@ -206,7 +531,7 @@ export async function createStaffInvitation(input: {
   if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
     throw new Error('Geçerli bir e-posta adresi girin.')
   }
-  if (!['hekim', 'host', 'yonetici'].includes(cleanRole)) {
+  if (!['calisan', 'hekim', 'sekreter', 'host', 'asistan', 'yonetici'].includes(cleanRole)) {
     throw new Error('Geçersiz personel rolü seçildi.')
   }
 
@@ -225,12 +550,12 @@ export async function createStaffInvitation(input: {
       .where(and(eq(clinicMemberships.clinicId, input.clinicId), eq(clinicMemberships.userId, existingUser.id)))
       .limit(1)
     if (existingMembership) {
-      throw new Error('Bu e-posta adresine sahip kullanıcı zaten kliniğinizde kayıtlıdır.')
+      throw new Error('Bu e-posta adresine sahip kullanıcı zaten işletmenizde kayıtlıdır.')
     }
   }
 
   const [clinic] = await db.select().from(clinics).where(eq(clinics.id, input.clinicId)).limit(1)
-  const clinicName = clinic?.name || 'Klinik Yönetim Sistemi'
+  const clinicName = clinic?.name || 'İşletme Yönetim Sistemi'
 
   const token = randomBytes(32).toString('base64url')
   const tokenHash = hashToken(token)
@@ -262,8 +587,8 @@ export async function createStaffInvitation(input: {
       email: cleanEmail,
       name: cleanName,
       role: cleanRole,
-      specialty: cleanRole === 'hekim' ? (input.specialty?.trim() || null) : null,
-      color: cleanRole === 'hekim' ? (input.color?.trim() || '#2563eb') : null,
+      specialty: cleanRole !== 'yonetici' ? (input.specialty?.trim() || null) : null,
+      color: cleanRole !== 'yonetici' ? (input.color?.trim() || '#2563eb') : null,
       tokenHash,
       status: 'pending',
       kvkkTextVersion: kvkkVersion,
@@ -273,10 +598,10 @@ export async function createStaffInvitation(input: {
     })
     .returning()
 
-  // Send invitation email via clinic SMTP
-  const roleLabel = roleLabelTr(cleanRole)
+  // Send invitation email via tenant SMTP
+  const roleLabel = roleLabelTr(cleanRole, input.specialty)
   const subject = `${clinicName} — Kullanıcı Hesabı ve KVKK Onay Daveti`
-  const text = `Merhaba ${cleanName},\n\n${clinicName} tarafından "${roleLabel}" rolüyle klinik yönetim sistemine davet edildiniz.\n\nKVKK aydınlatma metnini onaylamak ve kendi şifrenizi belirleyerek hesabınızı aktifleştirmek için aşağıdaki bağlantıyı açın (72 saat geçerlidir):\n\n${inviteLink}\n\nİyi çalışmalar dileriz.`
+  const text = `Merhaba ${cleanName},\n\n${clinicName} tarafından "${roleLabel}" rolüyle işletme yönetim sistemine davet edildiniz.\n\nKVKK aydınlatma metnini onaylamak ve kendi şifrenizi belirleyerek hesabınızı aktifleştirmek için aşağıdaki bağlantıyı açın (72 saat geçerlidir):\n\n${inviteLink}\n\nİyi çalışmalar dileriz.`
   const html = `
     <div style="font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #f4f8fe; border: 1px solid #d8e5f6; border-radius: 14px; color: #0f172a;">
       <div style="background: #ffffff; padding: 22px; border-radius: 12px; border: 1px solid #d8e5f6;">
@@ -383,10 +708,10 @@ export async function getPublicStaffInvite(token: string) {
     name: invite.name,
     email: invite.email,
     role: invite.role,
-    roleLabel: roleLabelTr(invite.role),
+    roleLabel: roleLabelTr(invite.role, invite.specialty),
     specialty: invite.specialty,
     color: invite.color,
-    clinicName: clinic?.name || 'Klinik',
+    clinicName: clinic?.name || 'İşletme',
     kvkkText: invite.kvkkTextSnapshot,
     kvkkVersion: invite.kvkkTextVersion,
     expiresAt: invite.expiresAt,
@@ -418,7 +743,7 @@ export async function acceptPublicStaffInvite(
   const tokenHash = hashToken(token)
   const passwordHash = await Bun.password.hash(password)
 
-  return db.transaction(async tx => {
+  const acceptedResult = await db.transaction(async tx => {
     const [invite] = await tx
       .select()
       .from(staffInvitations)
@@ -462,7 +787,7 @@ export async function acceptPublicStaffInvite(
           passwordHash,
           role: invite.role,
           specialty: invite.specialty,
-          color: invite.color || (invite.role === 'hekim' ? '#2563eb' : null),
+          color: invite.color || (['calisan', 'hekim'].includes(invite.role) ? '#2563eb' : null),
           active: true,
         })
         .returning()
@@ -510,11 +835,33 @@ export async function acceptPublicStaffInvite(
 
     return {
       ok: true,
+      clinicId: invite.clinicId,
       userId,
       email: invite.email,
       name: finalName,
       role: invite.role,
     }
   })
+
+  try {
+    const cleanEmail = acceptedResult.email.toLowerCase().trim()
+    const userMap = await getClinicUserPermissionsMap(acceptedResult.clinicId)
+    const pendingAccess = userMap.byInviteEmail[cleanEmail]
+    if (pendingAccess) {
+      userMap.byUserId[acceptedResult.userId] = pendingAccess
+      delete userMap.byInviteEmail[cleanEmail]
+      await persistClinicUserPermissionsMap(acceptedResult.clinicId, userMap)
+    }
+  } catch {
+    // Non-blocking: falls back cleanly to role defaults
+  }
+
+  return {
+    ok: true,
+    userId: acceptedResult.userId,
+    email: acceptedResult.email,
+    name: acceptedResult.name,
+    role: acceptedResult.role,
+  }
 }
 

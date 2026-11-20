@@ -22,7 +22,7 @@
   --glass-bg-hover: #1e293b;
   --nav-bg: rgba(5,10,20,0.85);
   --nav-border: rgba(255,255,255,0.06);
-  --card-inner: rgba(0,0,0,0.2);
+  --card-inner: #132238;
   --input-bg: #0a1220;
   --input-border: #1e293b;
   --divider: rgba(255,255,255,0.06);
@@ -88,7 +88,7 @@
   --badge-clinic-fg: #93c5fd;
 
   /* ── Tedavi Planlama Neomorphism & Claymorphism Tokens (Dark) ────── */
-  --pc-surface: #0f172a;
+  --pc-surface: #1e293b;
   --pc-border: #334155;
   --pc-muted: #cbd5e1;
   --pc-tint: #132b4b;
@@ -126,7 +126,7 @@
   --glass-bg-hover: #f8fafc;
   --nav-bg: rgba(255,255,255,0.95);
   --nav-border: rgba(0,0,0,0.08);
-  --card-inner: #f1f5f9;
+  --card-inner: #ffffff;
   --input-bg: #ffffff;
   --input-border: #cbd5e1;
   --divider: rgba(0,0,0,0.09);
@@ -192,8 +192,8 @@
   --badge-clinic-fg: #0369a1;
 
   /* ── Tedavi Planlama Neomorphism & Claymorphism Tokens (Light) ───── */
-  --pc-surface: #f4f8fe;
-  --pc-border: #d8e5f6;
+  --pc-surface: #ffffff;
+  --pc-border: #cbd5e1;
   --pc-muted: #526e98;
   --pc-tint: #edf5ff;
   --pc-blue: #075cff;

@@ -322,6 +322,13 @@
 
 .inboxHeader { margin-top: 0; }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .inbox {
   display: grid;
   grid-template-columns: minmax(210px, 1fr) minmax(0, 2fr);
@@ -373,10 +380,61 @@
   color: var(--pc-tint-fg) !important;
 }
 
+.card .conversations .conversation strong {
+  color: var(--foreground) !important;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.card .conversations .selected strong {
+  color: var(--pc-tint-fg) !important;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .card .conversations .conversation span,
 .card .conversations .selected span {
   color: var(--foreground-2) !important;
   font-weight: 400;
+}
+
+.conversationTopRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.card .conversations .conversation .contactBadge,
+.card .conversations .selected .contactBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--pc-tint);
+  border: 1px solid var(--btn-clinic-blue-border, var(--input-border));
+  box-shadow: var(--pc-clay-pale);
+  color: var(--pc-tint-fg) !important;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.card .conversations .selected .contactBadge {
+  background: var(--card-bg);
+}
+
+.conversationSubRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: wrap;
+  font-size: 11.5px;
 }
 
 .message {

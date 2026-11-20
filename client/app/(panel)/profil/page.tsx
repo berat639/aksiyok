@@ -23,7 +23,16 @@ export default function ProfilPage() {
   }
 
   if (!user) return null
-  const roleLabel = user.role === 'yonetici' ? 'Yönetici' : user.role === 'hekim' ? 'Hekim' : 'Resepsiyon'
+  const roleLabel =
+    user.role === 'yonetici'
+      ? 'Yönetici'
+      : user.role === 'calisan'
+        ? 'Çalışan'
+        : user.role === 'hekim'
+          ? 'Hekim (Eski Rol)'
+          : user.role === 'asistan'
+            ? 'Asistan'
+            : 'Kayıt / Ön Büro Personeli'
 
   return (
     <div style={{ maxWidth: 480 }}>

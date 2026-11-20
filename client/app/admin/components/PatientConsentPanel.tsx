@@ -3,6 +3,7 @@ import { Bell, FileText, Send, ShieldCheck } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { consentAllows, NOTIFICATION_CHANNELS, notificationLabels as labels, type NotificationChannel } from '../../../lib/notification-channels'
 import { PhoneMaskedInput } from '@/lib/phone-mask'
+import { useAuth } from '@/lib/auth-context'
 import PlanDialog from './PlanDialog'
 import styles from './PineTreatmentPlan.module.css'
 
@@ -73,6 +74,8 @@ function ChannelIcon({ channel }: { channel: NotificationChannel }) {
 }
 
 export default function PatientConsentPanel({ patientId, compact, selectedChannels = [], onChannelsChange, onContactChange, onConsentChange, onEnsurePatient, unsavedContact, periodic, periodDays, onOpenReminder }: Props) {
+  const { user } = useAuth()
+  const isDental = user?.businessTemplate === 'dental_clinic'
   const [createdPatientId, setCreatedPatientId] = useState<string>('')
   const activePatientId = patientId || createdPatientId
   const [consent, setConsent] = useState<ConsentState | null>(null)
@@ -155,7 +158,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
     if (msg) return msg
     const st = channelStatus(channel)
     if (st === 'error') return `${labels[channel]} entegrasyonunda bağlantı hatası var`
-    if (st === 'unconfigured') return `${labels[channel]} Klinikler ekranından entegre edilmedi`
+    if (st === 'unconfigured') return `${labels[channel]} Entegrasyonlar ekranından entegre edilmedi`
     return labels[channel]
   }
 
@@ -252,7 +255,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
     })
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || 'Hasta iletişim bilgileri güncellenemedi.')
+      throw new Error(err.error || 'Kişi iletişim bilgileri güncellenemedi.')
     }
   }
 
@@ -273,7 +276,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
       }
       if (!targetId) {
         requestKey.current = null
-        throw new Error('Önce hasta bilgilerini girin.')
+        throw new Error('Önce kişi bilgilerini girin.')
       }
       await syncUnsavedIfNeeded(targetId)
       const response = await fetch(`/api/dental/patients/${targetId}/consent-requests`, {
@@ -289,7 +292,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
         setSendFailedChannel(delivery)
         throw new Error('Gönderim doğrulanamadı. Yeniden kontrol edin.')
       }
-      requestKey.current = null; setSendFailedChannel(null); toast.success('Form gönderildi; hasta yanıtı bekleniyor.'); await refresh(undefined, targetId)
+      requestKey.current = null; setSendFailedChannel(null); toast.success('Form gönderildi; kişi yanıtı bekleniyor.'); await refresh(undefined, targetId)
     } catch (reason) { toast.error(reason instanceof Error ? reason.message : 'Form gönderilemedi.') }
     finally { pending.current = false; setBusy(false) }
   }
@@ -303,7 +306,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channels: nextChannels }),
       })
       const result = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(result.error || 'Klinik içi onam kaydedilemedi.')
+      if (!response.ok) throw new Error(result.error || 'İşletme içi onam kaydedilemedi.')
       await refresh()
       onConsentChange?.({
         smsOptOut: !nextChannels.includes('sms'),
@@ -314,9 +317,9 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
         onChannelsChange(nextChannels)
       }
       if (closeOnSuccess) setDialog(null)
-      toast.success(nextChannels.length > 0 ? 'Hasta bildirim izinleri güncellendi.' : 'Hasta bildirim onamı kaldırıldı.')
+      toast.success(nextChannels.length > 0 ? 'İletişim bildirim izinleri güncellendi.' : 'İletişim bildirim onamı kaldırıldı.')
     } catch (reason) {
-      const msg = reason instanceof Error ? reason.message : 'Klinik içi onam kaydedilemedi.'
+      const msg = reason instanceof Error ? reason.message : 'İşletme içi onam kaydedilemedi.'
       if (dialog) setDialogError(msg)
       else toast.error(msg)
     } finally {
@@ -374,7 +377,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
 
   return <section
     className={`${styles.consent} ${!compact ? styles.consentStacked : ''} ${hasIntegrationError ? styles.consentError : ''}`}
-    aria-label="Hasta bildirimleri"
+    aria-label={isDental ? 'Hasta bildirimleri' : 'Müşteri bildirimleri'}
     title={hasIntegrationError ? integrationErrorSummary : undefined}
   >
     <div className={styles.consentRow}>
@@ -383,10 +386,10 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
         type="button"
         className={`${styles.button} ${periodic ? styles.pale : ''} ${styles.consentReminderBtn}`}
         onClick={onOpenReminder}
-        title="Tedavi hatırlatma bildirimlerini ayarla"
+        title={isDental ? 'Tedavi hatırlatma bildirimlerini ayarla' : 'Hatırlatma bildirimlerini ayarla'}
       >
         <Bell size={14} />
-        <span>{periodic ? `Tedavi hatırlatma bildirimleri · ${periodDays} gün` : 'Tedavi hatırlatma bildirimleri'}</span>
+        <span>{periodic ? `${isDental ? 'Tedavi hatırlatma bildirimleri' : 'Hatırlatma bildirimleri'} · ${periodDays} gün` : (isDental ? 'Tedavi hatırlatma bildirimleri' : 'Hatırlatma bildirimleri')}</span>
       </button>
     )}
     <div className={styles.consentTitle}><ShieldCheck size={15} /><strong>{allowed.length ? 'Bildirim yöntemi' : 'Bildirim onamı'}</strong>
@@ -410,7 +413,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
               ? channelMessage(channel)
               : isAllowed
                 ? labels[channel]
-                : (canManageConsent ? `${labels[channel]} iznini aktif et` : 'Bu kanal için hasta izni bulunmuyor')
+                : (canManageConsent ? `${labels[channel]} iznini aktif et` : 'Bu kanal için kişi izni bulunmuyor')
           return (
             <label
               key={channel}
@@ -451,7 +454,7 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
           aria-label="Onam formu gönderim kanalı"
           disabled={busy || loading || hasIntegrationError || availableDeliveries.length === 0}
           value={delivery}
-          title={hasIntegrationError ? integrationErrorSummary : allDeliveriesUnconfigured ? 'Klinikler ekranından bildirim kanalları entegre edilmedi' : undefined}
+          title={hasIntegrationError ? integrationErrorSummary : allDeliveriesUnconfigured ? 'Entegrasyonlar ekranından bildirim kanalları entegre edilmedi' : undefined}
           onChange={event => {
             const nextDelivery = event.target.value as Delivery
             setDelivery(nextDelivery)
@@ -488,15 +491,15 @@ export default function PatientConsentPanel({ patientId, compact, selectedChanne
       </div>}
       <button type="button" className={styles.consentTextButton} disabled={loading || !!error} onClick={openTextDialog}><FileText size={13} />Onam metni</button>
     </div>
-    {dialog && <PlanDialog title={dialog === 'text' ? 'Bildirim onam metni' : 'Hasta kaydını güncelle'} onClose={closeDialog}>
+    {dialog && <PlanDialog title={dialog === 'text' ? 'Bildirim onam metni' : 'Kişi kaydını güncelle'} onClose={closeDialog}>
       <form onSubmit={saveDialog}>
         {dialog === 'text' ? <>
-          <p className={styles.dialogDescription}>Hasta kendisine gönderilen formda bu metni okuyarak kanallar için ayrı ayrı izin verir.</p>
+          <p className={styles.dialogDescription}>Kişi kendisine gönderilen formda bu metni okuyarak kanallar için ayrı ayrı izin verir.</p>
           <label htmlFor="notification-consent-text">Onam metni</label>
           <textarea id="notification-consent-text" className={styles.textarea} rows={7} required minLength={20} maxLength={10000} readOnly={!settings?.canEdit} value={formText} onChange={event => setFormText(event.target.value)} />
-          <p className={styles.dialogDescription}>{settings?.canEdit ? 'Metin değişirse mevcut izinler yeni metin için yenilenmelidir.' : 'Metni klinik yöneticisi düzenleyebilir.'}</p>
+          <p className={styles.dialogDescription}>{settings?.canEdit ? 'Metin değişirse mevcut izinler yeni metin için yenilenmelidir.' : 'Metni işletme yöneticisi düzenleyebilir.'}</p>
         </> : <>
-          <p className={styles.dialogDescription}>{pendingChannel === 'email' ? 'E-posta bildirimi için hastanın e-posta adresi kayıtlı değil. Hasta kaydını güncelleyin.' : `${pendingChannel === 'whatsapp' ? 'WhatsApp' : pendingChannel === 'assistant_call' ? 'Asistan araması' : 'SMS'} bildirimi için hastanın cep telefonu numarası kayıtlı değil. Hasta kaydını güncelleyin.`}</p>
+          <p className={styles.dialogDescription}>{pendingChannel === 'email' ? 'E-posta bildirimi için kişinin e-posta adresi kayıtlı değil. Kişi kaydını güncelleyin.' : `${pendingChannel === 'whatsapp' ? 'WhatsApp' : pendingChannel === 'assistant_call' ? 'Asistan araması' : 'SMS'} bildirimi için kişinin cep telefonu numarası kayıtlı değil. Kişi kaydını güncelleyin.`}</p>
           <label htmlFor="consent-phone">Cep telefonu numarası</label><PhoneMaskedInput id="consent-phone" autoFocus={pendingChannel !== 'email'} className={styles.input} placeholder="0 (5XX) XXX XX XX" pattern="[+0-9 ()-]{10,20}" required={pendingChannel !== 'email'} value={contact.phone || ''} onValueChange={phone => setContact({ ...contact, phone })} />
           <label htmlFor="consent-email">E-posta adresi</label><input id="consent-email" autoFocus={pendingChannel === 'email'} className={styles.input} type="email" autoComplete="email" placeholder="ornek@eposta.com" required={pendingChannel === 'email'} value={contact.email || ''} onChange={event => setContact({ ...contact, email: event.target.value })} />
         </>}

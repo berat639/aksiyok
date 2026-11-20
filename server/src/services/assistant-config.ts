@@ -1,24 +1,83 @@
-import { getAiModel, getSetting } from '../db/repositories/settings'
+import { getAiModel, getGreeting, getSetting } from '../db/repositories/settings'
 import { PROMPT_SECTION_KEYS, getDefaultPromptValue } from '../data/default-prompts'
 import { getEffectivePromptSections, renderPromptTemplate } from '../prompts/registry'
 import { ALLOWED_LIVE_MODELS, DEFAULT_LIVE_MODEL, isLiveModel } from './live-model-profile'
 import { wrapWithTurkishLanguageLock } from './turn-detector'
+import { extractUrlsFromText } from './dynamic-link-matcher'
+import { getClinicDynamicPromptMetadata, type ClinicDynamicPromptMetadata } from '../db/repositories/dynamic-tables'
+import { currentBusinessTemplate } from '../tenancy/context'
 
 export { ALLOWED_LIVE_MODELS, DEFAULT_LIVE_MODEL }
 
-export async function resolveLiveModel(): Promise<string> {
-  const saved = await getAiModel()
+export async function resolveLiveModel(clinicId?: string): Promise<string> {
+  const saved = await getAiModel(clinicId).catch(() => null)
   if (isLiveModel(saved)) return saved
   const fromEnv = process.env.GEMINI_LIVE_MODEL
   if (isLiveModel(fromEnv)) return fromEnv
   return DEFAULT_LIVE_MODEL
 }
 
+const PURE_WHATSAPP_GREETING_TOKENS = new Set([
+  'merhaba', 'merhabalar', 'mrb', 'selam', 'selamlar', 'slm', 'selamunaleykum', 'aleykumselam',
+  'iyi', 'gunler', 'aksamlar', 'sabahlar', 'geceler', 'gunaydin', 'tunaydin',
+  'hayirli', 'isler', 'kolay', 'gelsin', 'alo', 'hey', 'hi', 'hello',
+  'orada', 'orda', 'misiniz', 'musait', 'kimse', 'var', 'mi', 'bakar', 'deneme', 'test',
+])
+
+/**
+ * Kullanıcının WhatsApp ilk mesajının yalnızca selamlama, noktalama/emoji veya
+ * anlamsız kısa karakter dizisi olup olmadığını belirler.
+ * Somut bir talep/soru varsa false döner (böylece sabit karşılama cümlesi atlanır).
+ */
+export function isNonSubstantiveWhatsAppOpening(rawText: string): boolean {
+  if (extractUrlsFromText(String(rawText || '')).length > 0) return false
+
+  const folded = String(rawText || '')
+    .toLocaleLowerCase('tr-TR')
+    .replace(/ı/g, 'i')
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ş/g, 's')
+    .replace(/ö/g, 'o')
+    .replace(/ç/g, 'c')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!folded) return true
+  if (folded.length <= 2) return true
+
+  const words = folded.split(' ').filter(Boolean)
+  if (words.every(w => PURE_WHATSAPP_GREETING_TOKENS.has(w))) return true
+
+  // 6+ haneli ilan no / sipariş no / telefon numarası doğrudan somut girdi sayılır
+  if (/^\d{6,}$/.test(folded)) return false
+
+  // Rastgele klavye tuşlamaları ("asdfgh", "qwrty", "zxcvb", "1234" vb.)
+  const digitsOnly = folded.replace(/\D/g, '')
+  if (
+    digitsOnly.length < 6 &&
+    words.length === 1 &&
+    (!/[aeiou]/.test(folded) || /[bcdfghjklmnpqrstvwxyz]{5,}/.test(folded) || /^\d+$/.test(folded))
+  ) {
+    return true
+  }
+
+  return false
+}
+
 export async function buildSystemPrompt(greeting: string, direction: string = 'inbound'): Promise<string> {
+  const businessTemplate = currentBusinessTemplate()
+  const isDentalTemplate = businessTemplate === 'dental_clinic'
   let dbSections: Record<string, string> = {}
   try {
-    dbSections = await getEffectivePromptSections()
-  } catch {}
+    dbSections = await getEffectivePromptSections(businessTemplate)
+  } catch { }
+
+  let dynMeta: ClinicDynamicPromptMetadata | null = null
+  try {
+    dynMeta = await getClinicDynamicPromptMetadata()
+  } catch { }
 
   const parts: string[] = []
   let activeFlow: import('../db/repositories/flows').ConversationFlow | null = null
@@ -27,42 +86,79 @@ export async function buildSystemPrompt(greeting: string, direction: string = 'i
   let flowRuntimeActive = false
   try {
     const flows = await import('../db/repositories/flows')
+    const { resolveFlowRuntimeMode } = await import('./flow-engine')
     activeFlow = await flows.getActiveFlow(direction)
     minimalFlow = Boolean(activeFlow && flows.isMinimalGreetingEndFlow(activeFlow))
     hasStructuredFlow = Boolean(activeFlow && activeFlow.nodes.length > 2)
-    flowRuntimeActive = (await getSetting('ai.flow_runtime_mode')) === 'active'
-  } catch {}
+    flowRuntimeActive = (await resolveFlowRuntimeMode(undefined, direction)) === 'active'
+  } catch { }
+  const isWhatsApp = direction === 'whatsapp'
   for (const key of PROMPT_SECTION_KEYS) {
-    // Minimal Flow Builder akışında veya kendi adımları olan yapılandırılmış bir diyagram
-    // aktifken varsayılan randevu senaryosunu tekrar ekleme; aksi halde model iki ayrı
-    // soru listesini birden sormaya çalışıp soruları tekrarlar.
-    if ((minimalFlow || hasStructuredFlow) && key === 'prompt.appointment_rules') continue
-    // Web kanalında telefon santral aktarımı (aramaAktar) talimatlarını ekleme
-    if (direction === 'web' && key === 'prompt.service_flow') {
-      parts.push('NOT BIRAKMA: Hasta randevu almak istemeyip mesaj, şikayet veya geri arama notu bırakmak isterse hastaNotKaydet aracını çağırarak bankoya ilet.')
+    // Minimal veya yapılandırılmış Flow Builder akışı aktifken varsayılan randevu kurallarını ekleme
+    if ((minimalFlow || hasStructuredFlow || flowRuntimeActive) && key === 'prompt.appointment_rules') continue
+    // WhatsApp yazılı kanalında ses/mikrofon/çağrı aktarım odaklı bölümleri bağlama ekleme
+    if (isWhatsApp && (key === 'prompt.scope' || key === 'prompt.service_flow' || key === 'prompt.general_rules' || key === 'prompt.rag_template')) {
       continue
     }
-    let value = dbSections[key] || getDefaultPromptValue(key) || ''
+    // sales_flow zaten searchKnowledgeBase kuralını verir; özelleştirilmemiş rag_template tekrarını atla
+    if (key === 'prompt.rag_template' && !dbSections[key]) continue
+
+    // Web kanalında telefon santral aktarımı (aramaAktar) talimatlarını ekleme
+    if (direction === 'web' && key === 'prompt.service_flow') {
+      parts.push('NOT BIRAKMA: Müşteri mesaj, şikayet veya geri arama notu bırakmak isterse hastaNotKaydet çağır.')
+      continue
+    }
+    let value = dbSections[key] || getDefaultPromptValue(key, businessTemplate) || ''
     if (key === 'prompt.greeting_flow') {
-      if (direction === 'whatsapp') {
+      if (isWhatsApp) {
         value = dbSections['prompt.whatsapp_greeting_flow']
           || getDefaultPromptValue('prompt.whatsapp_greeting_flow')
-          || 'WhatsApp üzerinden yazılı destek veriyorsun. Kısa ve anlaşılır yanıtlar yaz. Kullanıcıyı her mesajda yeniden karşılama. Telefonla konuşma veya arama başlatma talimatlarını uygulama.'
+          || 'WhatsApp yazılı destek veriyorsun. Kısa ve net yaz; her mesajda tekrar karşılama ve telefon/arama kurallarını uygulama.'
       } else if (direction === 'outbound') {
         const outboundTpl = dbSections['prompt.outbound_greeting_flow']
           || getDefaultPromptValue('prompt.outbound_greeting_flow')
-          || `GIDEN ARAMA (OUTBOUND) KARŞILAMA VE GÖREV TALİMATI:\nSen dış arama (outbound call) yapıyorsun. Karşı taraf telefonu açtığında İLK CÜMLE olarak KESİNLİKLE şu giden karşılama mesajını söyle:\n"{{greeting}}"\nArdından konuşma akışındaki adımları sırasıyla uygula.`
+          || 'GİDEN ARAMA: Karşı taraf açınca İLK cümlede "{{greeting}}" de ve akış adımlarını sırayla uygula.'
         value = /\{\{\s*greeting\s*\}\}/.test(outboundTpl)
           ? renderPromptTemplate(outboundTpl, { greeting })
           : `${outboundTpl}\n"${greeting}"`
       } else if (direction === 'web') {
-        value = `WEB SESLİ ASİSTAN KARŞILAMA:\nMüşteri web asistanına bağlandığında şu karşılama mesajını söyle: "${greeting}"\nSonra müşterinin ne istediğini dinle, zaten söylediği bilgileri asla tekrar sorma ve en kısa yoldan yardımcı ol.`
+        value = `WEB SESLİ KARŞILAMA: İlk cümlede "${greeting}" de; müşteriyi dinle, bilinen bilgileri tekrar sorma.`
       } else {
         value = /\{\{\s*greeting\s*\}\}/.test(value)
           ? renderPromptTemplate(value, { greeting })
-          : `GELEN ARAMA (INBOUND) KARŞILAMA:\nMüşteri aradığında şu karşılama mesajını söyle: "${greeting}"\nSonra müşterinin ne istediğini dinle ve yardımcı ol.`
+          : `KARŞILAMA: İlk cümlede "${greeting}" de; ardından müşterinin talebini dinle.`
       }
     }
+
+    if (dynMeta?.isNonDentalTenant) {
+      if (key === 'prompt.price_policy' && (dynMeta.hasPriceColumn || dynMeta.hasLinkColumn || dynMeta.hasDynamicTables)) {
+        if (/telefonda net ücret|muayene sonrası|tedavi ücreti|diş|hekim|klinikte belirlenir/i.test(value)) {
+          value =
+            'FİYAT VE TABLO POLİTİKASI: Kullanıcı veri tablolarındaki bir ilan, ürün veya kayıt için fiyat/detay sorduğunda veriTablosuSorgula veya canlı satır bilgisindeki gerçek değeri paylaş; tabloda olmayan fiyatı uydurma.'
+        }
+      } else if (key === 'prompt.forbidden_patterns' && (dynMeta.hasPriceColumn || dynMeta.hasLinkColumn || dynMeta.hasDynamicTables)) {
+        value = value
+          .split('\n')
+          .filter(line => !/TELEFONDA ÜCRET|FİYAT BİLGİSİ VERME|hekim muayenesi/i.test(line))
+          .join('\n')
+          .trim()
+      } else if (key === 'prompt.scope' && /diş|hekim|tıbbi|tedavi|muayene|klinik dışı|kliniğimiz/i.test(value)) {
+        value =
+          'KAPSAM: Aktif veri tablolarındaki kayıtlar, linkler, hizmetler ve randevu planlamasında yardımcı ol; tablo dışı dış kaynaklı bilgi uydurma.\n- ÖKSÜRÜK, HAPŞIRIK VE İNSANİ SESLER: Öksürük/hapşırık kapsam dışı değildir; "Çok geçmiş olsun" deyip devam et.'
+      } else if (key === 'prompt.sales_flow' && /diş|hekim|tıbbi|tedavi|muayene|klinik/i.test(value)) {
+        value =
+          'BİLGİLENDİRME VE RANDEVU AKIŞI: Müşterinin ilettiği link veya talepte önce veri tablolarındaki canlı kaydı kontrol et, gerçek bilgileri paylaş ve randevu/görüşme planlamasına yardımcı ol.'
+      } else if (key === 'prompt.general_rules' && /klinik dışı|kliniğimiz|klinik/i.test(value)) {
+        value = value
+          .replace(/klinik dışı/gi, 'işletme kapsamı dışı')
+          .replace(/klinik\/randevu/gi, 'işletme/randevu')
+          .replace(/kliniğimiz/gi, 'işletmemiz')
+      } else if (key === 'prompt.greeting_flow' && isWhatsApp && /diş|kliniğimiz|hastalarımız/i.test(value)) {
+        value =
+          'WhatsApp yazılı destek veriyorsun. Kısa ve net yaz; canlı veri tablolarındaki bilgileri doğrudan paylaş, her mesajda tekrar karşılama.'
+      }
+    }
+
     if (value) parts.push(value)
   }
 
@@ -72,10 +168,23 @@ export async function buildSystemPrompt(greeting: string, direction: string = 'i
     // The runtime sends only the active task through its tool result. Keeping
     // the whole graph out of the Live instruction avoids charging it every turn.
     if (activeFlow && !flowRuntimeActive) {
-      const flowText = flowToPromptText(activeFlow)
+      let flowText = flowToPromptText(activeFlow)
+      if (flowText && dynMeta?.isNonDentalTenant) {
+        flowText = flowText
+          .replace(/klinikle ilgili/gi, 'işletme veya kayıtlarla ilgili')
+          .replace(/klinik dışı/gi, 'işletme kapsamı dışı')
+          .replace(/klinik adımına/gi, 'kayıt/randevu adımına')
+          .replace(/klinik işleminiz/gi, 'işleminiz')
+      }
       if (flowText) parts.push(flowText)
     }
-  } catch {}
+  } catch { }
+
+  if (dynMeta?.hasDynamicTables && dynMeta.tablesSummary) {
+    parts.push(
+      `AKTİF VERİ TABLOLARI (CANLI VERİTABANI):\n${dynMeta.tablesSummary}\n- Link/URL, başlık veya kayıt sorularında Google veya harici internet araması KESİNLİKLE YAPMA; yalnızca veriTablosuSorgula ve canlı tablo bağlamını kullan. Eşleşen satır yoksa uydurma, bulunamadığını söyle.${dynMeta.hasPriceColumn ? ' Satırdaki Fiyat/Ücret değerini doğrudan paylaş.' : ''}`,
+    )
+  }
 
   // Inject live clinic doctor roster and working hours from DB so the assistant
   // immediately knows active doctors, their specialties, and clinic hours.
@@ -85,70 +194,130 @@ export async function buildSystemPrompt(greeting: string, direction: string = 'i
       const rosterText = await buildClinicRosterAndHoursText()
       if (rosterText) {
         parts.push(
-          `KLİNİK HEKİM KADROSU VE MESAİ BİLGİLERİ (CANLI VERİTABANI):\n${rosterText}\nNot: Müşteri hekimlerimiz, uzmanlık alanları veya çalışma saatlerimiz hakkında soru sorduğunda doğrudan bu bilgileri doğal konuşma dilinde aktar; zaten burada yer alan hekim bilgisi için tekrar tekrar searchKnowledgeBase çağırma.`,
+          isDentalTemplate
+            ? `KLİNİK HEKİMLER VE MESAİ:\n${rosterText}\n(Buradaki bilgiler için searchKnowledgeBase çağırma.)`
+            : `EKİP KADROSU VE MESAİ:\n${rosterText}\n(Buradaki bilgiler için searchKnowledgeBase çağırma.)`,
         )
       }
-    } catch {}
+    } catch { }
   }
 
-  // Inject optional per-clinic AI behavior preferences (tone, length, language, KB strictness)
-  try {
-    const [tonePreset, responseLength, languagePref, unknownFallback, kbStrictness] = await Promise.all([
-      getSetting('ai.tone_preset'),
-      getSetting('ai.response_length'),
-      getSetting('ai.language'),
-      getSetting('ai.unknown_fallback'),
-      getSetting('ai.kb_strictness'),
-    ])
-    const behaviorLines: string[] = []
-    if (tonePreset === 'formal') {
-      behaviorLines.push('- Üslup: Resmi, kurumsal ve saygılı ("Siz" dili) konuş.')
-    } else if (tonePreset === 'warm') {
-      behaviorLines.push('- Üslup: Samimi, sıcak, empatik ve rahatlatıcı bir dille konuş.')
-    } else if (tonePreset === 'concise') {
-      behaviorLines.push('- Üslup: Doğrudan, pratik ve net konuş; gereksiz giriş cümleleri kullanma.')
-    }
-    if (responseLength === 'short') {
-      behaviorLines.push('- Yanıt Uzunluğu: Her yanıtta en fazla 1-2 kısa cümle kur.')
-    } else if (responseLength === 'detailed') {
-      behaviorLines.push('- Yanıt Uzunluğu: Hastanın sorularını açıklayıcı ve kapsamlı yanıtla.')
-    }
-    behaviorLines.push('- Dil Politikası (KESİN KURAL): Yalnızca ve sadece Türkçe konuş. Karşı taraf yabancı dilde konuşsa veya ses İngilizceye benzese dahi asla İngilizce kelime kullanma.')
-    if (kbStrictness === 'strict') {
-      behaviorLines.push('- Bilgi Tabanı Kuralı (SIKI MOD): Yalnızca Bilgi Bankası içinde açıkça yer alan bilgileri söyle; bilgi bankasında olmayan konularda asla tahmin yürütme.')
-    }
-    if (unknownFallback === 'transfer') {
-      behaviorLines.push('- Bilinmeyen Soru Davranışı: Bilgi bankasında cevabı olmayan bir soru gelirse hastayı yetkili personele aktar (aramaAktar / insanaAktar).')
-    } else if (unknownFallback === 'take_note') {
-      behaviorLines.push('- Bilinmeyen Soru Davranışı: Bilgi bankasında cevabı olmayan bir soru gelirse hastaNotKaydet aracını kullanarak konuyu bankoya not bırak.')
-    }
-    if (behaviorLines.length > 0) {
-      parts.push(`KLİNİK AI DAVRANIŞ TERCİHLERİ:\n${behaviorLines.join('\n')}`)
-    }
-  } catch {}
+  if (isWhatsApp) {
+    try {
+      const { DEFAULT_WHATSAPP_OFF_TOPIC_MESSAGE, ASSISTANT_GREETING_DEFAULTS } = await import('./voice-settings')
+      const [
+        toneStyleRaw,
+        allowEmojiRaw,
+        autoHandoverRaw,
+        waStrikesRaw,
+        waActionRaw,
+        waCloseMsgRaw,
+        savedWaGreeting,
+      ] = await Promise.all([
+        getSetting('ai.whatsapp.tone_style'),
+        getSetting('ai.whatsapp.allow_emoji'),
+        getSetting('ai.whatsapp.auto_handover_on_unclear'),
+        getSetting('ai.whatsapp.off_topic_max_strikes'),
+        getSetting('ai.whatsapp.off_topic_action'),
+        getSetting('ai.whatsapp.off_topic_close_message'),
+        getGreeting('whatsapp'),
+      ])
+      const waLines: string[] = []
+      if (dynMeta?.isNonDentalTenant) {
+        waLines.push('- Kapsam: Aktif veri tablolarındaki kayıtlar, linkler, hizmetler ve randevu taleplerinde yardımcı ol; dış internet bilgisi sunma.')
+      }
+      const effectiveWaGreeting =
+        greeting.trim() || savedWaGreeting?.trim() || ASSISTANT_GREETING_DEFAULTS.whatsapp
+      waLines.push(
+        `- İlk Mesaj: Yalnızca selam/belirsiz mesajsa "${effectiveWaGreeting}" yaz; somut randevu/hizmet/link talebindeyse bu kalıbı atla ve doğrudan konuya yanıt ver. Devam eden sohbette tekrar karşılama.`,
+      )
+      const toneStyle = toneStyleRaw === 'samimi' || toneStyleRaw === 'kisa_net' || toneStyleRaw === 'kurumsal'
+        ? toneStyleRaw
+        : 'kurumsal'
+      if (toneStyle === 'samimi') {
+        waLines.push('- Üslup: Sıcak ve samimi bir dil kullan.')
+      } else if (toneStyle === 'kisa_net') {
+        waLines.push('- Üslup: Çok kısa ve net yaz.')
+      } else {
+        waLines.push('- Üslup: Kurumsal ve resmi ("Siz" dili) yaz.')
+      }
 
-  if (direction !== 'whatsapp') {
+      const allowEmoji = allowEmojiRaw !== 'false'
+      waLines.push(allowEmoji ? '- Emoji: Ölçülü emoji kullanabilirsin.' : '- Emoji: Kesinlikle emoji kullanma.')
+
+      const autoHandoverOnUnclear = autoHandoverRaw !== 'false'
+      if (autoHandoverOnUnclear) {
+        waLines.push(
+          dynMeta?.isNonDentalTenant
+            ? '- Belirsiz Talep: Yanıtı tabloda bulunmayan veya yetkili gereken durumlarda insanaAktar çağır.'
+            : '- Belirsiz Talep: Karmaşık veya tıbbi değerlendirme gerektiren taleplerde insanaAktar çağır.',
+        )
+      }
+
+      const waStrikesNum = Number(waStrikesRaw)
+      const waStrikes = Number.isInteger(waStrikesNum) && waStrikesNum >= 1 && waStrikesNum <= 5
+        ? waStrikesNum
+        : 2
+      const waPauseAi = waActionRaw === 'pause_ai'
+      const waCloseMsg = (waCloseMsgRaw?.trim() || DEFAULT_WHATSAPP_OFF_TOPIC_MESSAGE).trim()
+      const inScopeSubject = dynMeta?.isNonDentalTenant
+        ? 'veri tabloları, ilan/kayıt bilgileri, hizmetler veya randevu'
+        : 'klinik veya randevu'
+      const scopeHint = dynMeta?.hasDynamicTables
+        ? ' (Link, ürün/kayıt, fiyat ve tablo soruları kapsam içidir.)'
+        : ''
+      if (waStrikes === 1) {
+        waLines.push(
+          waPauseAi
+            ? `- Kapsam Dışı (1 Kez — Duraklat): ${inScopeSubject} dışı mesajda hemen konuDisiSohbetDuraklat çağır ve yalnızca "${waCloseMsg}" yaz.${scopeHint}`
+            : `- Kapsam Dışı (1 Kez): ${inScopeSubject} dışı mesajda yeni soru sormadan yalnızca "${waCloseMsg}" yaz.${scopeHint}`,
+        )
+      } else {
+        waLines.push(
+          waPauseAi
+            ? `- Kapsam Dışı (${waStrikes} Kez — Duraklat): ${inScopeSubject} dışı ilk ${waStrikes - 1} mesajda kısaca konuya yönlendir; ${waStrikes}. mesajda konuDisiSohbetDuraklat çağır ve yalnızca "${waCloseMsg}" yaz.${scopeHint}`
+            : `- Kapsam Dışı (${waStrikes} Kez): ${inScopeSubject} dışı ilk ${waStrikes - 1} mesajda kısaca konuya yönlendir; ${waStrikes}. mesajda yalnızca "${waCloseMsg}" yaz.${scopeHint}`,
+        )
+      }
+
+      if (waLines.length > 0) {
+        parts.push(`WHATSAPP AYARLARI:\n${waLines.join('\n')}`)
+      }
+    } catch { }
+    return parts.join('\n\n')
+  } else {
     const joined = parts.join('\n\n')
-    if (!joined.includes('ÖKSÜRÜK') && !joined.includes('öksür')) {
+    if (!joined.toLowerCase().includes('öksür')) {
       parts.push(
-        'KONUŞMA DIŞI SESLER (ÖKSÜRÜK / HAPŞIRIK / GÜRÜLTÜ): Karşı tarafın öksürmesi, hapşırması, boğaz temizlemesi, nefes sesi veya ortam gürültüsü kapsam dışı bir istek DEĞİLDİR; böyle seslerde ASLA "Bu konuda yardımcı olamıyorum" deme. Öksürük veya hapşırıkta kısaca "Çok geçmiş olsun" deyip kaldığın yerden devam et.',
+        'KONUŞMA DIŞI SESLER (ÖKSÜRÜK / HAPŞIRIK): Öksürük, hapşırık veya gürültü kapsam dışı değildir; "Çok geçmiş olsun" deyip kaldığın yerden devam et.',
       )
     }
     try {
       const { buildOffTopicPromptRule, DEFAULT_OFF_TOPIC_CLOSE_MESSAGE } = await import('./voice-settings')
-      const [strikesRaw, closeMsgRaw] = await Promise.all([
+      const channelPrefix = direction === 'outbound' || direction === 'web' ? `ai.${direction}.` : null
+      const [channelStrikesRaw, channelCloseMsgRaw, baseStrikesRaw, baseCloseMsgRaw] = await Promise.all([
+        channelPrefix ? getSetting(`${channelPrefix}off_topic_max_strikes`) : Promise.resolve(null),
+        channelPrefix ? getSetting(`${channelPrefix}off_topic_close_message`) : Promise.resolve(null),
         getSetting('ai.off_topic_max_strikes'),
         getSetting('ai.off_topic_close_message'),
       ])
+      const strikesRaw = channelStrikesRaw ?? baseStrikesRaw
+      const closeMsgRaw = channelCloseMsgRaw?.trim() ? channelCloseMsgRaw : baseCloseMsgRaw
       const strikes = Number.isInteger(Number(strikesRaw)) && Number(strikesRaw) >= 1 && Number(strikesRaw) <= 5
         ? Number(strikesRaw)
         : 2
       const closeMsg = closeMsgRaw?.trim() || DEFAULT_OFF_TOPIC_CLOSE_MESSAGE
-      parts.push(buildOffTopicPromptRule(strikes, closeMsg))
+      parts.push(
+        dynMeta?.isNonDentalTenant
+          ? `${buildOffTopicPromptRule(strikes, closeMsg, isDentalTemplate)}\nNot: Veri tabloları, linkler, kayıt bilgileri, fiyatlar ve randevu talepleri kapsam içidir.`
+          : buildOffTopicPromptRule(strikes, closeMsg, isDentalTemplate),
+      )
     } catch {
       if (!joined.includes('KONU DIŞI ISRAR')) {
         parts.push(
-          'KONU DIŞI ISRAR VE OTOMATİK KAPATMA KURALI: Karşı taraf klinik veya randevu dışında alakasız bir konu açarsa ilk seferde nazikçe klinik/randevu konusuna yönlendir. Karşı taraf uyarıya rağmen ikinci kez konu dışına çıkar veya konuyu dağıtmaya devam ederse sohbeti KESİNLİKLE uzatma; "Yardımcı olabileceğim bir klinik işleminiz yoksa görüşmemizi sonlandırıyorum, sağlıklı günler dilerim." de ve hemen cagriySonlandir aracını çağır.',
+          dynMeta?.isNonDentalTenant
+            ? 'KONU DIŞI ISRAR: İşletme, veri tabloları veya randevu dışı konuda ilkinde yönlendir; ikincisinde vedalaşıp cagriySonlandir çağır.'
+            : 'KONU DIŞI ISRAR: Klinik veya randevu dışı konuda ilkinde yönlendir; ikincisinde vedalaşıp cagriySonlandir çağır.',
         )
       }
     }

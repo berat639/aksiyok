@@ -56,11 +56,31 @@ async function handleProxy(req: NextRequest, proxyPath: string[]) {
 
     const response = await fetchBackend(targetPath, options)
 
-    const responseHeaders = new Headers(response.headers)
-    responseHeaders.delete('content-encoding') // Next.js will handle encoding
-    responseHeaders.delete('transfer-encoding')
+    const responseHeaders = new Headers()
+    response.headers.forEach((value, key) => {
+      const lower = key.toLowerCase()
+      if (lower === 'content-encoding' || lower === 'transfer-encoding' || lower === 'set-cookie') {
+        return
+      }
+      responseHeaders.set(key, value)
+    })
 
-    return new NextResponse(response.body, {
+    const setCookies = typeof response.headers.getSetCookie === 'function'
+      ? response.headers.getSetCookie()
+      : []
+    if (setCookies.length > 0) {
+      for (const cookie of setCookies) {
+        responseHeaders.append('set-cookie', cookie)
+      }
+    } else {
+      const singleCookie = response.headers.get('set-cookie')
+      if (singleCookie) {
+        responseHeaders.append('set-cookie', singleCookie)
+      }
+    }
+
+    const isNoBodyStatus = response.status === 204 || response.status === 205 || response.status === 304
+    return new NextResponse(isNoBodyStatus ? null : response.body, {
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders,

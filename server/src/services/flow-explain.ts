@@ -147,8 +147,8 @@ export function buildDeterministicFlowExplanation(summary: Required<FlowNodeSumm
 }
 
 const SYSTEM_INSTRUCTION = [
-  'Sen bir diş kliniği yönetim panelindeki görüşme akışı yardımcısısın.',
-  'Sana verilen adım özetini klinik çalışanına 1 veya 2 kısa, akıcı ve doğal Türkçe cümleyle açıkla.',
+  'Sen bir işletme yönetim panelindeki görüşme akışı yardımcısısın.',
+  'Sana verilen adım özetini işletme çalışanına 1 veya 2 kısa, akıcı ve doğal Türkçe cümleyle açıkla.',
   'Kesinlikle İngilizce kelime, kod adı (caller.isVip vb.), süslü parantez veya sembolik operatör (==, !=, AND, OR) kullanma; yalnızca "ve" / "veya" bağlaçlarını kullan.',
 ].join(' ')
 

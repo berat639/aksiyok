@@ -22,7 +22,7 @@ type ProviderState = {
   hasWebhookSecret: boolean
 }
 
-const emptySettings: BillingSettings = { invoicePrefix: 'KLC', eDocumentProvider: 'none' }
+const emptySettings: BillingSettings = { invoicePrefix: 'FTR', eDocumentProvider: 'none' }
 const providerNames: Record<string, string> = { iyzico: 'Iyzico', paytr: 'PayTR', stripe: 'Stripe' }
 const COMING_SOON = true
 

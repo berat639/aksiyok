@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { PROMPT_SECTIONS, getDefaultPromptValue } from '../data/default-prompts'
+import type { BusinessTemplate } from '../platform/roles'
 
 export function renderPromptTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_match, key: string) => {
@@ -75,28 +76,18 @@ export async function getPlatformPromptValue(key: string): Promise<string> {
 }
 
 /** Tüm bölümler için etkin değer: { [key]: değer }. Prompt birleştirme için kullanılır. */
-export async function getEffectivePromptSections(): Promise<Record<string, string>> {
+export async function getEffectivePromptSections(
+  businessTemplate: BusinessTemplate = 'general',
+): Promise<Record<string, string>> {
   const map = await loadPlatformPrompts()
   const out: Record<string, string> = {}
-  for (const section of PROMPT_SECTIONS) out[section.key] = map.get(section.key) ?? section.defaultValue
+  for (const section of PROMPT_SECTIONS) {
+    out[section.key] = map.get(section.key) ?? getDefaultPromptValue(section.key, businessTemplate) ?? section.defaultValue
+  }
   return out
 }
 
 /** `clinicId` geriye uyumluluk için korunur; talimatlar platform düzeyindedir. */
 export async function getPromptTemplate(key: string, _clinicId?: string): Promise<string> {
   return getPlatformPromptValue(key)
-}
-
-/** Klinik kopyası kodla birebir aynıysa "özelleştirilmemiş" sayılır. */
-export function isCustomizedClinicCopy(key: string, value: string | null | undefined): boolean {
-  if (!value || !value.trim()) return false
-  return value !== (getDefaultPromptValue(key) ?? '')
-}
-
-/**
- * Eskiden varsayılanları her kliniğe kopyalıyordu. Artık kopyalama YAPILMAZ;
- * yalnızca platform tabloları hazırlanır. Mevcut klinik kopyalarına dokunulmaz.
- */
-export async function ensurePromptTemplates(): Promise<void> {
-  await ensurePlatformPromptTable()
 }

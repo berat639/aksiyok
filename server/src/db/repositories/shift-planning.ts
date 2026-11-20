@@ -68,7 +68,7 @@ async function candidates(clinicId: string, input: ShiftPlanInput): Promise<Plan
     db.select().from(shifts).where(and(eq(shifts.clinicId, clinicId), inArray(shifts.userId, input.userIds), gte(shifts.date, input.startDate), lte(shifts.date, input.endDate))),
     db.select().from(doctorLeaves).where(and(eq(doctorLeaves.clinicId, clinicId), inArray(doctorLeaves.doctorId, input.userIds), gte(doctorLeaves.date, input.startDate), lte(doctorLeaves.date, input.endDate))),
   ])
-  if (allowedUsers.length !== new Set(input.userIds).size) throw new Error('Seçilen personellerden biri bu kliniğe ait değil.')
+  if (allowedUsers.length !== new Set(input.userIds).size) throw new Error('Seçilen personellerden biri bu işletmeye ait değil.')
   const existingByKey = new Map(existing.map(item => [`${item.userId}:${item.date}`, item]))
   return input.userIds.flatMap(userId => selectedDates.map(date => {
     const base: ShiftSnapshot = { userId, date, startTime: input.startTime, endTime: input.endTime, shiftType: input.shiftType.trim() || 'Mesai', notes: null }
@@ -79,12 +79,6 @@ async function candidates(clinicId: string, input: ShiftPlanInput): Promise<Plan
     if (current.startTime === base.startTime && current.endTime === base.endTime && current.shiftType === base.shiftType) return { ...base, existingId: current.id, state: 'same' as const }
     return { ...base, existingId: current.id, state: 'existing' as const }
   }))
-}
-
-export async function previewShiftPlan(clinicId: string, input: ShiftPlanInput) {
-  await ensureShiftPlanningTables()
-  const rows = await candidates(clinicId, input)
-  return { rows, summary: rows.reduce((all, item) => ({ ...all, [item.state]: all[item.state] + 1 }), { create: 0, same: 0, existing: 0, leave: 0 } as Record<PlanCandidate['state'], number>) }
 }
 
 export async function applyShiftPlan(clinicId: string, actorId: string | null, requestId: string, input: ShiftPlanInput) {

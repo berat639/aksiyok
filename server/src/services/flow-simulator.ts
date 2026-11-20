@@ -4,9 +4,9 @@ import { getGreeting } from '../db/repositories/settings'
 import { retrieveTopK, buildRagPrompt } from '../rag'
 import { getGeminiClient } from './gemini-client'
 import { recordAiTokenUsage } from '../db/repositories/ai-usage'
-import { currentClinicId } from '../tenancy/context'
+import { currentBusinessTemplate, currentClinicId } from '../tenancy/context'
 import { getPromptTemplate, renderPromptTemplate } from '../prompts/registry'
-import { PROMPT_SECTION_KEYS } from '../data/default-prompts'
+import { getDefaultPromptValue, PROMPT_SECTION_KEYS } from '../data/default-prompts'
 import { resolveClinicGeminiKey } from './gemini-client'
 import { DEFAULT_LIVE_MODEL, isLiveModel } from './live-model-profile'
 import { getAiModel } from '../db/repositories/settings'
@@ -76,8 +76,8 @@ export interface FlowSimulationResponse {
 const ACTION_LABELS: Record<string, string> = {
   save_appointment_pending: '📝 Randevu Talebi Oluştur (Onay Bekler)',
   randevuOlustur: '📝 Randevu Oluştur',
-  save_patient_note: '🗒️ Hastadan Not Al (Bankoya İlet)',
-  notBirak: '🗒️ Anket / Hasta Notu Kaydet',
+  save_patient_note: '🗒️ Müşteriden Not Al (Yetkiliye İlet)',
+  notBirak: '🗒️ Anket / Müşteri Notu Kaydet',
   set_variable: '🔧 Değişken Ata',
   send_sms: '💬 SMS Gönder',
   wait_reprompt: '⏳ Bekle / Yeniden Sor',
@@ -107,19 +107,35 @@ function evaluateDeterministicCondition(
   })
 }
 
-function isFieldSatisfied(node: FlowNode, fields: Record<string, string>): boolean {
+function readableNodeFieldLabel(node: FlowNode): string {
+  if (node.data.sourceTableName && node.data.sourceColumnName) {
+    return `${node.data.sourceTableName} · ${node.data.sourceColumnName}`
+  }
+  return String(node.data.label || node.data.fieldName || 'Bilgi')
+}
+
+function isFieldSatisfied(node: FlowNode, fields: Record<string, unknown>): boolean {
   const name = String(node.data.fieldName || '').trim()
   if (!name) return true
-  const val = String(fields[name] ?? '').trim()
+  const rawCandidate = fields[name] ?? (node.data.sourceColumnId ? fields[`_col__${node.data.sourceColumnId}`] : undefined)
+  if (Array.isArray(rawCandidate)) return rawCandidate.length > 0
+  const val = String(rawCandidate ?? '').trim()
   if (!val) return false
   if (val === '(boş)' && !node.data.required) return true
   if (node.data.fieldType === 'date' || name === 'tarih') return /^\d{4}-\d{2}-\d{2}$/.test(val)
   if (node.data.fieldType === 'time' || name === 'saat') return /^([01]\d|2[0-3]):[0-5]\d$/.test(val)
-  if (name === 'telefon') return val.replace(/\D/g, '').length >= 10
+  if (node.data.fieldType === 'phone' || name === 'telefon') return val.replace(/\D/g, '').length >= 10
+  if (node.data.fieldType === 'number') {
+    const cleaned = val.replace(/[₺$€£%\s]/g, '')
+    return Number.isFinite(Number(cleaned.replace(/\./g, '').replace(',', '.'))) || Number.isFinite(Number(cleaned.replace(',', '.')))
+  }
+  if (node.data.fieldType === 'boolean') {
+    return ['true', 'false', 'evet', 'hayır', 'hayir', '1', '0', 'var', 'yok'].includes(val.toLocaleLowerCase('tr-TR'))
+  }
   return true
 }
 
-const NO_AI_MESSAGE = 'Bu klinik için yapay zeka bağlantısı tanımlı değil.'
+const NO_AI_MESSAGE = 'Bu işletme için yapay zeka bağlantısı tanımlı değil.'
 
 function emptyState(req: FlowSimulationRequest): FlowSimulationResponse {
   return {
@@ -137,26 +153,40 @@ function emptyState(req: FlowSimulationRequest): FlowSimulationResponse {
 
 async function resolveGreeting(direction: string): Promise<string> {
   try {
-    return direction === 'outbound'
-      ? (await getGreeting('outbound')) || 'Merhaba, kliniğimizden memnuniyet anketi için arıyorum.'
-      : (await getGreeting('inbound')) || 'Merhaba, kliniğimize hoş geldiniz. Size nasıl yardımcı olabilirim?'
+    if (direction === 'outbound') {
+      return (await getGreeting('outbound')) || 'Merhaba, işletmemizden memnuniyet görüşmesi için arıyorum.'
+    }
+    if (direction === 'web') {
+      return (await getGreeting('web')) || (await getGreeting('inbound')) || 'Merhaba, hoş geldiniz. Size nasıl yardımcı olabilirim?'
+    }
+    if (direction === 'whatsapp') {
+      return (await getGreeting('whatsapp')) || 'Merhaba, hoş geldiniz. Size nasıl yardımcı olabilirim?'
+    }
+    return (await getGreeting('inbound')) || 'Merhaba, hoş geldiniz. Size nasıl yardımcı olabilirim?'
   } catch {
-    return 'Merhaba, kliniğimize hoş geldiniz. Size nasıl yardımcı olabilirim?'
+    return 'Merhaba, hoş geldiniz. Size nasıl yardımcı olabilirim?'
   }
 }
 
 const DEFAULT_SIMULATOR_SYSTEM_RULES =
-  'Sen bir diş kliniğinin yapay zeka sesli/yazılı asistanısın. Yalnızca Türkçe, doğal, nazik ve kısa (1-3 cümle) yanıt ver.'
+  'Sen işletmenin yapay zeka sesli/yazılı asistanısın. Yalnızca Türkçe, doğal, nazik ve kısa (1-3 cümle) yanıt ver.'
 const DEFAULT_SIMULATOR_VOICE_FLOW_RULES =
-  'AKIŞ YÖNETİMİ: Karşılama mesajını söyledikten sonra DUR ve hastanın konuşmasını bekle. Hasta konuştuğunda veya her soruya yanıt verdiğinde önce akisBilgisiGuncelle aracını çağır, araçtan gelen sıradaki TEK görevi/soruyu uygula ve tekrar hastanın konuşmasını bekle. Hasta yanıt vermeden asla bir sonraki soruya geçme. Bilgi bankasında aranacak sorular için bilgiBankasindaAra aracını kullan.'
+  'AKIŞ YÖNETİMİ: Karşılama mesajını söyledikten sonra DUR ve karşı tarafın konuşmasını bekle. Karşı taraf konuştuğunda veya her soruya yanıt verdiğinde önce akisBilgisiGuncelle aracını çağır, araçtan gelen sıradaki TEK görevi/soruyu uygula ve tekrar karşı tarafın konuşmasını bekle. Karşı taraf yanıt vermeden asla bir sonraki soruya geçme. Bilgi bankasında aranacak sorular için bilgiBankasindaAra aracını kullan.'
+
+const SIM_WHATSAPP_SKIP_KEYS = new Set(['prompt.scope', 'prompt.service_flow', 'prompt.general_rules'])
 
 /** Kliniğin (yoksa platformun) sistem talimatlarını sırayla birleştirir. Salt okunur. */
 async function buildClinicInstructions(clinicId: string | undefined, direction: string, greeting: string): Promise<string> {
   const parts: string[] = []
+  const template = currentBusinessTemplate()
+  const isWhatsApp = direction === 'whatsapp'
   for (const key of PROMPT_SECTION_KEYS) {
+    if (key === 'prompt.appointment_rules') continue
+    if (isWhatsApp && SIM_WHATSAPP_SKIP_KEYS.has(key)) continue
     let value = ''
     try { value = await getPromptTemplate(key, clinicId) } catch { value = '' }
     if (!value) continue
+    if (key === 'prompt.rag_template' && value.trim() === (getDefaultPromptValue(key, template) || '').trim()) continue
     if (key === 'prompt.greeting_flow') {
       if (direction === 'outbound') {
         value = (await getPromptTemplate('prompt.outbound_greeting_flow', clinicId).catch(() => '')) || value
@@ -170,6 +200,36 @@ async function buildClinicInstructions(clinicId: string | undefined, direction: 
   return parts.join('\n\n')
 }
 
+/** Taslak FIELD düğümlerinin dinamik tablo seçeneklerini/ilişki başlıklarını AI Sorusuna dokunmadan canlı yükler. */
+async function hydrateDraftSimulatorNodes(rawNodes: FlowNode[], clinicId: string | undefined): Promise<FlowNode[]> {
+  if (!clinicId || rawNodes.length === 0) return rawNodes
+  try {
+    const { hydrateFlowFieldDynamicOptions } = await import('../db/repositories/dynamic-tables')
+    const hydratedMap = await hydrateFlowFieldDynamicOptions(rawNodes, clinicId)
+    if (hydratedMap.size === 0) return rawNodes
+    return rawNodes.map(node => {
+      const meta = hydratedMap.get(node.id)
+      if (!meta || node.type !== 'FIELD') return node
+      const nextData = { ...node.data, allowMultipleSelection: meta.allowMultiple }
+      if (meta.options.length > 0) {
+        nextData.enumValues = meta.options
+        nextData.fieldType = 'enum'
+      } else if (meta.columnType === 'relation' && (!Array.isArray(node.data.enumValues) || node.data.enumValues.length === 0)) {
+        nextData.fieldType = 'text'
+      }
+      return { ...node, data: nextData }
+    })
+  } catch {
+    return rawNodes
+  }
+}
+
+function nodeHasUserIntentRule(node: FlowNode): boolean {
+  if (node.data.conditionField === 'user_intent' || node.data.operator === 'intent') return true
+  const rules = Array.isArray(node.data.rules) ? node.data.rules : []
+  return rules.some((r: any) => r?.field === 'user_intent' || r?.operator === 'intent')
+}
+
 /** Taslak akış için sesli oturum ayarı. Kliniğin anahtarı, yoksa ortak yedek anahtar kullanılır. */
 async function buildVoiceConfig(req: FlowSimulationRequest, clinicId: string | undefined): Promise<SimulatorVoiceConfig> {
   let apiKey = ''
@@ -181,9 +241,11 @@ async function buildVoiceConfig(req: FlowSimulationRequest, clinicId: string | u
   const direction = req.direction || 'inbound'
   const greeting = await resolveGreeting(direction)
   const saved = await getAiModel().catch(() => null)
-  const model = isLiveModel(saved) ? saved : isLiveModel(process.env.GEMINI_LIVE_MODEL) ? process.env.GEMINI_LIVE_MODEL! : DEFAULT_LIVE_MODEL
+  const envLiveModel = process.env.GEMINI_LIVE_MODEL || ''
+  const model = isLiveModel(saved) ? saved : isLiveModel(envLiveModel) ? envLiveModel : DEFAULT_LIVE_MODEL
+  const hydratedNodes = await hydrateDraftSimulatorNodes(Array.isArray(req.nodes) ? req.nodes : [], clinicId)
   const flowPrompt = flowToPromptText({
-    id: 'sim', name: 'simulation', nodes: Array.isArray(req.nodes) ? req.nodes : [], edges: Array.isArray(req.edges) ? req.edges : [],
+    id: 'sim', name: 'simulation', nodes: hydratedNodes, edges: Array.isArray(req.edges) ? req.edges : [],
     isActive: true, createdAt: '', updatedAt: '',
   })
   const [instructions, rawVoiceFlowRules, voiceSettings] = await Promise.all([
@@ -244,7 +306,7 @@ export async function runFlowSimulationStep(req: FlowSimulationRequest): Promise
 
 async function runStep(req: FlowSimulationRequest, clinicId: string | undefined): Promise<FlowSimulationResponse> {
   const direction = req.direction || 'inbound'
-  const nodes = Array.isArray(req.nodes) ? req.nodes : []
+  const nodes = await hydrateDraftSimulatorNodes(Array.isArray(req.nodes) ? req.nodes : [], clinicId)
   const edges = Array.isArray(req.edges) ? req.edges : []
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
   const fields: Record<string, string> = { ...(req.fields || {}) }
@@ -306,20 +368,32 @@ async function runStep(req: FlowSimulationRequest, clinicId: string | undefined)
         const fieldSchemaProps: Record<string, any> = {}
         for (const fn of fieldNodes) {
           const fName = String(fn.data.fieldName!)
+          const readable =
+            fn.data.sourceTableName && fn.data.sourceColumnName
+              ? `${fn.data.sourceTableName} · ${fn.data.sourceColumnName}`
+              : fn.data.label || fName
+          const typeGuide =
+            fn.data.fieldType === 'date' || fName === 'tarih'
+              ? `Bugün ${getTodayIso()}. YYYY-MM-DD formatına çevir.`
+              : fn.data.fieldType === 'time' || fName === 'saat'
+              ? 'HH:MM (24 saat) formatına çevir.'
+              : fn.data.fieldType === 'boolean'
+              ? 'Olumlu/evet ise "true", olumsuz/hayır ise "false" yaz.'
+              : fn.data.fieldType === 'number'
+              ? 'Sadece sayısal değer yaz.'
+              : fn.data.fieldType === 'enum' && fn.data.enumValues?.length
+              ? fn.data.allowMultipleSelection || fn.data.sourceColumnType === 'multiselect'
+                ? `Seçeneklerden uygun olanları seç (birden fazlaysa virgülle ayır): ${fn.data.enumValues.join(', ')}.`
+                : `Seçeneklerden en uygun olanı seç: ${fn.data.enumValues.join(', ')}.`
+              : ''
           fieldSchemaProps[fName] = {
             type: Type.STRING,
-            description: `${fn.data.description || fName}. ${
-              fn.data.fieldType === 'date' || fName === 'tarih'
-                ? `Bugün ${getTodayIso()}. YYYY-MM-DD formatına çevir.`
-                : fn.data.fieldType === 'time' || fName === 'saat'
-                ? 'HH:MM (24 saat) formatına çevir.'
-                : ''
-            }`,
+            description: `${readable}${fn.data.description ? ` — Soru: ${fn.data.description}` : ''}. ${typeGuide}`.trim(),
           }
         }
 
         const intentCondNodes = nodes.filter(
-          n => n.type === 'CONDITION' && (n.data.conditionField === 'user_intent' || n.data.operator === 'intent')
+          n => n.type === 'CONDITION' && nodeHasUserIntentRule(n)
         )
 
         const extractionResult = await ai.models.generateContent({
@@ -415,6 +489,38 @@ Görev:
     }
   }
 
+  // 3.5. Simülasyonda telefon numarası girildiyse veri tablolarından salt okunur (DB'yi değiştirmeden) alanları doldur
+  const simClinicId = currentClinicId()
+  if (simClinicId) {
+    const phoneSource =
+      fields.telefon ||
+      Object.entries(fields).find(([k]) => /__(telefon|tel|gsm|cep)/i.test(k))?.[1] ||
+      ''
+    const phoneDigits = String(phoneSource || '').replace(/\D/g, '').slice(-10)
+    if (phoneDigits.length === 10 && fields._simHydratedPhone !== phoneDigits) {
+      try {
+        const { lookupDynamicFieldsByPhone } = await import('../db/repositories/dynamic-tables')
+        const hydrated = await lookupDynamicFieldsByPhone(phoneDigits, simClinicId)
+        fields._simHydratedPhone = phoneDigits
+        if (hydrated._dynamicKnownCaller === 'true' && !fields.kayitli) {
+          fields.kayitli = 'true'
+        }
+        if (typeof hydrated._dynamicCallerName === 'string' && hydrated._dynamicCallerName && !fields.musteri_adi) {
+          fields.musteri_adi = hydrated._dynamicCallerName
+        }
+        if (typeof hydrated._dynamicSummary === 'string' && hydrated._dynamicSummary) {
+          fields._dynamicSummary = hydrated._dynamicSummary
+        }
+        for (const [hk, hv] of Object.entries(hydrated)) {
+          if (hk === '_dynamicKnownCaller' || hk === '_dynamicCallerName' || hk === '_dynamicSummary') continue
+          if (fields[hk] === undefined || fields[hk] === '') {
+            fields[hk] = Array.isArray(hv) ? hv.join(', ') : String(hv ?? '')
+          }
+        }
+      } catch {}
+    }
+  }
+
   // 4. Advance through the flow graph
   let completed = false
   let stoppedNode: FlowNode | undefined = undefined
@@ -469,20 +575,43 @@ Görev:
     if (node.type === 'CONDITION') {
       const condField = String(node.data.conditionField || '')
       // If user_intent and no userMessage yet, pause at the condition node
-      if ((condField === 'user_intent' || node.data.operator === 'intent') && !userMessage && !req.manualBranch) {
+      if (nodeHasUserIntentRule(node) && !userMessage && !req.manualBranch) {
         stoppedNode = node
         logs.push({
           role: 'system',
-          text: `🔀 Özel Niyet Koşulu: "${node.data.conditionValue || ''}" — Bir hasta mesajı yazarak yapay zekanın hangi dala yönlendirdiğini test edin.`,
+          text: `🔀 Özel Niyet Koşulu: "${node.data.conditionValue || ''}" — Bir müşteri mesajı yazarak yapay zekanın hangi dala yönlendirdiğini test edin.`,
         })
         break
       }
 
+      if (simClinicId) {
+        try {
+          const { hydrateDynamicConditionLookups } = await import('../db/repositories/dynamic-tables')
+          const condPatch = await hydrateDynamicConditionLookups({
+            clinicId: simClinicId,
+            node,
+            fields,
+          })
+          for (const [ck, cv] of Object.entries(condPatch)) {
+            if (cv !== undefined && cv !== null && fields[ck] === undefined) {
+              fields[ck] = Array.isArray(cv) ? cv.join(', ') : String(cv)
+            }
+          }
+        } catch {}
+      }
+
       const matched = evaluateDeterministicCondition(node, fields, aiIntentMatched, direction)
       const branch = matched ? 'true' : 'false'
+      const condDisplay =
+        node.data.label ||
+        (node.data.sourceColumnId === '__row_exists__' && node.data.sourceTableName
+          ? `${node.data.sourceTableName} · Bu tabloda kayıtlı mı?`
+          : node.data.sourceTableName && node.data.sourceColumnName
+          ? `${node.data.sourceTableName} · ${node.data.sourceColumnName}`
+          : condField || 'koşul')
       logs.push({
         role: 'system',
-        text: `🔀 Koşul Değerlendirildi (${condField || 'koşul'}): ${matched ? '✅ EVET (Yeşil Yol)' : '❌ HAYIR (Kırmızı Yol)'}`,
+        text: `🔀 Koşul Değerlendirildi (${condDisplay}): ${matched ? '✅ EVET (Yeşil Yol)' : '❌ HAYIR (Kırmızı Yol)'}`,
       })
       const outEdge = edges.find(e => e.source === node.id && e.sourceHandle === branch)
       if (!outEdge) {
@@ -550,9 +679,12 @@ Görev:
       }
       triggeredActions.push(node)
       const actTitle = ACTION_LABELS[act] || node.data.label || act
+      const visibleFields = Object.fromEntries(
+        Object.entries(fields).filter(([k]) => !k.startsWith('_')),
+      )
       logs.push({
         role: 'action',
-        text: `⚡ İŞLEM TETİKLENDİ: ${actTitle}\nToplanan Veriler: ${JSON.stringify(fields)}`,
+        text: `⚡ İŞLEM TETİKLENDİ: ${actTitle}\nToplanan Veriler: ${JSON.stringify(visibleFields)}`,
       })
       const outEdge = edges.find(e => e.source === node.id)
       if (!outEdge) {
@@ -594,16 +726,19 @@ Görev:
       return `Randevu talebiniz (${fields.tarih || 'belirtilen tarih'} ${fields.saat || ''}) başarıyla oluşturuldu.`
     }
     if (act === 'save_patient_note' || act === 'notBirak') {
-      return 'Notunuz kaydedildi ve klinik bankosuna iletildi.'
+      return 'Notunuz kaydedildi ve yetkililere iletildi.'
     }
     if (act === 'send_wa_location') {
-      return 'Klinik konumumuz WhatsApp üzerinden telefonunuza gönderildi.'
+      return 'İşletme konumumuz WhatsApp üzerinden telefonunuza gönderildi.'
     }
     if (act === 'send_wa_message' || act === 'send_sms') {
       return msg || 'Bilgilendirme mesajınız gönderildi.'
     }
     if (act === 'end_call') {
-      return msg || 'Görüşmemizi sonlandırıyorum, sağlıklı günler dileriz.'
+      return msg || 'Görüşmemizi sonlandırıyorum, iyi günler dileriz.'
+    }
+    if (act === 'save_record') {
+      return `${actionNode.data.targetTableName ? `${actionNode.data.targetTableName} veri tablosuna` : 'Veri tablosuna'} kayıt simülasyonu tamamlandı (gerçek veritabanına yazılmadı).`
     }
     return `${ACTION_LABELS[act] || act} işlemi tamamlandı.`
   }
@@ -614,18 +749,19 @@ Görev:
   if (stoppedNode?.type === 'START') {
     stepInstruction = `Yalnızca şu karşılama mesajını söyle: "${greetingText}". Karşılamayı söyledikten sonra DUR ve müşterinin konuşmasını bekle; başka soru sorma.`
   } else if (stoppedNode?.type === 'FIELD') {
-    stepInstruction = `${triggeredActionSummary ? `Önce şu işlemin gerçekleştiğini belirt: "${triggeredActionSummary}". Ardından ` : ''}Şu anki akış adımında hastadan YALNIZCA "${stoppedNode.data.fieldName}" bilgisini istemelisin. Sorulacak soru: "${stoppedNode.data.description || stoppedNode.data.fieldName}". Bu tek soruyu sorduktan sonra DUR ve müşterinin konuşmasını/cevabını bekle; başka adımın sorusunu peşine ekleme.`
+    const readableField = readableNodeFieldLabel(stoppedNode)
+    stepInstruction = `${triggeredActionSummary ? `Önce şu işlemin gerçekleştiğini belirt: "${triggeredActionSummary}". Ardından ` : ''}Şu anki akış adımında müşteriden YALNIZCA "${readableField}" (${stoppedNode.data.fieldName}) bilgisini istemelisin. Sorulacak soru: "${stoppedNode.data.description || `${readableField} bilgisini paylaşır mısınız?`}". Bu tek soruyu sorduktan sonra DUR ve müşterinin konuşmasını/cevabını bekle; başka adımın sorusunu peşine ekleme.`
   } else if (stoppedNode?.type === 'CONDITION') {
-    stepInstruction = `Şu anki adımda hastanın niyetini ("${stoppedNode.data.conditionValue}") anlamak için nasıl yardımcı olabileceğini sor ve müşterinin konuşmasını bekle.`
+    stepInstruction = `Şu anki adımda müşterinin niyetini ("${stoppedNode.data.conditionValue}") anlamak için nasıl yardımcı olabileceğini sor ve müşterinin konuşmasını bekle.`
   } else if (stoppedNode?.type === 'ACTION' && (stoppedNode.data.action === 'wait_reprompt' || stoppedNode.data.action === 'wait')) {
     const waitMsg = renderFlowTemplate(String(stoppedNode.data.message || 'Sizi dinliyorum, nasıl yardımcı olabilirim?'), fields)
-    stepInstruction = `Hastaya "${waitMsg}" cümlesini söyle ve konuşmasını bekle.`
+    stepInstruction = `Müşteriye "${waitMsg}" cümlesini söyle ve konuşmasını bekle.`
   } else if (stoppedNode?.type === 'ACTION' && (stoppedNode.data.action === 'transfer_call' || stoppedNode.data.action === 'transfer') && fields[`_transferConfirm_${stoppedNode.id}`] === 'asked') {
     const confirmQ = renderFlowTemplate(String(stoppedNode.data.confirmationQuestion || 'Sizi yetkili birime aktarmamı ister misiniz?'), fields)
-    stepInstruction = `Hastaya yalnızca şu aktarım onay sorusunu sor: "${confirmQ}" ve cevabını bekle.`
+    stepInstruction = `Müşteriye yalnızca şu aktarım onay sorusunu sor: "${confirmQ}" ve cevabını bekle.`
   } else if (stoppedNode?.type === 'END' || completed) {
-    const closeMsg = stoppedNode?.data?.message || 'Görüşmeyi nazikçe tamamla ve sağlıklı günler dile.'
-    stepInstruction = `${triggeredActionSummary ? `Gerçekleşen işlem bilgisini hastaya söyle: "${triggeredActionSummary}". ` : ''}Akış tamamlandı. Kapanış mesajı: "${closeMsg}".`
+    const closeMsg = stoppedNode?.data?.message || 'Görüşmeyi nazikçe tamamla ve iyi günler dile.'
+    stepInstruction = `${triggeredActionSummary ? `Gerçekleşen işlem bilgisini müşteriye söyle: "${triggeredActionSummary}". ` : ''}Akış tamamlandı. Kapanış mesajı: "${closeMsg}".`
   }
 
   if (req.skipReply) {
@@ -639,7 +775,7 @@ Görev:
       completed,
       aiPowered: Boolean(ai),
       usedKnowledgeTitles,
-      nextInstruction: stepInstruction || 'Akışta sıradaki adıma göre hastayla doğal biçimde devam et.',
+      nextInstruction: stepInstruction || 'Akışta sıradaki adıma göre müşteriyle doğal biçimde devam et.',
     }
   }
 
@@ -658,15 +794,15 @@ Görev:
       const sysInstruction = `${simSystemRules}
 Bugünün tarihi: ${getTodayIso()}.
 ${stoppedNode?.type === 'START' ? `Görüşme yeni başladı. Yalnızca şu karşılama mesajını söyle: "${greetingText}" ve müşterinin konuşmasını bekle; ek soru sorma.` : ''}
-${ragContext ? `\nKLİNİK BİLGİ BANKASI (Eğer kullanıcı bir soru sorduysa bu bilgilerle yanıtla):\n${ragContext}\n` : ''}
-${clinicInstructions ? `\nKLİNİK TALİMATLARI:\n${clinicInstructions}\n` : ''}
+${ragContext ? `\nİŞLETME BİLGİ BANKASI (Eğer kullanıcı bir soru sorduysa bu bilgilerle yanıtla):\n${ragContext}\n` : ''}
+${clinicInstructions ? `\nİŞLETME TALİMATLARI:\n${clinicInstructions}\n` : ''}
 ${flowPrompt}
 
 MEVCUT TOPLANAN BİLGİLER: ${JSON.stringify(fields)}
 SIRADAKİ ZORUNLU GÖREVİN: ${stepInstruction}`
 
       const promptTurn = userMessage
-        ? `Hasta şöyle dedi: "${userMessage}". Eğer hastanın mesajında bir soru varsa önce Bilgi Bankası ile kısaca yanıtla, ardından sıradaki görevi (${stepInstruction}) doğal bir cümleyle uygula.`
+        ? `Müşteri şöyle dedi: "${userMessage}". Eğer müşterinin mesajında bir soru varsa önce Bilgi Bankası ile kısaca yanıtla, ardından sıradaki görevi (${stepInstruction}) doğal bir cümleyle uygula.`
         : `Görüşmeyi başlat ve sıradaki görevi (${stepInstruction}) uygula.`
 
       const gen = await ai.models.generateContent({
@@ -719,9 +855,10 @@ SIRADAKİ ZORUNLU GÖREVİN: ${stepInstruction}`
     })
   }
   if (stoppedNode?.type === 'FIELD') {
+    const readableField = readableNodeFieldLabel(stoppedNode)
     logs.push({
       role: 'ai',
-      text: `🤖 AI Sorusu (${stoppedNode.data.fieldName}): "${stoppedNode.data.description || `${stoppedNode.data.fieldName} bilgisini paylaşır mısınız?`}"`,
+      text: `🤖 AI Sorusu (${readableField}): "${stoppedNode.data.description || `${readableField} bilgisini paylaşır mısınız?`}"`,
     })
   } else if (stoppedNode?.type === 'ACTION' && (stoppedNode.data.action === 'wait_reprompt' || stoppedNode.data.action === 'wait')) {
     const waitMsg = renderFlowTemplate(String(stoppedNode.data.message || 'Sizi dinliyorum, nasıl yardımcı olabilirim?'), fields)

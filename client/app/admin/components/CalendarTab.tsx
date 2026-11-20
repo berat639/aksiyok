@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import dynamic from 'next/dynamic'
 import { toast } from 'react-hot-toast'
-import { Plus, X, Search, Filter, Calendar, CalendarOff, Clock, User, Phone, PhoneCall, Link2, LogOut, LayoutDashboard, CalendarDays, Users, Stethoscope, BriefcaseMedical, Settings, ChevronLeft, ChevronRight, Pencil, Trash2, FolderKanban, ChevronDown, ChevronUp, ArrowUpRight, AlertTriangle } from 'lucide-react'
+import { Plus, X, Search, Filter, Calendar, CalendarOff, Clock, User, Phone, PhoneCall, Link2, LogOut, LayoutDashboard, CalendarDays, Users, Table2, Stethoscope, BriefcaseMedical, Settings, ChevronLeft, ChevronRight, Pencil, Trash2, FolderKanban, ChevronDown, ChevronUp, ArrowUpRight, AlertTriangle } from 'lucide-react'
+import { useAuth } from '../../../lib/auth-context'
 import ShiftContextMenu from "./ShiftContextMenu"
 import DoctorLeaveModal, { DoctorLeaveItem } from './DoctorLeaveModal'
 import DentalCalendar, { UpcomingStatusBucket, UpcomingStatusBarItem } from './DentalCalendar'
 import { ToothChip, inputStyle } from './ToothChip'
 import PatientSidePanel from './PatientSidePanel'
-import AdvancedTedaviModal from './AdvancedTedaviModal';
 import QuickCreatePopover from './QuickCreatePopover';
 import MiniCalendar from './MiniCalendar';
 import PatientProfileCard from './PatientProfileCard';
@@ -16,10 +17,19 @@ import TreatmentDoctorMultiSelect from './TreatmentDoctorMultiSelect';
 import ConfirmModal from './ConfirmModal';
 import AddPatientModal from './AddPatientModal';
 import PatientConsentPanel from './PatientConsentPanel';
+import AppointmentDetailDynamicEditor from './dynamic-tables/AppointmentDetailDynamicEditor';
+import AppointmentDynamicPaymentSection from './dynamic-tables/AppointmentDynamicPaymentSection';
+import type { AppointmentBookingContextData } from './dynamic-tables/AppointmentDynamicRecordsSection';
+import ClinicalDatePicker from './dynamic-tables/ui/ClinicalDatePicker';
+import {
+  DynamicQuickRecordModal,
+  DynamicRecordsSidePanel,
+} from './dynamic-tables/DynamicCalendarModals';
 import { useBackdropDismiss } from '../../../hooks/useBackdropDismiss'
 import { PhoneMaskedInput, matchesPhoneSearch } from '@/lib/phone-mask'
 
-import DicomViewer from './DicomViewer'
+const AdvancedTedaviModal = dynamic(() => import('./AdvancedTedaviModal'), { ssr: false })
+const DicomViewer = dynamic(() => import('./DicomViewer'), { ssr: false })
 
 import Slider from 'rc-slider'
 import 'rc-slider/assets/index.css'
@@ -95,7 +105,7 @@ const STATUS_LABELS: Record<string, string> = {
   scheduled: '📅 Planlandı (Teyit Bekliyor)',
   confirmed: '✅ Gelecek (Onaylandı)',
   arrived_unconfirmed: '🚶 Teyitsiz Geldi',
-  waiting_in_clinic: '🏥 Klinikte Bekliyor',
+  waiting_in_clinic: '📍 Bekliyor',
   in_progress: '🔄 Devam Ediyor',
   completed: '✓ Tamamlandı',
   cancelled: '❌ Gelmiyor / İptal',
@@ -136,6 +146,23 @@ interface CalendarEvent {
   patientPreferredDate?: string | null
   patientRespondedAt?: string | null
   patientResponseChannel?: string | null
+  dynamicLinks?: Array<{
+    tableId: string
+    tableName: string
+    tableIcon: string
+    tableColor: string
+    rowId: string
+    displayTitle: string
+    phone: string | null
+    email: string | null
+    values: Record<string, any>
+    fieldHighlights?: Array<{
+      columnId: string
+      name: string
+      fieldType: string
+      displayValue: string
+    }>
+  }>
 }
 
 const UPCOMING_STATUS_OPTIONS: Array<{
@@ -235,6 +262,7 @@ interface Patient {
 }
 
 export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToClinicStaff?: () => void }) {
+  const { user } = useAuth()
   const panelBackdropDismiss = useBackdropDismiss(() => { setPanelOpen(false); setPatientProfileId(null) })
   const unassignedBackdropDismiss = useBackdropDismiss(() => setUnassignedListMenu(null))
   const [doctors, setDoctors] = useState<Doctor[]>([])
@@ -258,6 +286,8 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
   })
   const [workingHoursSaving, setWorkingHoursSaving] = useState(false)
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null)
+  const [apptNoteDraft, setApptNoteDraft] = useState('')
+  const [savingApptNote, setSavingApptNote] = useState(false)
   const [patientPanelOpen, setPatientPanelOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
@@ -285,8 +315,28 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
     onConfirm: () => { }
   });
 
-  const [quickCreateMenu, setQuickCreateMenu] = useState<{ start: string, end: string, doctorId: string | null, x: number, y: number, isCentered?: boolean } | null>(null)
+  const [quickCreateMenu, setQuickCreateMenu] = useState<{
+    start: string
+    end: string
+    doctorId: string | null
+    x: number
+    y: number
+    isCentered?: boolean
+    initialSelectedIdsByTable?: Record<string, string[]>
+  } | null>(null)
   const [showAddPatientModal, setShowAddPatientModal] = useState(false)
+  const [dynamicBookingContext, setDynamicBookingContext] = useState<AppointmentBookingContextData>({
+    hasAnyDynamicTables: false,
+    linkedTables: [],
+    allTables: [],
+    relations: [],
+    rowLinks: [],
+  })
+  const [dynamicRecordsPanelOpen, setDynamicRecordsPanelOpen] = useState(false)
+  const [dynamicQuickRecordModal, setDynamicQuickRecordModal] = useState<{
+    isOpen: boolean
+    tableId?: string | null
+  }>({ isOpen: false })
 
   const [showPatientSearchDropdown, setShowPatientSearchDropdown] = useState(false)
 
@@ -306,10 +356,40 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
   const [patientProfileData, setPatientProfileData] = useState<any>(null)
   const [profileLoading, setProfileLoading] = useState(false)
   const hasDoctors = doctors.length > 0
-  const noDoctorsTooltip = 'Hekim bulunamadı'
+  const hasDynamicTables = dynamicBookingContext.hasAnyDynamicTables
+  const isClinicMode = user?.businessTemplate === 'dental_clinic'
+  const noDoctorsTooltip = 'Çalışan bulunamadı'
+
+  const openCenteredQuickCreate = useCallback(
+    (initialSelectedIdsByTable?: Record<string, string[]>) => {
+      if (!hasDoctors) {
+        toast.error('Randevu oluşturmak için önce bir çalışan ekleyin.')
+        return
+      }
+      const nowHour = new Date().getHours()
+      const minH = typeof workingHours?.slotStartHour === 'number' ? workingHours.slotStartHour : 8
+      const maxH =
+        typeof workingHours?.slotEndHour === 'number'
+          ? Math.min(23, workingHours.slotEndHour - 1)
+          : 19
+      const startH = nowHour >= minH && nowHour <= maxH ? nowHour : Math.max(9, minH)
+      const t1 = `${startH.toString().padStart(2, '0')}:00`
+      const t2 = `${startH.toString().padStart(2, '0')}:30`
+      setQuickCreateMenu({
+        start: `${currentDate}T${t1}:00+03:00`,
+        end: `${currentDate}T${t2}:00+03:00`,
+        doctorId: null,
+        x: 0,
+        y: 0,
+        isCentered: true,
+        initialSelectedIdsByTable,
+      })
+    },
+    [hasDoctors, isClinicMode, workingHours, currentDate]
+  )
 
   useEffect(() => {
-    if (patientProfileId) {
+    if (isClinicMode && patientProfileId) {
       setProfileLoading(true)
       fetch(`/api/dental/patients/${patientProfileId}/profile`)
         .then(res => res.json())
@@ -512,7 +592,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       if (newStatus === 'completed' && updatedTreatments.length > 0) {
         const allCompleted = updatedTreatments.every((tr: any) => tr.status === 'completed');
         if (allCompleted && selectedEvent.status !== 'completed') {
-          const apptRes = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+          const apptRes = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: 'completed' }),
@@ -605,11 +685,11 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
 
     // 1. Critical calendar data: load in parallel and render immediately without waiting for slow secondary endpoints
     const [docs, evts, shiftsData, leavesData, workingHoursData] = await Promise.all([
-      fetchSafe('/api/dental/doctors'),
-      fetchSafe('/api/dental/appointments'),
+      fetchSafe('/api/calendar/employees'),
+      fetchSafe('/api/calendar/appointments'),
       fetchSafe('/api/shifts'),
-      fetchSafe('/api/dental/doctors/leaves'),
-      fetchSafe('/api/dental/working-hours'),
+      fetchSafe('/api/calendar/employees/leaves'),
+      fetchSafe('/api/calendar/working-hours'),
     ])
 
     if (docs) {
@@ -635,19 +715,54 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       setWorkingHours(workingHoursData)
     }
 
-    // 2. Non-blocking secondary data (patients list & inventory)
+    // 2. Non-blocking secondary data (patients list only for dental_clinic, inventory & dynamic booking context)
     void Promise.all([
-      fetchSafe('/api/dental/patients'),
+      isClinicMode ? fetchSafe('/api/dental/patients') : Promise.resolve(null),
       fetchSafe('/api/yonetici/inventory'),
-    ]).then(([pats, invs]) => {
+      fetchSafe('/api/dynamic-tables/appointment-context'),
+    ]).then(([pats, invs, dynCtx]) => {
       if (pats && Array.isArray(pats)) {
         setPatients(pats.filter((patient: { isArchived?: boolean }) => !patient.isArchived))
+      } else if (!isClinicMode) {
+        setPatients([])
       }
       if (invs) setInventoryItems(invs)
+      if (dynCtx && !dynCtx.error) {
+        setDynamicBookingContext({
+          hasAnyDynamicTables: Boolean(dynCtx.hasAnyDynamicTables),
+          linkedTables: Array.isArray(dynCtx.linkedTables) ? dynCtx.linkedTables : [],
+          allTables: Array.isArray(dynCtx.allTables) ? dynCtx.allTables : [],
+          relations: Array.isArray(dynCtx.relations) ? dynCtx.relations : [],
+          rowLinks: Array.isArray(dynCtx.rowLinks) ? dynCtx.rowLinks : [],
+        })
+      }
     })
-  }, [currentDate])
+  }, [currentDate, isClinicMode])
+
+  const refreshDynamicBookingContext = useCallback(async () => {
+    try {
+      const res = await fetch('/api/dynamic-tables/appointment-context')
+      const dynCtx = await res.json().catch(() => null)
+      if (dynCtx && !dynCtx.error) {
+        const nextCtx: AppointmentBookingContextData = {
+          hasAnyDynamicTables: Boolean(dynCtx.hasAnyDynamicTables),
+          linkedTables: Array.isArray(dynCtx.linkedTables) ? dynCtx.linkedTables : [],
+          allTables: Array.isArray(dynCtx.allTables) ? dynCtx.allTables : [],
+          relations: Array.isArray(dynCtx.relations) ? dynCtx.relations : [],
+          rowLinks: Array.isArray(dynCtx.rowLinks) ? dynCtx.rowLinks : [],
+        }
+        setDynamicBookingContext(nextCtx)
+        return nextCtx
+      }
+    } catch { }
+    return null
+  }, [])
 
   useEffect(() => { fetchData() }, [fetchData])
+
+  useEffect(() => {
+    setApptNoteDraft(selectedEvent?.notes || '')
+  }, [selectedEvent?.id, selectedEvent?.notes])
 
   useEffect(() => {
     const onHoursUpdated = (evt: Event) => {
@@ -671,12 +786,12 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
         body: JSON.stringify({ startTime: nextStartTime, endTime: nextEndTime }),
       })
       const data = await res.json().catch(() => null)
-      if (!res.ok || !data) throw new Error(data?.error || 'Klinik mesai saatleri kaydedilemedi')
+      if (!res.ok || !data) throw new Error(data?.error || 'İşletme mesai saatleri kaydedilemedi')
       setWorkingHours(data)
       window.dispatchEvent(new CustomEvent('clinicWorkingHoursUpdated', { detail: data }))
-      toast.success(`🕒 Klinik genel mesai saatleri güncellendi: ${data.startTime} – ${data.endTime}${data.isOvernight ? ' (Ertesi Gün)' : ''}`)
+      toast.success(`🕒 İşletme genel mesai saatleri güncellendi: ${data.startTime} – ${data.endTime}${data.isOvernight ? ' (Ertesi Gün)' : ''}`)
     } catch (err: any) {
-      toast.error(err.message || 'Klinik mesai saatleri kaydedilemedi')
+      toast.error(err.message || 'İşletme mesai saatleri kaydedilemedi')
     } finally {
       setWorkingHoursSaving(false)
     }
@@ -702,11 +817,11 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
               fetchData()
             }
             if (action === 'confirm') {
-              toast.success(`✅ Hasta randevuyu onayladı: ${updatedAppt?.title || 'Randevu'}`)
+              toast.success(`✅ Randevu onaylandı: ${updatedAppt?.title || 'Randevu'}`)
             } else if (action === 'postpone') {
-              toast(`⏳ Hasta erteleme talep etti: ${updatedAppt?.title || 'Randevu'}`, { icon: '⏳', duration: 6000 })
+              toast(`⏳ Erteleme talebi alındı: ${updatedAppt?.title || 'Randevu'}`, { icon: '⏳', duration: 6000 })
             } else if (action === 'cancel') {
-              toast.error(`❌ Hasta gelemeyeceğini bildirdi (İptal): ${updatedAppt?.title || 'Randevu'}`, { duration: 6000 })
+              toast.error(`❌ Randevu iptal bildirimi: ${updatedAppt?.title || 'Randevu'}`, { duration: 6000 })
             }
           } else if (payload.type === 'new_appointment') {
             fetchData()
@@ -721,13 +836,13 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
 
   const handleQuickPatientResponse = async (appointmentId: string, action: 'confirm' | 'postpone' | 'cancel', note?: string) => {
     try {
-      const res = await fetch(`/api/dental/appointments/${appointmentId}/patient-response`, {
+      const res = await fetch(`/api/calendar/appointments/${appointmentId}/recipient-response`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, note }),
       })
       const body = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(body.error || 'Hasta yanıtı kaydedilemedi')
+      if (!res.ok) throw new Error(body.error || 'Randevu yanıtı kaydedilemedi')
       if (body.appointment) {
         setEvents(prev => prev.map(ev => ev.id === body.appointment.id ? { ...ev, ...body.appointment } : ev))
         setSelectedEvent(prev => prev && prev.id === body.appointment.id ? { ...prev, ...body.appointment } : prev)
@@ -801,9 +916,10 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
   const loadPatientContextForEvent = useCallback((event: CalendarEvent | null) => {
     if (!event) return;
     let targetPatientId = event.patientId;
-    if (!targetPatientId && patients.length > 0) {
-      const candidateName = (event.intakePatientName || event.title?.split(' - ')[0] || '').trim().toLocaleLowerCase('tr-TR');
-      const phoneDigits = String(event.intakePatientPhone || '').replace(/\D/g, '').slice(-10);
+    if (!targetPatientId && isClinicMode && patients.length > 0) {
+      const primaryDynLink = Array.isArray(event.dynamicLinks) ? event.dynamicLinks[0] : null;
+      const candidateName = (primaryDynLink?.displayTitle || event.intakePatientName || event.title?.split(' • ')[0]?.split(' - ')[0] || '').trim().toLocaleLowerCase('tr-TR');
+      const phoneDigits = String(primaryDynLink?.phone || event.intakePatientPhone || '').replace(/\D/g, '').slice(-10);
       const matched = patients.find((p: any) => {
         if (phoneDigits.length === 10 && String(p?.phone || '').replace(/\D/g, '').endsWith(phoneDigits)) return true;
         return candidateName && p?.name?.trim().toLocaleLowerCase('tr-TR') === candidateName;
@@ -812,14 +928,14 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
         targetPatientId = matched.id;
         setSelectedEvent(prev => prev && prev.id === event.id && !prev.patientId ? { ...prev, patientId: matched.id } : prev);
         setEvents(prev => prev.map((ev: any) => ev.id === event.id && !ev.patientId ? { ...ev, patientId: matched.id } : ev));
-        void fetch(`/api/dental/appointments/${event.id}`, {
+        void fetch(`/api/calendar/appointments/${event.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ patientId: matched.id }),
         }).catch(() => {});
       }
     }
-    if (!targetPatientId) return;
+    if (!isClinicMode || !targetPatientId) return;
     const cachedPatient = patients.find((p: any) => p.id === targetPatientId);
     if (cachedPatient) setPatientInfo(prev => prev?.id === targetPatientId ? prev : cachedPatient);
     fetch(`/api/dental/patients/${targetPatientId}`).then(r => r.ok ? r.json() : null).then(d => d && setPatientInfo(d)).catch(() => { });
@@ -842,7 +958,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       setTreatmentGroups(allGroups);
     }).catch(() => { });
     fetch(`/api/dental/patients/${targetPatientId}/payments`).then(r => r.ok ? r.json() : []).then(setPatientPayments).catch(() => { });
-  }, [patients]);
+  }, [patients, isClinicMode]);
 
   useEffect(() => {
     if (panelOpen && selectedEvent) {
@@ -911,12 +1027,12 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
 
   const approveAiReview = async () => {
     if (!aiReviewModal || (!aiReviewPatientId && !aiReviewCreatePatient)) {
-      toast.error('Mevcut bir hasta seçin veya yeni hasta oluşturun')
+      toast.error(isClinicMode ? 'Mevcut bir hasta seçin veya yeni hasta oluşturun' : 'Mevcut bir kişi seçin veya yeni kişi oluşturun')
       return
     }
     setAiReviewSaving(true)
     try {
-      const res = await fetch(`/api/dental/appointments/${aiReviewModal.id}/approve-ai`, {
+      const res = await fetch(`/api/calendar/appointments/${aiReviewModal.id}/approve-ai`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           patientId: aiReviewCreatePatient ? undefined : aiReviewPatientId,
@@ -927,7 +1043,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       })
       const body = await res.json()
       if (!res.ok) throw new Error(body.error || 'Onay kaydedilemedi')
-      toast.success(aiReviewDoctorId ? 'Randevu onaylandı ve planlandı' : 'Randevu onaylandı; doktor ataması bekliyor')
+      toast.success(aiReviewDoctorId ? 'Randevu onaylandı ve planlandı' : 'Randevu onaylandı; çalışan ataması bekliyor')
       setAiReviewModal(null); setPanelOpen(false); setSelectedEvent(null); fetchData()
     } catch (error: any) { toast.error(error.message || 'Onay sırasında hata oluştu') }
     finally { setAiReviewSaving(false) }
@@ -937,7 +1053,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
     if (!aiReviewModal || !aiReviewRejectReason.trim()) { toast.error('İptal nedeni zorunludur'); return }
     setAiReviewSaving(true)
     try {
-      const res = await fetch(`/api/dental/appointments/${aiReviewModal.id}/reject-ai`, {
+      const res = await fetch(`/api/calendar/appointments/${aiReviewModal.id}/reject-ai`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: aiReviewRejectReason }),
       })
       const body = await res.json()
@@ -955,17 +1071,17 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
     setConfirmModal({
       isOpen: true,
       title: 'Randevuyu Sil',
-      message: `"${selectedEvent.title}" randevusunu silmek istediğinizden emin misiniz? Randevuya bağlı tedavi planları korunacaktır.`,
+      message: `"${selectedEvent.title}" randevusunu silmek istediğinizden emin misiniz?`,
       confirmText: 'Evet, Sil',
       variant: 'danger',
       onConfirm: async () => {
         try {
-          await fetch(`/api/dental/appointments/${deletingId}`, { method: 'DELETE' });
+          await fetch(`/api/calendar/appointments/${deletingId}`, { method: 'DELETE' });
           setEvents(prev => prev.filter(ev => ev.id !== deletingId));
           setPanelOpen(false);
           setSelectedEvent(null);
           fetchData();
-          if (patientProfileId && (!deletingPatientId || patientProfileId === deletingPatientId)) {
+          if (isClinicMode && patientProfileId && (!deletingPatientId || patientProfileId === deletingPatientId)) {
             fetch(`/api/dental/patients/${patientProfileId}/profile`)
               .then(r => r.json())
               .then(d => { if (!d.error) setPatientProfileData(d); })
@@ -981,7 +1097,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
     if (!docName || !docSpecialty) return
     setDocSaving(true)
     try {
-      const res = await fetch('/api/dental/doctors', {
+      const res = await fetch('/api/calendar/employees', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: docName, specialty: docSpecialty, color: docColor }),
@@ -1018,21 +1134,52 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       : { previous: 'Önceki ay', next: 'Sonraki ay', current: 'Aylık görünüm' }
 
   const searchResults = useMemo(() => {
-    const q = patientSearchQuery.trim().toLowerCase();
+    const q = patientSearchQuery.trim().toLocaleLowerCase('tr-TR');
     if (q.length < 1) return [];
 
     const personMap = new Map<string, {
       name: string;
       phone: string | null;
+      tableName?: string;
+      dynamicTableId?: string;
+      dynamicRowId?: string;
+      fieldSummary?: string;
       patientIds: Set<string>;
+      dynamicRowIds: Set<string>;
       appointments: CalendarEvent[];
     }>();
 
-    // 1. Scan patients
+    // 1a. Scan dynamic table records so sector-independent records & fields are searchable
+    for (const entry of dynamicBookingContext.allTables) {
+      for (const row of entry.rows) {
+        if (!row.displayTitle) continue;
+        const cleanName = row.displayTitle.trim();
+        const rPhone = row.phone?.trim() || null;
+        const key = `dyn_${row.id}`;
+        const fieldText = Object.values(row.values || {})
+          .filter((v) => v !== null && v !== undefined && String(v).trim() !== '')
+          .map((v) => (Array.isArray(v) ? v.join(', ') : String(v)))
+          .slice(0, 4)
+          .join(' • ');
+        personMap.set(key, {
+          name: cleanName,
+          phone: rPhone,
+          tableName: entry.table.name,
+          dynamicTableId: entry.table.id,
+          dynamicRowId: row.id,
+          fieldSummary: fieldText,
+          patientIds: new Set(),
+          dynamicRowIds: new Set([row.id]),
+          appointments: [],
+        });
+      }
+    }
+
+    // 1b. Scan patients (when clinic mode or existing patients exist)
     patients.forEach((p: any) => {
       if (!p?.name) return;
       const cleanName = p.name.trim();
-      const normalizedName = cleanName.toLowerCase();
+      const normalizedName = cleanName.toLocaleLowerCase('tr-TR');
       const pPhone = p.phone?.trim() || null;
       const key = `${normalizedName}_${pPhone || ''}`;
 
@@ -1041,7 +1188,8 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           name: cleanName,
           phone: pPhone,
           patientIds: new Set(p.id ? [p.id] : []),
-          appointments: []
+          dynamicRowIds: new Set(),
+          appointments: [],
         });
       } else {
         const existing = personMap.get(key)!;
@@ -1053,6 +1201,24 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
     // 2. Associate appointments
     events.forEach(ev => {
       if (!ev) return;
+      let matchedAny = false;
+
+      // Match by dynamicLinks
+      if (Array.isArray(ev.dynamicLinks) && ev.dynamicLinks.length > 0) {
+        for (const lk of ev.dynamicLinks) {
+          const dynKey = `dyn_${lk.rowId}`;
+          const foundDyn = personMap.get(dynKey);
+          if (foundDyn) {
+            if (!foundDyn.appointments.some(a => a.id === ev.id)) {
+              foundDyn.appointments.push(ev);
+            }
+            matchedAny = true;
+          }
+        }
+      }
+
+      if (matchedAny) return;
+
       let matchedPersonKey: string | null = null;
 
       // Match by patientId
@@ -1067,9 +1233,9 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
 
       // Match by title
       if (!matchedPersonKey && ev.title) {
-        const titleLower = ev.title.toLowerCase();
+        const titleLower = ev.title.toLocaleLowerCase('tr-TR');
         for (const [key, person] of personMap.entries()) {
-          if (titleLower.includes(person.name.toLowerCase())) {
+          if (titleLower.includes(person.name.toLocaleLowerCase('tr-TR'))) {
             matchedPersonKey = key;
             break;
           }
@@ -1080,13 +1246,14 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       if (!matchedPersonKey && ev.title) {
         const candidateName = ev.title.split(' - ')[0].trim();
         if (candidateName.length >= 2) {
-          const key = `${candidateName.toLowerCase()}_`;
+          const key = `${candidateName.toLocaleLowerCase('tr-TR')}_`;
           if (!personMap.has(key)) {
             personMap.set(key, {
               name: candidateName,
-              phone: null,
+              phone: ev.intakePatientPhone || null,
               patientIds: new Set(ev.patientId ? [ev.patientId] : []),
-              appointments: []
+              dynamicRowIds: new Set(),
+              appointments: [],
             });
           }
           matchedPersonKey = key;
@@ -1101,12 +1268,14 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       }
     });
 
-    // 3. Filter by search query
+    // 3. Filter by search query (including dynamic field values!)
     const results = Array.from(personMap.values()).filter(person => {
-      const nameMatch = person.name.toLowerCase().includes(q);
+      const nameMatch = person.name.toLocaleLowerCase('tr-TR').includes(q);
       const phoneMatch = matchesPhoneSearch(person.phone, patientSearchQuery);
-      const apptMatch = person.appointments.some(a => a.title?.toLowerCase().includes(q));
-      return nameMatch || phoneMatch || apptMatch;
+      const fieldMatch = Boolean(person.fieldSummary?.toLocaleLowerCase('tr-TR').includes(q));
+      const tableMatch = Boolean(person.tableName?.toLocaleLowerCase('tr-TR').includes(q));
+      const apptMatch = person.appointments.some(a => a.title?.toLocaleLowerCase('tr-TR').includes(q));
+      return nameMatch || phoneMatch || fieldMatch || tableMatch || apptMatch;
     });
 
     // 4. Sort appointments inside each person descending by start time
@@ -1115,15 +1284,22 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
     });
 
     return results.slice(0, 15);
-  }, [patients, events, patientSearchQuery]);
+  }, [patients, events, patientSearchQuery, dynamicBookingContext.allTables]);
 
   const filteredEvents = patientSearchQuery
     ? events.filter(e => {
-      const q = patientSearchQuery.toLowerCase();
-      if (e.title?.toLowerCase().includes(q) || matchesPhoneSearch((e as any).phone, patientSearchQuery)) return true;
+      const q = patientSearchQuery.toLocaleLowerCase('tr-TR');
+      if (e.title?.toLocaleLowerCase('tr-TR').includes(q) || matchesPhoneSearch((e as any).phone || e.intakePatientPhone, patientSearchQuery)) return true;
+      if (Array.isArray(e.dynamicLinks) && e.dynamicLinks.some(lk =>
+        lk.displayTitle?.toLocaleLowerCase('tr-TR').includes(q) ||
+        matchesPhoneSearch(lk.phone, patientSearchQuery) ||
+        lk.fieldHighlights?.some(fh => fh.displayValue.toLocaleLowerCase('tr-TR').includes(q))
+      )) {
+        return true;
+      }
       if (e.patientId) {
         const p = patients.find(pt => pt.id === e.patientId);
-        if (p && (p.name?.toLowerCase().includes(q) || matchesPhoneSearch(p.phone, patientSearchQuery))) return true;
+        if (p && (p.name?.toLocaleLowerCase('tr-TR').includes(q) || matchesPhoneSearch(p.phone, patientSearchQuery))) return true;
       }
       return false;
     })
@@ -1433,9 +1609,9 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Calendar size={16} color="var(--accent, #3b82f6)" />
-            <span>Mini Takvim & Hekim Filtresi</span>
-            <span style={{ fontSize: '0.75rem', padding: '2px 8px', borderRadius: 12, background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', fontWeight: 700 }}>
-              {selectedDoctorIds.length}/{doctors.length} Hekim
+            <span>Mini Takvim & Çalışan Filtresi</span>
+            <span style={{ fontSize: '0.75rem', padding: '2px 8px', borderRadius: 12, background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)', border: '1px solid var(--pc-border)', fontWeight: 700 }}>
+              {selectedDoctorIds.length}/{doctors.length} Çalışan
             </span>
           </div>
           <span style={{ fontSize: '0.8rem', color: 'var(--foreground-3)' }}>
@@ -1473,7 +1649,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
             <Users size={18} color="var(--foreground-3)" />
             <input
               type="text"
-              placeholder="Kişi arayın"
+              placeholder={hasDynamicTables ? 'Kayıt, alan veya randevu ara' : 'Kişi arayın'}
               value={patientSearchQuery}
               onChange={(e) => {
                 setPatientSearchQuery(e.target.value);
@@ -1534,53 +1710,81 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                       borderBottom: idx === searchResults.length - 1 ? 'none' : '1px solid var(--divider, rgba(255,255,255,0.06))'
                     }}
                   >
-                    {/* Person Header */}
+                    {/* Person / Dynamic Record Header */}
                     <div
                       style={{
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
+                        gap: 6,
                         padding: '6px 8px',
                         borderRadius: '6px',
-                        background: 'rgba(255,255,255,0.02)'
+                        background: 'var(--card-inner)',
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
                         <div style={{
                           width: '26px',
                           height: '26px',
                           borderRadius: '50%',
-                          background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
-                          color: '#fff',
+                          background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
+                          color: '#ffffff',
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
                           fontSize: '0.75rem',
-                          fontWeight: 700
+                          fontWeight: 700,
+                          flexShrink: 0,
                         }}>
                           {person.name.charAt(0).toUpperCase()}
                         </div>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--foreground)' }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--foreground)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {person.name}
                           </div>
-                          {person.phone && (
-                            <div style={{ fontSize: '0.72rem', color: 'var(--foreground-3)' }}>
-                              📞 {person.phone}
+                          {(person.tableName || person.phone) && (
+                            <div style={{ fontSize: '0.7rem', color: 'var(--foreground-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {person.tableName ? `${person.tableName}${person.phone ? ` • 📞 ${person.phone}` : ''}` : `📞 ${person.phone}`}
                             </div>
                           )}
                         </div>
                       </div>
-                      <span style={{
-                        fontSize: '0.7rem',
-                        fontWeight: 600,
-                        padding: '2px 8px',
-                        borderRadius: '12px',
-                        background: person.appointments.length > 0 ? 'rgba(59, 130, 246, 0.15)' : 'rgba(255,255,255,0.05)',
-                        color: person.appointments.length > 0 ? '#60a5fa' : 'var(--foreground-3)'
-                      }}>
-                        {person.appointments.length} Randevu
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                        {person.dynamicTableId && person.dynamicRowId && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowPatientSearchDropdown(false);
+                              openCenteredQuickCreate({
+                                [person.dynamicTableId!]: [person.dynamicRowId!],
+                              });
+                            }}
+                            style={{
+                              padding: '3px 7px',
+                              borderRadius: 6,
+                              border: '1px solid #1d4ed8',
+                              background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
+                              color: '#ffffff',
+                              fontSize: '0.68rem',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <span style={{ color: '#ffffff' }}>+ Planla</span>
+                          </button>
+                        )}
+                        <span style={{
+                          fontSize: '0.68rem',
+                          fontWeight: 700,
+                          padding: '2px 7px',
+                          borderRadius: '12px',
+                          background: person.appointments.length > 0 ? 'var(--pc-tint)' : 'var(--input-bg)',
+                          color: person.appointments.length > 0 ? 'var(--pc-tint-fg)' : 'var(--foreground-3)',
+                          border: '1px solid var(--pc-border)',
+                        }}>
+                          {person.appointments.length} Randevu
+                        </span>
+                      </div>
                     </div>
 
                     {/* Appointments List for this person */}
@@ -1633,7 +1837,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                                 </span>
                               </div>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.72rem', color: 'var(--foreground-3)' }}>
-                                <span>{doc ? `Dr. ${doc.name}` : 'Doktor Atanmadı'}</span>
+                                <span>{doc ? doc.name : 'Çalışan Atanmadı'}</span>
                                 <span style={{ color: 'var(--foreground-2)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px' }}>
                                   {appt.title?.includes(' - ') ? appt.title.split(' - ')[1] : (appt.title || 'Randevu')}
                                 </span>
@@ -1658,16 +1862,18 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           )}
         </div>
 
-        {/* Takvimlerim (Doctor Filter) */}
+        {/* Takvimlerim (Specialist / Doctor Filter) */}
         <div style={{ marginTop: 8, position: 'relative', zIndex: 1 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-            <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>Hekimlerim</h4>
+            <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>
+              Çalışanlarım
+            </h4>
             <span title={hasDoctors ? undefined : noDoctorsTooltip} style={{ display: 'inline-flex' }}>
               <button
                 type="button"
                 onClick={() => hasDoctors && setLeaveModalState({ isOpen: true, date: currentDate })}
                 disabled={!hasDoctors}
-                title={hasDoctors ? 'Hekimlerin izinli veya kapalı olduğu saatleri yönetin' : undefined}
+                title={hasDoctors ? 'İzinli veya kapalı saatleri yönetin' : undefined}
                 className="btn-clinic-blue"
                 style={{
                   padding: '5px 9px',
@@ -1750,13 +1956,17 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {!hasDoctors && onNavigateToClinicStaff && (
               <div style={{ padding: 12, border: '1px solid var(--input-border)', borderRadius: 8, background: 'var(--card-inner)', display: 'grid', gap: 8 }}>
-                <span style={{ fontSize: '0.78rem', color: 'var(--foreground-2)' }}>Takvimi kullanmak için önce bir hekim ekleyin.</span>
+                <span style={{ fontSize: '0.78rem', color: 'var(--foreground-2)' }}>
+                  Takvimi kullanmak için önce bir çalışan ekleyin.
+                </span>
                 <button
                   type="button"
                   onClick={onNavigateToClinicStaff}
-                  style={{ minHeight: 36, padding: '0 10px', borderRadius: 7, border: '1px solid var(--accent)', background: 'var(--accent)', color: 'var(--btn-clinic-primary-fg)', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700 }}
+                  style={{ minHeight: 36, padding: '0 10px', borderRadius: 7, border: '1px solid #1d4ed8', background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)', color: '#ffffff', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700 }}
                 >
-                  Klinik Personeli Ekle
+                  <span style={{ color: '#ffffff' }}>
+                    Çalışan Ekle
+                  </span>
                 </button>
               </div>
             )}
@@ -1879,39 +2089,31 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
             <div className="cal-actions-group">
               <button
                 className="btn btn-primary"
-                style={{ padding: '8px 14px', borderRadius: 8, fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap', flexShrink: 0 }}
+                style={{ padding: '8px 14px', borderRadius: 8, fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap', flexShrink: 0, color: '#ffffff' }}
                 onClick={() => {
-                  setPatientPanelOpen(true)
                   setPanelOpen(false)
+                  if (hasDynamicTables) {
+                    setDynamicRecordsPanelOpen(true)
+                  } else {
+                    if (isClinicMode) setPatientPanelOpen(true)
+                    else setDynamicRecordsPanelOpen(true)
+                  }
                 }}
               >
-                <Users size={16} /> Hastalar
+                {hasDynamicTables || !isClinicMode ? <Table2 size={16} color="#ffffff" /> : <Users size={16} color="#ffffff" />}
+                <span style={{ color: '#ffffff' }}>{hasDynamicTables || !isClinicMode ? 'Kayıtlar' : 'Hastalar'}</span>
               </button>
               <span title={hasDoctors ? undefined : noDoctorsTooltip} style={{ display: 'inline-flex' }}>
                 <button
                   onClick={() => {
-                    if (!hasDoctors) return
-                    const nowHour = new Date().getHours()
-                    const minH = typeof workingHours?.slotStartHour === 'number' ? workingHours.slotStartHour : 8
-                    const maxH = typeof workingHours?.slotEndHour === 'number' ? Math.min(23, workingHours.slotEndHour - 1) : 19
-                    const startH = (nowHour >= minH && nowHour <= maxH) ? nowHour : Math.max(9, minH)
-                    const t1 = `${startH.toString().padStart(2, '0')}:00`
-                    const t2 = `${startH.toString().padStart(2, '0')}:30`
-                    setQuickCreateMenu({
-                      start: `${currentDate}T${t1}:00+03:00`,
-                      end: `${currentDate}T${t2}:00+03:00`,
-                      doctorId: null,
-                      x: 0,
-                      y: 0,
-                      isCentered: true
-                    })
+                    openCenteredQuickCreate()
                   }}
                   style={{
                     padding: '8px 14px',
                     borderRadius: 8,
-                    border: hasDoctors ? 'none' : '1px solid var(--input-border)',
-                    background: hasDoctors ? 'var(--accent)' : 'var(--input-bg)',
-                    color: hasDoctors ? 'var(--btn-clinic-primary-fg)' : 'var(--foreground-3)',
+                    border: hasDoctors ? '1px solid #1d4ed8' : '1px solid var(--input-border)',
+                    background: hasDoctors ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)' : 'var(--input-bg)',
+                    color: hasDoctors ? '#ffffff' : 'var(--foreground-3)',
                     fontSize: '0.82rem',
                     fontWeight: 600,
                     cursor: hasDoctors ? 'pointer' : 'not-allowed',
@@ -1920,23 +2122,29 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                     alignItems: 'center',
                     gap: 6,
                     whiteSpace: 'nowrap',
-                    flexShrink: 0
+                    flexShrink: 0,
+                    boxShadow: hasDoctors ? 'var(--pc-clay-primary)' : 'none',
                   }}
                   disabled={!hasDoctors}
                 >
-                  <Plus size={16} /> Randevu Ekle
+                  <Plus size={16} color={hasDoctors ? '#ffffff' : undefined} />
+                  <span style={hasDoctors ? { color: '#ffffff' } : undefined}>Randevu Ekle</span>
                 </button>
               </span>
               <button
                 onClick={() => {
-                  setShowAddPatientModal(true)
+                  if (hasDynamicTables || !isClinicMode) {
+                    setDynamicQuickRecordModal({ isOpen: true })
+                  } else {
+                    setShowAddPatientModal(true)
+                  }
                 }}
                 style={{
                   padding: '8px 14px',
                   borderRadius: 8,
-                  border: 'none',
-                  background: 'var(--accent)',
-                  color: '#fff',
+                  border: '1px solid #1d4ed8',
+                  background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
+                  color: '#ffffff',
                   fontSize: '0.82rem',
                   fontWeight: 600,
                   cursor: 'pointer',
@@ -1944,10 +2152,14 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                   alignItems: 'center',
                   gap: 6,
                   whiteSpace: 'nowrap',
-                  flexShrink: 0
+                  flexShrink: 0,
+                  boxShadow: 'var(--pc-clay-primary)',
                 }}
               >
-                <Plus size={16} /> Yeni Hasta Ekle
+                <Plus size={16} color="#ffffff" />
+                <span style={{ color: '#ffffff' }}>
+                  {hasDynamicTables || !isClinicMode ? 'Yeni Kayıt Ekle' : 'Yeni Hasta Ekle'}
+                </span>
               </button>
             </div>
           </div>
@@ -2004,7 +2216,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
               // 2. Arka planda (Non-Blocking Async) API kaydı — 7'li ağır fetchData() çağrılmaz
               void (async () => {
                 try {
-                  const response = await fetch(`/api/dental/appointments/${updatedEvent.id}`, {
+                  const response = await fetch(`/api/calendar/appointments/${updatedEvent.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -2038,8 +2250,8 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
               const start = new Date(updatedEvent.startTime).toLocaleString('tr-TR', { dateStyle: 'medium', timeStyle: 'short' })
               setConfirmModal({
                 isOpen: true,
-                title: 'Doktor atamasını onayla',
-                message: `${updatedEvent.title} randevusunu ${doctor?.name || 'seçilen hekim'} için ${start} saatine atamak istiyor musunuz? Vardiya ve izin uygunluğu doğrulandı.`,
+                title: 'Çalışan atamasını onayla',
+                message: `${updatedEvent.title} randevusunu ${doctor?.name || 'seçilen çalışan'} için ${start} saatine atamak istiyor musunuz? Vardiya ve izin uygunluğu doğrulandı.`,
                 confirmText: 'Atamayı Onayla',
                 cancelText: 'Vazgeç',
                 variant: 'primary',
@@ -2052,6 +2264,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           }}
           onEventClick={handleEventClick}
           view={view}
+          isClinicMode={isClinicMode}
         />
       </div>
 
@@ -2075,7 +2288,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-            <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>Hasta Detayı</h3>
+            <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--foreground)', margin: 0 }}>{isClinicMode ? 'Hasta Detayı' : 'Kayıt Detayı'}</h3>
             <button onClick={() => setPatientProfileId(null)} style={{ background: 'transparent', border: 'none', color: 'var(--foreground-3)', fontSize: '1.25rem', cursor: 'pointer' }}>✕</button>
           </div>
 
@@ -2119,14 +2332,46 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
             </div>
 
             {(() => {
-              const displayPatient = patientInfo || patients.find((p: any) =>
-                (selectedEvent.patientId && p.id === selectedEvent.patientId) ||
-                (p.name || '').trim().toLocaleLowerCase('tr-TR') === (selectedEvent.intakePatientName || selectedEvent.title?.split(' - ')[0] || '').trim().toLocaleLowerCase('tr-TR')
-              );
-              const displayPatientId = displayPatient?.id || selectedEvent.patientId || null;
-              const displayName = displayPatient?.name || selectedEvent.intakePatientName || selectedEvent.title?.split(' - ')[0] || 'İsimsiz Hasta';
-              const displayPhone = displayPatient?.phone || selectedEvent.intakePatientPhone || '';
-              const displayEmail = displayPatient?.email || '';
+              const eventDynamicLinks = Array.isArray(selectedEvent.dynamicLinks) ? selectedEvent.dynamicLinks : [];
+              const primaryDynamicLink = eventDynamicLinks[0] || null;
+              const isDynamicOrStandalone =
+                eventDynamicLinks.length > 0 ||
+                selectedEvent.intakeSource === 'standalone' ||
+                selectedEvent.intakeSource === 'dynamic_table';
+
+              const primaryDynamicName = (primaryDynamicLink?.displayTitle || selectedEvent.intakePatientName || selectedEvent.title?.split(' • ')[0]?.split(' - ')[0] || '').trim();
+              const primaryDynamicPhoneDigits = String(primaryDynamicLink?.phone || selectedEvent.intakePatientPhone || '').replace(/\D/g, '').slice(-10);
+
+              const displayPatient = isClinicMode
+                ? (patientInfo || patients.find((p: any) =>
+                    (selectedEvent.patientId && p.id === selectedEvent.patientId) ||
+                    (primaryDynamicPhoneDigits.length === 10 && String(p?.phone || '').replace(/\D/g, '').endsWith(primaryDynamicPhoneDigits)) ||
+                    (primaryDynamicName && (p.name || '').trim().toLocaleLowerCase('tr-TR') === primaryDynamicName.toLocaleLowerCase('tr-TR'))
+                  ))
+                : (isDynamicOrStandalone
+                    ? null
+                    : (patientInfo || patients.find((p: any) =>
+                        (selectedEvent.patientId && p.id === selectedEvent.patientId) ||
+                        (p.name || '').trim().toLocaleLowerCase('tr-TR') === primaryDynamicName.toLocaleLowerCase('tr-TR')
+                      )));
+              const displayPatientId = isClinicMode
+                ? (displayPatient?.id || selectedEvent.patientId || null)
+                : (isDynamicOrStandalone ? null : (displayPatient?.id || selectedEvent.patientId || null));
+              const displayName =
+                primaryDynamicLink?.displayTitle ||
+                displayPatient?.name ||
+                selectedEvent.intakePatientName ||
+                selectedEvent.title?.split(' - ')[0] ||
+                'Randevu Kaydı';
+              const displayPhone =
+                primaryDynamicLink?.phone ||
+                displayPatient?.phone ||
+                selectedEvent.intakePatientPhone ||
+                '';
+              const displayEmail =
+                primaryDynamicLink?.email ||
+                displayPatient?.email ||
+                '';
               const initials = displayName
                 .split(' ')
                 .filter(Boolean)
@@ -2770,12 +3015,20 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
 
               return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                  {/* ── Hasta Bilgisi & Bildirim Onamı ── */}
+                  {/* ── Kayıt / İlişkili Tablo Bilgisi ── */}
                   <div style={{ padding: 12, borderRadius: 10, background: 'var(--card-inner, #f1f5f9)', border: '1px solid var(--input-border, #cbd5e1)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 6, flexWrap: 'wrap' }}>
-                      <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--foreground-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Hasta Bilgisi</div>
+                      <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--foreground-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        {isClinicMode
+                          ? 'Hasta Bilgisi'
+                          : eventDynamicLinks.length > 0
+                            ? 'Kişi / Kayıt Bilgisi'
+                            : selectedEvent.intakeSource === 'standalone'
+                              ? 'Randevu Kayıt Bilgisi (Bağımsız)'
+                              : 'Kayıt Bilgisi'}
+                      </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        {Boolean(displayPatientId || selectedEvent) && (
+                        {Boolean(displayPatientId) && (
                           <button
                             type="button"
                             onClick={(e) => {
@@ -2819,37 +3072,96 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: '50%',
-                        background: 'var(--badge-clinic-bg, #e0f2fe)',
-                        border: '1px solid var(--badge-clinic-border, #bae6fd)',
-                        color: 'var(--badge-clinic-text, #0369a1)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontWeight: 800,
-                        fontSize: '0.8rem',
-                        flexShrink: 0,
-                      }}>
-                        {initials}
-                      </div>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {displayName}
+                    {eventDynamicLinks.length === 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: '50%',
+                          background: 'var(--badge-clinic-bg, #e0f2fe)',
+                          border: '1px solid var(--badge-clinic-border, #bae6fd)',
+                          color: 'var(--badge-clinic-text, #0369a1)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontWeight: 800,
+                          fontSize: '0.8rem',
+                          flexShrink: 0,
+                        }}>
+                          {initials}
                         </div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', marginTop: 3 }}>
-                          <span style={{ fontSize: '0.75rem', color: displayPhone ? 'var(--foreground-2)' : 'var(--foreground-3)', fontWeight: 500 }}>
-                            📞 {displayPhone || 'Telefon kayıtlı değil'}
-                          </span>
-                          <span style={{ fontSize: '0.75rem', color: displayEmail ? 'var(--foreground-2)' : 'var(--foreground-3)', fontWeight: 500 }}>
-                            ✉️ {displayEmail || 'E-posta kayıtlı değil'}
-                          </span>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--foreground)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {displayName}
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', marginTop: 3 }}>
+                            <span style={{ fontSize: '0.75rem', color: displayPhone ? 'var(--foreground-2)' : 'var(--foreground-3)', fontWeight: 500 }}>
+                              📞 {displayPhone || 'Telefon kayıtlı değil'}
+                            </span>
+                            {!isDynamicOrStandalone && (
+                              <span style={{ fontSize: '0.75rem', color: displayEmail ? 'var(--foreground-2)' : 'var(--foreground-3)', fontWeight: 500 }}>
+                                ✉️ {displayEmail || 'E-posta kayıtlı değil'}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    )}
+
+                    <AppointmentDetailDynamicEditor
+                      slot="person"
+                      appointmentId={selectedEvent.id}
+                      initialDynamicLinks={eventDynamicLinks}
+                      sharedContext={dynamicBookingContext}
+                      onRefreshSharedContext={refreshDynamicBookingContext}
+                      appointmentMeta={{
+                        title: selectedEvent.title,
+                        startTime: selectedEvent.startTime,
+                        doctorId: selectedEvent.doctorId,
+                        intakePatientName: selectedEvent.intakePatientName,
+                        intakePatientPhone: selectedEvent.intakePatientPhone,
+                      }}
+                      events={events}
+                      doctors={doctors}
+                      shifts={shifts}
+                      doctorLeaves={doctorLeaves}
+                      isClinicMode={isClinicMode}
+                      onFocusAppointment={(apptId, startTime) => {
+                        focusAppointmentOnCalendar(apptId, startTime, true);
+                      }}
+                      onAppointmentLinksUpdated={(nextLinks, updatedAppt) => {
+                        setEvents((prev) =>
+                          prev.map((ev) =>
+                            ev.id === selectedEvent.id
+                              ? {
+                                  ...ev,
+                                  ...(updatedAppt || {}),
+                                  dynamicLinks: nextLinks,
+                                }
+                              : ev
+                          )
+                        );
+                        setSelectedEvent((prev: any) =>
+                          prev
+                            ? {
+                                ...prev,
+                                ...(updatedAppt || {}),
+                                dynamicLinks: nextLinks,
+                              }
+                            : null
+                        );
+                        fetchData();
+                      }}
+                      onRecordFieldsMutated={() => {
+                        fetchData();
+                      }}
+                    />
+
+                    <AppointmentDynamicPaymentSection
+                      appointmentId={selectedEvent.id}
+                      appointmentTitle={selectedEvent.title}
+                      linksRefreshKey={eventDynamicLinks.map((l: any) => l.rowId).join(',')}
+                    />
 
                     {displayPatientId && (
                       <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--input-border, #cbd5e1)' }}>
@@ -2880,11 +3192,11 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                             <>
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 4 }}>
                                 <div style={{ fontSize: '0.68rem', color: 'var(--foreground-2)', fontWeight: 600 }}>
-                                  İlgili Doktor
+                                  İlgili Çalışan
                                 </div>
                                 {isDoctorUnassigned && (
                                   <span
-                                    title="Doktor ayrıldı, atama bekliyor"
+                                    title="Çalışan ayrıldı, atama bekliyor"
                                     style={{
                                       display: 'inline-flex',
                                       alignItems: 'center',
@@ -2900,7 +3212,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                                     }}
                                   >
                                     <AlertTriangle size={11} color="#ea580c" style={{ flexShrink: 0 }} />
-                                    <span>Doktor ayrıldı, atama bekliyor</span>
+                                    <span>Çalışan ayrıldı, atama bekliyor</span>
                                   </span>
                                 )}
                               </div>
@@ -2910,7 +3222,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                                   const val = e.target.value;
                                   const newStatus = val ? (selectedEvent.status === 'pending_assignment' ? 'scheduled' : selectedEvent.status) : 'pending_assignment';
                                   try {
-                                    const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+                                    const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
                                       method: 'PUT', headers: { 'Content-Type': 'application/json' },
                                       body: JSON.stringify({ doctorId: val || null, status: newStatus })
                                     });
@@ -2920,15 +3232,15 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                                       setEvents(prev => prev.map(ev => ev.id === updated.id ? nextEv : ev));
                                       setSelectedEvent(nextEv);
                                       if (val) {
-                                        toast.success('👨‍⚕️ İlgili doktor güncellendi');
+                                        toast.success('✓ İlgili çalışan güncellendi');
                                       } else {
-                                        toast('ℹ️ İlgili doktor seçimi kaldırıldı', { icon: 'ℹ️' });
+                                        toast('ℹ️ İlgili çalışan seçimi kaldırıldı', { icon: 'ℹ️' });
                                       }
                                       fetchData();
                                       loadPatientContextForEvent(nextEv);
                                     }
                                   } catch {
-                                    toast.error('Doktor atanırken hata oluştu');
+                                    toast.error('Çalışan atanırken hata oluştu');
                                   }
                                 }}
                                 style={{
@@ -2942,7 +3254,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                                   fontWeight: 700,
                                 }}
                               >
-                                <option value="">⚠️ Boşa Çıktı — Hekim Seçiniz (Atama Bekliyor)</option>
+                                <option value="">⚠️ Boşa Çıktı — Çalışan Seçiniz (Atama Bekliyor)</option>
                                 {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
                               </select>
                             </>
@@ -2955,7 +3267,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                           value={selectedEvent.type || 'general'}
                           onChange={async (e) => {
                             const val = e.target.value;
-                            const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+                            const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
                               method: 'PUT', headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({ type: val })
                             });
@@ -2984,7 +3296,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                               payload.doctorId = null
                             }
                             try {
-                              const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+                              const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
                                 method: 'PUT',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify(payload),
@@ -3006,7 +3318,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                           <option value="scheduled">📅 Planlandı (Teyit Bekliyor)</option>
                           <option value="confirmed">✅ Gelecek (Onaylandı)</option>
                           <option value="arrived_unconfirmed">🚶 Teyitsiz Geldi</option>
-                          <option value="waiting_in_clinic">🏥 Klinikte Bekliyor</option>
+                          <option value="waiting_in_clinic">{isClinicMode ? '🏥 Klinikte Bekliyor' : '📍 Merkezde / Ofiste Bekliyor'}</option>
                           <option value="in_progress">🔄 Devam Ediyor</option>
                           <option value="completed">✓ Tamamlandı</option>
                           <option value="postponed">⏳ Erteleme Talebi / Ertelendi</option>
@@ -3027,21 +3339,23 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                         )}
                         {selectedEvent.patientResponseNote && (
                           <div style={{ color: 'var(--foreground-2)', marginTop: selectedEvent.patientPreferredDate ? 2 : 0 }}>
-                            💬 Hasta Notu: {selectedEvent.patientResponseNote}
+                            💬 {isClinicMode ? 'Hasta Notu:' : 'Müşteri / Danışan Notu:'} {selectedEvent.patientResponseNote}
                           </div>
                         )}
                       </div>
                     )}
 
                     <div style={{ marginTop: 8 }}>
-                      <div style={{ fontSize: '0.68rem', color: 'var(--foreground-2)', marginBottom: 3, fontWeight: 600 }}>Hasta Şikayeti / İlk Talep</div>
+                      <div style={{ fontSize: '0.68rem', color: 'var(--foreground-2)', marginBottom: 3, fontWeight: 600 }}>
+                        {isClinicMode ? 'Hasta Şikayeti / İlk Talep' : 'Görüşme Konusu / İlk Talep'}
+                      </div>
                       <textarea
                         defaultValue={selectedEvent.complaint || ''}
-                        placeholder="Hastanın şikayetini veya talebini buraya girin (Opsiyonel)"
+                        placeholder={isClinicMode ? 'Hastanın şikayetini veya talebini buraya girin (Opsiyonel)' : 'Görüşme konusunu veya talebi buraya girin (Opsiyonel)'}
                         onBlur={async (e) => {
                           const val = e.target.value;
                           if (val === selectedEvent.complaint) return;
-                          const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+                          const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
                             method: 'PUT', headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ complaint: val })
                           });
@@ -3055,76 +3369,132 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                       />
                     </div>
 
-                    {selectedEvent.notes && (
-                      <div style={{ fontSize: '0.75rem', color: 'var(--foreground-2)', marginTop: 8, borderTop: '1px solid var(--input-border, #cbd5e1)', paddingTop: 6 }}>
-                        📝 Randevu Notu: {selectedEvent.notes}
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3, gap: 6 }}>
+                        <span style={{ fontSize: '0.68rem', color: 'var(--foreground-2)', fontWeight: 600 }}>
+                          📝 Randevu Notu
+                        </span>
+                        {apptNoteDraft !== (selectedEvent.notes || '') && (
+                          <button
+                            type="button"
+                            disabled={savingApptNote}
+                            onClick={async () => {
+                              setSavingApptNote(true);
+                              try {
+                                const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
+                                  method: 'PUT',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ notes: apptNoteDraft.trim() || null }),
+                                });
+                                if (res.ok) {
+                                  const updated = await res.json();
+                                  setEvents(prev => prev.map(ev => ev.id === updated.id ? { ...ev, ...updated } : ev));
+                                  setSelectedEvent(prev => prev ? { ...prev, ...updated } : null);
+                                  toast.success('📝 Randevu notu kaydedildi');
+                                } else {
+                                  toast.error('Not kaydedilemedi');
+                                }
+                              } catch {
+                                toast.error('Not kaydedilirken hata oluştu');
+                              } finally {
+                                setSavingApptNote(false);
+                              }
+                            }}
+                            style={{
+                              fontSize: '0.67rem',
+                              fontWeight: 700,
+                              padding: '2px 8px',
+                              borderRadius: 6,
+                              border: '1px solid #1d4ed8',
+                              background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)',
+                              color: '#ffffff',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <span style={{ color: '#ffffff' }}>{savingApptNote ? 'Kaydediliyor…' : 'Kaydet'}</span>
+                          </button>
+                        )}
                       </div>
-                    )}
+                      <textarea
+                        value={apptNoteDraft}
+                        onChange={(e) => setApptNoteDraft(e.target.value)}
+                        onBlur={async () => {
+                          if (apptNoteDraft === (selectedEvent.notes || '')) return;
+                          setSavingApptNote(true);
+                          try {
+                            const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ notes: apptNoteDraft.trim() || null }),
+                            });
+                            if (res.ok) {
+                              const updated = await res.json();
+                              setEvents(prev => prev.map(ev => ev.id === updated.id ? { ...ev, ...updated } : ev));
+                              setSelectedEvent(prev => prev ? { ...prev, ...updated } : null);
+                              toast.success('📝 Randevu notu kaydedildi');
+                            }
+                          } catch { } finally {
+                            setSavingApptNote(false);
+                          }
+                        }}
+                        placeholder="Bu randevuya ait notunuzu buraya yazabilirsiniz (otomatik kaydedilir)…"
+                        style={{ width: '100%', fontSize: '0.76rem', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--input-border, #cbd5e1)', background: 'var(--input-bg, #ffffff)', color: 'var(--foreground)', minHeight: 42, resize: 'vertical', boxSizing: 'border-box' }}
+                      />
+                    </div>
 
                     {/* ── Tarih / Saat Değiştir (Randevu Bilgisi içinde en altta) ── */}
                     <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--input-border, #cbd5e1)', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                        <label htmlFor="edit-date" style={{ fontSize: '0.72rem', color: 'var(--foreground-2)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--foreground-2)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
                           📅 Tarih / Saat Değiştir
-                        </label>
-                        <input
-                          type="date"
-                          value={selectedEvent?.startTime ? new Date(selectedEvent.startTime).toLocaleDateString('sv') : ''}
-                          id="edit-date"
-                          onChange={async (e) => {
-                            const dateVal = e.target.value;
-                            if (!dateVal) return;
-                            const sDate = new Date(selectedEvent.startTime);
-                            const eDate = new Date(selectedEvent.endTime);
-                            const startHH = String(sDate.getHours()).padStart(2, '0');
-                            const startMM = String(sDate.getMinutes()).padStart(2, '0');
-                            const endHH = String(eDate.getHours()).padStart(2, '0');
-                            const endMM = String(eDate.getMinutes()).padStart(2, '0');
-                            const startTime = new Date(`${dateVal}T${startHH}:${startMM}:00+03:00`);
-                            const endTime = new Date(`${dateVal}T${endHH}:${endMM}:00+03:00`);
-                            try {
-                              const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
-                                method: 'PUT',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ startTime: startTime.toISOString(), endTime: endTime.toISOString(), timeConfirmed: true }),
-                              });
-                              if (res.ok) {
-                                const updated = await res.json();
-                                setEvents(prev => prev.map(ev => ev.id === updated.id ? { ...ev, ...updated } : ev));
-                                setSelectedEvent(prev => prev ? { ...prev, ...updated } : null);
-                                setCurrentDate(dateVal);
-                                fetchData();
-                                focusAppointmentOnCalendar(updated.id, updated.startTime, true);
-                                toast.success(`📅 Randevu ${new Date(dateVal).toLocaleDateString('tr-TR')} tarihine taşındı`);
-                              } else {
-                                toast.error('Tarih güncellenemedi');
+                        </span>
+                        <div style={{ width: 155 }}>
+                          <ClinicalDatePicker
+                            compact
+                            value={selectedEvent?.startTime ? new Date(selectedEvent.startTime).toLocaleDateString('sv') : ''}
+                            onChange={async (dateVal) => {
+                              if (!dateVal) return;
+                              const sDate = new Date(selectedEvent.startTime);
+                              const eDate = new Date(selectedEvent.endTime);
+                              const startHH = String(sDate.getHours()).padStart(2, '0');
+                              const startMM = String(sDate.getMinutes()).padStart(2, '0');
+                              const endHH = String(eDate.getHours()).padStart(2, '0');
+                              const endMM = String(eDate.getMinutes()).padStart(2, '0');
+                              const startTime = new Date(`${dateVal}T${startHH}:${startMM}:00+03:00`);
+                              const endTime = new Date(`${dateVal}T${endHH}:${endMM}:00+03:00`);
+                              try {
+                                const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
+                                  method: 'PUT',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ startTime: startTime.toISOString(), endTime: endTime.toISOString(), timeConfirmed: true }),
+                                });
+                                if (res.ok) {
+                                  const updated = await res.json();
+                                  setEvents(prev => prev.map(ev => ev.id === updated.id ? { ...ev, ...updated } : ev));
+                                  setSelectedEvent(prev => prev ? { ...prev, ...updated } : null);
+                                  setCurrentDate(dateVal);
+                                  fetchData();
+                                  focusAppointmentOnCalendar(updated.id, updated.startTime, true);
+                                  toast.success(`📅 Randevu ${new Date(dateVal).toLocaleDateString('tr-TR')} tarihine taşındı`);
+                                } else {
+                                  toast.error('Tarih güncellenemedi');
+                                }
+                              } catch {
+                                toast.error('Tarih güncellenirken hata oluştu');
                               }
-                            } catch {
-                              toast.error('Tarih güncellenirken hata oluştu');
-                            }
-                          }}
-                          style={{
-                            fontSize: '0.76rem',
-                            fontWeight: 600,
-                            padding: '4px 8px',
-                            borderRadius: 6,
-                            border: '1px solid var(--input-border, #cbd5e1)',
-                            background: 'var(--input-bg, #ffffff)',
-                            color: 'var(--foreground)',
-                            width: 145,
-                          }}
-                        />
+                            }}
+                          />
+                        </div>
                       </div>
                       <TimeRangeEditor
                         selectedEvent={selectedEvent}
                         onSave={async (startHH: string, startMM: string, endHH: string, endMM: string) => {
-                          const dateEl = document.getElementById('edit-date') as HTMLInputElement;
-                          const dateVal = dateEl?.value || (selectedEvent?.startTime ? new Date(selectedEvent.startTime).toLocaleDateString('sv') : '');
+                          const dateVal = selectedEvent?.startTime ? new Date(selectedEvent.startTime).toLocaleDateString('sv') : '';
                           if (!dateVal) return;
                           const startTime = new Date(`${dateVal}T${startHH}:${startMM}:00+03:00`);
                           const endTime = new Date(`${dateVal}T${endHH}:${endMM}:00+03:00`);
                           try {
-                            const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+                            const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
                               method: 'PUT',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({ startTime: startTime.toISOString(), endTime: endTime.toISOString(), timeConfirmed: true }),
@@ -3154,7 +3524,66 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                     )}
                   </div>
 
-                  {/* ── Tedavi Planı ── */}
+                  {/* ── İnteraktif İş Akışı ve Bağlı Kayıtlar (Tüm Sektörler İçin Klinik Akışı Deneyimi) ── */}
+                  <AppointmentDetailDynamicEditor
+                    slot="workflow"
+                    appointmentId={selectedEvent.id}
+                    initialDynamicLinks={eventDynamicLinks}
+                    sharedContext={dynamicBookingContext}
+                    onRefreshSharedContext={refreshDynamicBookingContext}
+                    appointmentMeta={{
+                      title: selectedEvent.title,
+                      startTime: selectedEvent.startTime,
+                      doctorId: selectedEvent.doctorId,
+                      intakePatientName: selectedEvent.intakePatientName,
+                      intakePatientPhone: selectedEvent.intakePatientPhone,
+                    }}
+                    events={events}
+                    doctors={doctors}
+                    shifts={shifts}
+                    doctorLeaves={doctorLeaves}
+                    isClinicMode={isClinicMode}
+                    showHistoryButtonInWorkflowHeader={!Boolean(displayPatientId)}
+                    onFocusAppointment={(apptId, startTime) => {
+                      focusAppointmentOnCalendar(apptId, startTime, true);
+                    }}
+                    onAppointmentCreated={(createdAppt, targetDate) => {
+                      if (targetDate) setCurrentDate(targetDate);
+                      fetchData();
+                      if (createdAppt?.id && createdAppt?.startTime) {
+                        focusAppointmentOnCalendar(createdAppt.id, createdAppt.startTime, true);
+                      }
+                    }}
+                    onAppointmentLinksUpdated={(nextLinks, updatedAppt) => {
+                      setEvents((prev) =>
+                        prev.map((ev) =>
+                          ev.id === selectedEvent.id
+                            ? {
+                                ...ev,
+                                ...(updatedAppt || {}),
+                                dynamicLinks: nextLinks,
+                              }
+                            : ev
+                        )
+                      );
+                      setSelectedEvent((prev: any) =>
+                        prev
+                          ? {
+                              ...prev,
+                              ...(updatedAppt || {}),
+                              dynamicLinks: nextLinks,
+                            }
+                          : null
+                      );
+                      fetchData();
+                    }}
+                    onRecordFieldsMutated={() => {
+                      fetchData();
+                    }}
+                  />
+
+                  {/* ── Tedavi Planı (Yalnızca Diş Kliniği Şablonunda Gösterilir) ── */}
+                  {isClinicMode && (
                   <div style={{ padding: 12, borderRadius: 10, background: 'var(--card-inner, #f1f5f9)', border: '1px solid var(--input-border, #cbd5e1)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -3406,6 +3835,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                       </div>
                     )}
                   </div>
+                  )}
                 </div>
               );
             })()}
@@ -3416,7 +3846,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                 <button
                   onClick={async () => {
                     try {
-                      const res = await fetch(`/api/dental/appointments/${selectedEvent.id}`, {
+                      const res = await fetch(`/api/calendar/appointments/${selectedEvent.id}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ timeConfirmed: true }),
@@ -3459,7 +3889,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
               );
             }
             fetchData();
-            fetch('/api/dental/appointments')
+            fetch('/api/calendar/appointments')
               .then(r => r.json())
               .then(d => {
                 setEvents(d);
@@ -3490,7 +3920,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
       )}
 
       {/* Tedavi Ekle Modal */}
-      {showTedaviForm && selectedEvent && (
+      {isClinicMode && showTedaviForm && selectedEvent && (
         <AdvancedTedaviModal
           selectedEvent={selectedEvent.patientId ? selectedEvent : { ...selectedEvent, patientId: patientInfo?.id || selectedEvent.patientId || null }}
           patientInfo={patientInfo}
@@ -3681,6 +4111,8 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           events={events}
           shifts={shifts}
           doctorLeaves={doctorLeaves}
+          initialSelectedIdsByTable={quickCreateMenu.initialSelectedIdsByTable}
+          initialBookingContext={dynamicBookingContext}
           onClose={() => {
             setQuickCreateMenu(null);
             window.dispatchEvent(new Event('clear-calendar-draft'));
@@ -3725,7 +4157,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
 
             if (targetDocId) {
               const docObj = doctors.find(d => d.id === targetDocId);
-              const docName = docObj?.name ? `Dr. ${docObj.name}` : 'Seçilen hekim';
+              const docName = docObj?.name || 'Seçilen çalışan';
               const docShifts = (shifts || []).filter(
                 (s: any) => s.userId === targetDocId && String(s.date || '').slice(0, 10) === apptDate
               );
@@ -3760,12 +4192,49 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
               }
               const hasAvailableShiftDoctor = coveringShifts.some((s: any) => !s.userId || !findDoctorLeaveConflict(s.userId));
               if (!hasAvailableShiftDoctor) {
-                toast.error(`⚠️ Seçilen saat aralığında (${sTime} - ${eTime}) vardiyası olan hekim(ler) izinlidir. Randevu eklenemez!`);
+                toast.error(`⚠️ Seçilen saat aralığında (${sTime} - ${eTime}) vardiyası olan ${isClinicMode ? 'hekim(ler)' : 'uzman(lar)'} izinlidir. Randevu eklenemez!`);
                 return;
               }
             }
 
-            if (data.type === 'patient_appointment') {
+            if (data.type === 'dynamic_appointment') {
+              try {
+                const startStr = data.startTime
+                  ? `${apptDate}T${data.startTime}:00+03:00`
+                  : (quickCreateMenu.start.includes('+') ? quickCreateMenu.start : `${quickCreateMenu.start}+03:00`);
+                const endStr = data.endTime
+                  ? `${apptDate}T${data.endTime}:00+03:00`
+                  : (quickCreateMenu.end.includes('+') ? quickCreateMenu.end : `${quickCreateMenu.end}+03:00`);
+                const links = Array.isArray(data.dynamicLinks) ? data.dynamicLinks : [];
+                const res = await fetch('/api/calendar/appointments', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    patientId: null,
+                    doctorId: data.doctorId,
+                    title: data.title || 'Yeni Randevu',
+                    startTime: startStr,
+                    endTime: endStr,
+                    type: data.appointmentType || (isClinicMode ? 'Muayene' : 'general'),
+                    notes: data.notes || null,
+                    intakeSource: data.intakeSource || (links.length > 0 ? 'dynamic_table' : 'standalone'),
+                    intakePatientName: data.title || 'Yeni Randevu',
+                    intakePatientPhone: data.phone || null,
+                    dynamicLinks: links,
+                    status: data.doctorId ? 'scheduled' : 'pending_assignment',
+                  }),
+                });
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  toast.error(err.error || 'Randevu oluşturulamadı');
+                  return;
+                }
+                toast.success('Randevu başarıyla oluşturuldu');
+              } catch {
+                toast.error('Randevu oluşturulurken bir hata oluştu');
+                return;
+              }
+            } else if (data.type === 'patient_appointment') {
               let pId = data.patientId;
               if (!pId) {
                 // 1. Create Patient
@@ -3804,7 +4273,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                   const apptDate = quickCreateMenu.start.slice(0, 10);
                   const startStr = data.startTime ? `${apptDate}T${data.startTime}:00+03:00` : (quickCreateMenu.start.includes('+') ? quickCreateMenu.start : `${quickCreateMenu.start}+03:00`);
                   const endStr = data.endTime ? `${apptDate}T${data.endTime}:00+03:00` : (quickCreateMenu.end.includes('+') ? quickCreateMenu.end : `${quickCreateMenu.end}+03:00`);
-                  const res = await fetch('/api/dental/appointments', {
+                  const res = await fetch('/api/calendar/appointments', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3813,7 +4282,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                       title: data.title,
                       startTime: startStr,
                       endTime: endStr,
-                      type: 'Muayene',
+                      type: data.appointmentType || (isClinicMode ? 'Muayene' : 'general'),
                       status: data.doctorId ? 'scheduled' : 'pending_assignment'
                     })
                   });
@@ -3859,7 +4328,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                 const startStr = data.startTime ? `${apptDate}T${data.startTime}:00+03:00` : (quickCreateMenu.start.includes('+') ? quickCreateMenu.start : `${quickCreateMenu.start}+03:00`);
                 const endStr = data.endTime ? `${apptDate}T${data.endTime}:00+03:00` : (quickCreateMenu.end.includes('+') ? quickCreateMenu.end : `${quickCreateMenu.end}+03:00`);
                 const apptDoctorId = data.doctorId !== undefined ? data.doctorId : (quickCreateMenu.doctorId || null);
-                await fetch('/api/dental/appointments', {
+                await fetch('/api/calendar/appointments', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -3908,7 +4377,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
         />
       )}
 
-      {selectedDcmUrl && (
+      {isClinicMode && selectedDcmUrl && (
         <DicomViewer isModal={true} dcmUrl={selectedDcmUrl} onClose={() => setSelectedDcmUrl(null)} />
       )}
       {/* --- FLOATING CONTEXT MENUS --- */}
@@ -3937,13 +4406,13 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
           >
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', marginBottom: 12 }}>Randevu Ata</div>
             <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 11, color: 'var(--foreground-3)', marginBottom: 4 }}>İlgili Doktor</div>
+              <div style={{ fontSize: 11, color: 'var(--foreground-3)', marginBottom: 4 }}>İlgili Çalışan</div>
               <select
                 value={doctors.some(d => d.id === eventContextMenu.doctorId) ? eventContextMenu.doctorId : ''}
                 onChange={e => setEventContextMenu({ ...eventContextMenu, doctorId: e.target.value })}
                 style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--foreground)', fontSize: '0.8rem', outline: 'none' }}
               >
-                <option value="">⚠️ Boşa Çıktı — Hekim Seçiniz (Atama Bekliyor)</option>
+                <option value="">⚠️ Boşa Çıktı — Çalışan Seçiniz (Atama Bekliyor)</option>
                 {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
               </select>
             </div>
@@ -3978,7 +4447,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                 const startTime = new Date(`${eventContextMenu.date}T${eventContextMenu.startTime}:00+03:00`)
                 const endTime = new Date(`${eventContextMenu.date}T${eventContextMenu.endTime}:00+03:00`)
                 const newStatus = eventContextMenu.doctorId ? 'scheduled' : 'pending_assignment'
-                await fetch(`/api/dental/appointments/${eventContextMenu.event.id}`, {
+                await fetch(`/api/calendar/appointments/${eventContextMenu.event.id}`, {
                   method: 'PUT', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ doctorId: eventContextMenu.doctorId || null, startTime: startTime.toISOString(), endTime: endTime.toISOString(), status: newStatus })
                 })
@@ -4115,7 +4584,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                         <div style={{ fontWeight: 700, color: 'var(--foreground)', marginBottom: 2 }}>{e.title}</div>
                         <div style={{ color: 'var(--foreground-3)', fontSize: '0.72rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                           <span>🕒 {dateStr} {timeStr}</span>
-                          {doc && <span style={{ color: 'var(--foreground-2)', fontWeight: 600 }}>Dr. {doc.name}</span>}
+                          {doc && <span style={{ color: 'var(--foreground-2)', fontWeight: 600 }}>{doc.name}</span>}
                         </div>
                       </div>
                     )
@@ -4228,10 +4697,14 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
             {/* Body */}
             <div style={{ padding: '18px 20px', flex: 1, overflowY: 'auto', background: 'var(--card-bg)', display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ background: 'var(--card-inner)', padding: 14, borderRadius: 10, border: '1px solid var(--input-border)', display: 'grid', gap: 12 }}>
-                <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--foreground)' }}>Hasta ve Randevu Bilgileri</div>
+                <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--foreground)' }}>
+                  {isClinicMode ? 'Hasta ve Randevu Bilgileri' : 'Kişi ve Randevu Bilgileri'}
+                </div>
                 <div style={{ display: 'grid', gap: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>Hasta Eşleştir / Ara</label>
+                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>
+                      {isClinicMode ? 'Hasta Eşleştir / Ara' : 'Kişi Eşleştir / Ara'}
+                    </label>
                     <span
                       style={{
                         fontSize: '0.68rem',
@@ -4244,16 +4717,16 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                       }}
                     >
                       {aiReviewCreatePatient
-                        ? '+ Yeni hasta olarak kaydedilecek'
+                        ? (isClinicMode ? '+ Yeni hasta olarak kaydedilecek' : '+ Yeni kişi olarak kaydedilecek')
                         : aiReviewPatientId
-                          ? `✓ Mevcut hasta seçildi`
-                          : 'Hasta seçiniz'}
+                          ? (isClinicMode ? '✓ Mevcut hasta seçildi' : '✓ Mevcut kişi seçildi')
+                          : (isClinicMode ? 'Hasta seçiniz' : 'Kişi seçiniz')}
                     </span>
                   </div>
                   <input
                     value={aiReviewPatientQuery}
                     onChange={e => setAiReviewPatientQuery(e.target.value)}
-                    placeholder="Kayıtlı hastalarda ad veya telefon ile ara..."
+                    placeholder={isClinicMode ? 'Kayıtlı hastalarda ad veya telefon ile ara...' : 'Kayıtlı kişilerde ad veya telefon ile ara...'}
                     style={{ ...inputStyle, width: '100%' }}
                   />
                   <div
@@ -4289,7 +4762,7 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                         cursor: 'pointer',
                       }}
                     >
-                      <span>+ Yeni hasta olarak oluştur ({aiReviewName || 'Yeni Hasta'})</span>
+                      <span>{isClinicMode ? `+ Yeni hasta olarak oluştur (${aiReviewName || 'Yeni Hasta'})` : `+ Yeni kişi olarak oluştur (${aiReviewName || 'Yeni Kişi'})`}</span>
                       {aiReviewCreatePatient && <span>✓</span>}
                     </button>
                     {patients
@@ -4341,8 +4814,8 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>Başlangıç<input type="datetime-local" value={aiReviewStart} onChange={e => setAiReviewStart(e.target.value)} style={{ ...inputStyle, width: '100%', marginTop: 4 }} /></label>
                   <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>Bitiş<input type="datetime-local" value={aiReviewEnd} onChange={e => setAiReviewEnd(e.target.value)} style={{ ...inputStyle, width: '100%', marginTop: 4 }} /></label>
                 </div>
-                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>Doktor (opsiyonel)<select value={aiReviewDoctorId} onChange={e => setAiReviewDoctorId(e.target.value)} style={{ ...inputStyle, width: '100%', marginTop: 4 }}><option value="">Atama bekliyor</option>{doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
-                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>Hasta şikâyeti / talebi<textarea value={aiReviewComplaint} onChange={e => setAiReviewComplaint(e.target.value)} style={{ ...inputStyle, width: '100%', minHeight: 60, marginTop: 4, resize: 'vertical' }} /></label>
+                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>İlgili Çalışan (opsiyonel)<select value={aiReviewDoctorId} onChange={e => setAiReviewDoctorId(e.target.value)} style={{ ...inputStyle, width: '100%', marginTop: 4 }}><option value="">Atama bekliyor</option>{doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>
+                <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>{isClinicMode ? 'Hasta şikâyeti / talebi' : 'Görüşme konusu / talebi'}<textarea value={aiReviewComplaint} onChange={e => setAiReviewComplaint(e.target.value)} style={{ ...inputStyle, width: '100%', minHeight: 60, marginTop: 4, resize: 'vertical' }} /></label>
                 <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)' }}>İptal nedeni <input value={aiReviewRejectReason} onChange={e => setAiReviewRejectReason(e.target.value)} placeholder="Yalnızca iptal edilecekse zorunlu" style={{ ...inputStyle, width: '100%', marginTop: 4 }} /></label>
               </div>
             </div>
@@ -4433,6 +4906,41 @@ export default function CalendarTab({ onNavigateToClinicStaff }: { onNavigateToC
             })
             .catch(() => { })
         }}
+      />
+
+      <DynamicQuickRecordModal
+        isOpen={dynamicQuickRecordModal.isOpen}
+        context={dynamicBookingContext}
+        initialTableId={dynamicQuickRecordModal.tableId}
+        onClose={() => setDynamicQuickRecordModal({ isOpen: false })}
+        onCreated={async ({ openAppointmentPlanner, relatedSelectionMap }) => {
+          await fetchData()
+          if (openAppointmentPlanner) {
+            openCenteredQuickCreate(relatedSelectionMap)
+          }
+        }}
+      />
+
+      <DynamicRecordsSidePanel
+        isOpen={dynamicRecordsPanelOpen}
+        context={dynamicBookingContext}
+        events={events}
+        onClose={() => setDynamicRecordsPanelOpen(false)}
+        onOpenNewRecordModal={(tableId) => {
+          setDynamicRecordsPanelOpen(false)
+          setDynamicQuickRecordModal({ isOpen: true, tableId })
+        }}
+        onPlanAppointmentForRow={(tableId, rowId) => {
+          setDynamicRecordsPanelOpen(false)
+          openCenteredQuickCreate({ [tableId]: [rowId] })
+        }}
+        onFocusAppointment={(appointmentId, startTime) => {
+          setDynamicRecordsPanelOpen(false)
+          const ev = events.find(c => c.id === appointmentId)
+          if (ev) handleEventClick(appointmentId, ev)
+          focusAppointmentOnCalendar(appointmentId, startTime)
+        }}
+        onRefreshContext={fetchData}
       />
 
     </div>

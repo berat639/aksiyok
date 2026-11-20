@@ -11,12 +11,15 @@ export type FlowConditionOperator =
   | 'contains'
   | 'notContains'
   | 'startsWith'
+  | 'endsWith'
   | 'regex'
   | 'gt'
   | 'gte'
   | 'lt'
   | 'lte'
   | 'between'
+  | 'existsInTable'
+  | 'notExistsInTable'
   | 'in'
   | 'isEmpty'
   | 'notEmpty'
@@ -27,6 +30,14 @@ export interface FlowConditionRule {
   operator: FlowConditionOperator
   value?: string
   valueTo?: string
+  fieldLabel?: string
+  sourceTableId?: string
+  sourceTableSlug?: string
+  sourceTableName?: string
+  sourceColumnId?: string
+  sourceColumnSlug?: string
+  sourceColumnName?: string
+  sourceColumnType?: string
 }
 
 export interface FlowConditionGroup {
@@ -51,10 +62,20 @@ export interface FlowNode {
     fieldName?: string
     description?: string
     required?: boolean
-    fieldType?: 'text' | 'date' | 'time' | 'enum' | 'user'
+    fieldType?: 'text' | 'number' | 'boolean' | 'phone' | 'email' | 'date' | 'time' | 'enum' | 'user'
     enumValues?: string[]
+    allowMultipleSelection?: boolean
+    // Dynamic table column metadata (FIELD & CONDITION)
+    sourceTableId?: string
+    sourceTableSlug?: string
+    sourceTableName?: string
+    sourceColumnId?: string
+    sourceColumnSlug?: string
+    sourceColumnName?: string
+    sourceColumnType?: string
     // CONDITION node (legacy + compound)
     conditionField?: string
+    conditionFieldLabel?: string
     operator?: FlowConditionOperator
     conditionValue?: string
     conditionValueTo?: string
@@ -63,6 +84,9 @@ export interface FlowNode {
     conditionGroup?: FlowConditionGroup
     // ACTION node
     action?: string
+    targetTableId?: string
+    targetTableSlug?: string
+    targetTableName?: string
     message?: string
     variableName?: string
     variableValue?: string
@@ -176,6 +200,93 @@ function isRuleGroup(item: FlowConditionRule | FlowConditionGroup): item is Flow
   return 'logic' in item && Array.isArray((item as FlowConditionGroup).rules)
 }
 
+function parseComparableFlowValue(raw: string): number | null {
+  const trimmed = String(raw || '').trim()
+  if (!trimmed) return null
+
+  const timeMatch = trimmed.match(/^([01]?\d|2[0-3]):([0-5]\d)$/)
+  if (timeMatch) {
+    return Number(timeMatch[1]) + Number(timeMatch[2]) / 60
+  }
+
+  const isoDate = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (isoDate) {
+    const ts = Date.UTC(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3]))
+    if (Number.isFinite(ts)) return ts
+  }
+
+  const trDate = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
+  if (trDate) {
+    const ts = Date.UTC(Number(trDate[3]), Number(trDate[2]) - 1, Number(trDate[1]))
+    if (Number.isFinite(ts)) return ts
+  }
+
+  const cleanedCurrency = trimmed.replace(/[₺$€£%\s]/g, '')
+  if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(cleanedCurrency)) {
+    const num = Number(cleanedCurrency.replace(/\./g, '').replace(',', '.'))
+    if (Number.isFinite(num)) return num
+  }
+  const direct = Number(cleanedCurrency.replace(',', '.'))
+  return Number.isFinite(direct) ? direct : null
+}
+
+const FLOW_WEEKDAY_TR_TO_NUM: Record<string, string> = {
+  pazartesi: '1',
+  pzt: '1',
+  sali: '2',
+  salı: '2',
+  sal: '2',
+  carsamba: '3',
+  çarşamba: '3',
+  car: '3',
+  persembe: '4',
+  perşembe: '4',
+  per: '4',
+  cuma: '5',
+  cum: '5',
+  cumartesi: '6',
+  cmt: '6',
+  pazar: '7',
+  paz: '7',
+}
+
+function normalizeFlowWeekday(val: string): string {
+  const low = val.trim().toLocaleLowerCase('tr-TR')
+  return FLOW_WEEKDAY_TR_TO_NUM[low] ?? low
+}
+
+function resolveFieldValue(
+  fields: Record<string, unknown>,
+  field: string,
+  sourceColumnId?: string,
+  sourceTableId?: string,
+): unknown {
+  if (field && field in fields && fields[field] !== undefined) return fields[field]
+  if ((sourceColumnId === '__row_exists__' || field.endsWith('____kayitli')) && sourceTableId) {
+    const tblKey = `_tbl_exists__${sourceTableId}`
+    if (tblKey in fields && fields[tblKey] !== undefined) return fields[tblKey]
+  }
+  if (sourceColumnId && sourceColumnId !== '__row_exists__') {
+    const colKey = `_col__${sourceColumnId}`
+    if (colKey in fields && fields[colKey] !== undefined) return fields[colKey]
+    const colKeyLow = colKey.toLowerCase()
+    for (const key of Object.keys(fields)) {
+      if (key.toLowerCase() === colKeyLow && fields[key] !== undefined) return fields[key]
+    }
+  }
+  if (field === 'caller.isKnownPatient' && fields['kayitli'] !== undefined) return fields['kayitli']
+  if (field === 'kayitli' && fields['caller.isKnownPatient'] !== undefined) return fields['caller.isKnownPatient']
+  if (field === 'saat' && fields['time.hour'] !== undefined) return fields['time.hour']
+  if (field === 'time.hour' && fields['saat'] !== undefined) return fields['saat']
+  const low = field.toLowerCase()
+  if (low) {
+    for (const key of Object.keys(fields)) {
+      if (key.toLowerCase() === low && fields[key] !== undefined) return fields[key]
+    }
+  }
+  return undefined
+}
+
 export function evaluateConditionRule(
   rule: FlowConditionRule,
   fields: Record<string, unknown>,
@@ -183,8 +294,11 @@ export function evaluateConditionRule(
 ): boolean {
   const field = String(rule.field || '').trim()
   const op = rule.operator || 'equals'
-  const rawVal = fields[field] ?? (field === 'caller.isKnownPatient' ? fields['kayitli'] : field === 'kayitli' ? fields['caller.isKnownPatient'] : undefined)
-  const actual = String(rawVal ?? '').trim()
+  const rawVal = resolveFieldValue(fields, field, rule.sourceColumnId, rule.sourceTableId)
+  const listValues = Array.isArray(rawVal)
+    ? rawVal.map(v => String(v ?? '').trim()).filter(Boolean)
+    : null
+  const actual = listValues ? listValues.join(', ') : String(rawVal ?? '').trim()
   const expected = String(rule.value ?? '').trim()
   const expectedTo = String(rule.valueTo ?? '').trim()
 
@@ -198,20 +312,43 @@ export function evaluateConditionRule(
     return expectedWords.some(w => actualLow.includes(w)) || actualLow.includes(expected.toLocaleLowerCase('tr-TR'))
   }
 
-  const actualLow = actual.toLocaleLowerCase('tr-TR')
-  const expectedLow = expected.toLocaleLowerCase('tr-TR')
+  const actualLow = field === 'time.weekday' ? normalizeFlowWeekday(actual) : actual.toLocaleLowerCase('tr-TR')
+  const expectedLow = field === 'time.weekday' ? normalizeFlowWeekday(expected) : expected.toLocaleLowerCase('tr-TR')
+  const listLow = listValues
+    ? listValues.map(v => (field === 'time.weekday' ? normalizeFlowWeekday(v) : v.toLocaleLowerCase('tr-TR')))
+    : null
 
   switch (op) {
     case 'isEmpty':
-      return actual.length === 0
+      return listLow ? listLow.length === 0 : actual.length === 0
     case 'notEmpty':
-      return actual.length > 0
+      return listLow ? listLow.length > 0 : actual.length > 0
+    case 'existsInTable': {
+      const flag =
+        (rule.sourceColumnId ? fields[`_col_exists__${rule.sourceColumnId}`] : undefined) ??
+        fields[`_exists__${field}`]
+      if (flag !== undefined) {
+        return ['true', 'evet', '1', 'var'].includes(String(flag).trim().toLocaleLowerCase('tr-TR'))
+      }
+      return false
+    }
+    case 'notExistsInTable': {
+      const flag =
+        (rule.sourceColumnId ? fields[`_col_exists__${rule.sourceColumnId}`] : undefined) ??
+        fields[`_exists__${field}`]
+      if (flag !== undefined) {
+        return !['true', 'evet', '1', 'var'].includes(String(flag).trim().toLocaleLowerCase('tr-TR'))
+      }
+      return true
+    }
     case 'contains':
-      return actualLow.includes(expectedLow)
+      return listLow ? listLow.some(v => v.includes(expectedLow)) : actualLow.includes(expectedLow)
     case 'notContains':
-      return !actualLow.includes(expectedLow)
+      return listLow ? listLow.every(v => !v.includes(expectedLow)) : !actualLow.includes(expectedLow)
     case 'startsWith':
       return actualLow.startsWith(expectedLow)
+    case 'endsWith':
+      return actualLow.endsWith(expectedLow)
     case 'regex': {
       if (!expected) return false
       try {
@@ -224,31 +361,51 @@ export function evaluateConditionRule(
     case 'gte':
     case 'lt':
     case 'lte': {
-      const aNum = Number(actual.replace(',', '.'))
-      const eNum = Number(expected.replace(',', '.'))
-      if (!Number.isFinite(aNum) || !Number.isFinite(eNum)) return false
+      const aNum = parseComparableFlowValue(actual)
+      const eNum = parseComparableFlowValue(expected)
+      if (aNum === null || eNum === null) return false
       if (op === 'gt') return aNum > eNum
       if (op === 'gte') return aNum >= eNum
       if (op === 'lt') return aNum < eNum
       return aNum <= eNum
     }
     case 'between': {
-      const aNum = Number(actual.replace(',', '.'))
-      const parts = expectedTo ? [expected, expectedTo] : expected.split(/\s*[,;-]\s*/)
-      const low = Number((parts[0] ?? '').replace(',', '.'))
-      const high = Number((parts[1] ?? '').replace(',', '.'))
-      if (!Number.isFinite(aNum) || !Number.isFinite(low) || !Number.isFinite(high)) return false
+      const aNum = parseComparableFlowValue(actual)
+      let parts = expectedTo ? [expected, expectedTo] : expected.split(/\s*[,;]\s*/)
+      if (parts.length < 2 && /^\d+(?:[.,]\d+)?\s*-\s*\d+(?:[.,]\d+)?$/.test(expected)) {
+        parts = expected.split(/\s*-\s*/)
+      }
+      const low = parseComparableFlowValue(parts[0] ?? '')
+      const high = parseComparableFlowValue(parts[1] ?? '')
+      if (aNum === null || low === null || high === null) return false
       return aNum >= Math.min(low, high) && aNum <= Math.max(low, high)
     }
     case 'in': {
-      const items = expectedLow.split(/[,;|]+/).map(s => s.trim()).filter(Boolean)
-      return items.includes(actualLow)
+      const items = expected
+        .split(/[,;|]+/)
+        .map(s => (field === 'time.weekday' ? normalizeFlowWeekday(s) : s.trim().toLocaleLowerCase('tr-TR')))
+        .filter(Boolean)
+      if (listLow) return listLow.some(v => items.includes(v))
+      if (items.includes(actualLow)) return true
+      if (actualLow.includes(',')) {
+        const actualParts = actualLow.split(/[,;|]+/).map(s => s.trim()).filter(Boolean)
+        return actualParts.some(p => items.includes(p))
+      }
+      return false
     }
     case 'notEquals': {
       const truthy = ['true', 'evet', '1', 'var']
       const falsy = ['false', 'hayır', 'hayir', '0', 'yok']
       if (truthy.includes(expectedLow)) return !truthy.includes(actualLow)
       if (falsy.includes(expectedLow)) return !falsy.includes(actualLow)
+      if (listLow) return !listLow.includes(expectedLow)
+      const aComparable = parseComparableFlowValue(actual)
+      const eComparable = parseComparableFlowValue(expected)
+      if (aComparable !== null && eComparable !== null) return aComparable !== eComparable
+      if (aComparable === null && !expectedLow.includes(',') && actualLow.includes(',')) {
+        const actualParts = actualLow.split(/[,;|]+/).map(s => s.trim()).filter(Boolean)
+        if (actualParts.length > 1) return !actualParts.includes(expectedLow)
+      }
       return actualLow !== expectedLow
     }
     case 'equals':
@@ -257,6 +414,14 @@ export function evaluateConditionRule(
       const falsy = ['false', 'hayır', 'hayir', '0', 'yok']
       if (truthy.includes(expectedLow) && truthy.includes(actualLow)) return true
       if (falsy.includes(expectedLow) && falsy.includes(actualLow)) return true
+      if (listLow) return listLow.includes(expectedLow)
+      const aComparable = parseComparableFlowValue(actual)
+      const eComparable = parseComparableFlowValue(expected)
+      if (aComparable !== null && eComparable !== null) return aComparable === eComparable
+      if (aComparable === null && !expectedLow.includes(',') && actualLow.includes(',')) {
+        const actualParts = actualLow.split(/[,;|]+/).map(s => s.trim()).filter(Boolean)
+        if (actualParts.length > 1) return actualParts.includes(expectedLow)
+      }
       return actualLow === expectedLow
     }
   }
@@ -298,6 +463,8 @@ export function evaluateConditionNode(
       operator: node.data.operator || 'equals',
       value: node.data.conditionValue,
       valueTo: node.data.conditionValueTo,
+      sourceColumnId: node.data.sourceColumnId,
+      sourceColumnType: node.data.sourceColumnType,
     },
     fields,
     intentMatchedByAi,
@@ -308,14 +475,26 @@ function normalizeFlowNodes(nodes: FlowNode[]): { nodes: FlowNode[]; changed: bo
   let changed = false
   const normalized = nodes.map(node => {
     const data = { ...node.data }
-    if (node.type === 'FIELD' && data.fieldName) {
+    if (
+      node.type === 'FIELD' &&
+      data.fieldName &&
+      !data.sourceTableId &&
+      !data.sourceColumnId &&
+      !data.fieldName.includes('__')
+    ) {
       const canonical = LEGACY_FIELD_ALIASES[data.fieldName] ?? LEGACY_FIELD_ALIASES[data.fieldName.toLowerCase()]
       if (canonical && canonical !== data.fieldName) {
         data.fieldName = canonical
         changed = true
       }
     }
-    if (node.type === 'CONDITION' && data.conditionField) {
+    if (
+      node.type === 'CONDITION' &&
+      data.conditionField &&
+      !data.sourceTableId &&
+      !data.sourceColumnId &&
+      !data.conditionField.includes('__')
+    ) {
       const canonical = LEGACY_CONDITION_ALIASES[data.conditionField] ?? LEGACY_CONDITION_ALIASES[data.conditionField.toLowerCase()]
       if (canonical && canonical !== data.conditionField) {
         data.conditionField = canonical
@@ -340,8 +519,8 @@ export function getTransferPromptConfig(data: Record<string, unknown>) {
     ? `yalnızca ${JSON.stringify(confirmationQuestion)} diye sor`
     : keywordList.length > 0
       ? `eşleşen ifadeye ait şu soruyu sor: ${keywordList.map(keyword =>
-          `${JSON.stringify(keyword)} için ${JSON.stringify(getTransferConfirmationQuestion({ keyword, target }))}`,
-        ).join('; ')}`
+        `${JSON.stringify(keyword)} için ${JSON.stringify(getTransferConfirmationQuestion({ keyword, target }))}`,
+      ).join('; ')}`
       : `yalnızca ${JSON.stringify(getTransferConfirmationQuestion({ keyword: '', target }))} diye sor`
 
   return { target, keywords, requiresConfirmation, questionInstruction }
@@ -379,14 +558,79 @@ export function buildDefaultWebFlow(): ConversationFlow {
   }
 }
 
-export async function getActiveFlow(direction: string = 'inbound', explicitClinicId?: string): Promise<ConversationFlow | null> {
+function collectFlowTableIds(nodes: FlowNode[]): string[] {
+  const ids = new Set<string>()
+  for (const n of nodes) {
+    const srcId = typeof n.data?.sourceTableId === 'string' ? n.data.sourceTableId.trim() : ''
+    if (srcId) ids.add(srcId)
+    const tgtId = typeof n.data?.targetTableId === 'string' ? n.data.targetTableId.trim() : ''
+    if (tgtId) ids.add(tgtId)
+    for (const r of n.data?.rules || []) {
+      const rSrc = typeof r.sourceTableId === 'string' ? r.sourceTableId.trim() : ''
+      if (rSrc) ids.add(rSrc)
+    }
+  }
+  return Array.from(ids)
+}
+
+export async function getActiveFlow(
+  direction: string = 'inbound',
+  explicitClinicId?: string,
+  opts?: { skipAutoSync?: boolean },
+): Promise<ConversationFlow | null> {
   const clinicId = explicitClinicId ?? requireClinicId()
-  const rows = await db
+  let rows = await db
     .select()
     .from(conversationFlows)
     .where(and(eq(conversationFlows.clinicId, clinicId), eq(conversationFlows.isActive, true), eq(conversationFlows.direction, direction)))
     .orderBy(desc(conversationFlows.updatedAt))
     .limit(1)
+
+  if (!opts?.skipAutoSync) {
+    const [{ dynamicTables }, dynRepo] = await Promise.all([
+      import('../schema'),
+      import('./dynamic-tables'),
+    ])
+    const current = rows[0]
+    let needsSync = !current || dynRepo.LEGACY_SEED_FLOW_NAMES.has(current.name)
+
+    if (!needsSync && current && current.name === dynRepo.DYNAMIC_AUTO_TEMPLATE_FLOW_NAME) {
+      const normalizedCur = normalizeFlowNodes((current.nodes as FlowNode[]) || [])
+      const referencedIds = collectFlowTableIds(normalizedCur.nodes).filter(
+        (id) => id !== dynRepo.VIRTUAL_APPOINTMENT_CALENDAR_TABLE_ID,
+      )
+      if (referencedIds.length > 0) {
+        const liveTables = await db
+          .select({ id: dynamicTables.id })
+          .from(dynamicTables)
+          .where(eq(dynamicTables.clinicId, clinicId))
+        const liveSet = new Set(liveTables.map((t) => t.id))
+        if (referencedIds.some((id) => !liveSet.has(id))) {
+          needsSync = true
+        }
+      }
+    }
+
+    if (needsSync) {
+      try {
+        const syncRes = await dynRepo.syncClinicFlowsWithDynamicTables(clinicId, {
+          forceRebuild: false,
+          directions: [direction],
+        })
+        if (syncRes.updated > 0) {
+          rows = await db
+            .select()
+            .from(conversationFlows)
+            .where(and(eq(conversationFlows.clinicId, clinicId), eq(conversationFlows.isActive, true), eq(conversationFlows.direction, direction)))
+            .orderBy(desc(conversationFlows.updatedAt))
+            .limit(1)
+        }
+      } catch (err) {
+        console.warn('[flows] Dinamik akış senkronizasyonu hatası:', err)
+      }
+    }
+  }
+
   if (rows.length === 0) {
     if (direction === 'web') return buildDefaultWebFlow()
     return null
@@ -398,10 +642,33 @@ export async function getActiveFlow(direction: string = 'inbound', explicitClini
       .set({ nodes: normalized.nodes, updatedAt: new Date() })
       .where(eq(conversationFlows.id, r.id))
   }
+  let hydratedNodes = normalized.nodes
+  try {
+    const { hydrateFlowFieldDynamicOptions } = await import('./dynamic-tables')
+    const liveMeta = await hydrateFlowFieldDynamicOptions(hydratedNodes, clinicId)
+    if (liveMeta.size > 0) {
+      hydratedNodes = hydratedNodes.map(node => {
+        const meta = liveMeta.get(node.id)
+        if (!meta) return node
+        const nextData = { ...node.data, sourceColumnType: meta.columnType }
+        if (meta.options.length > 0) {
+          nextData.enumValues = meta.options
+          if (meta.columnType === 'multiselect') {
+            if (!nextData.fieldType) nextData.fieldType = 'enum'
+          } else if (!nextData.fieldType || nextData.fieldType === 'text' || nextData.fieldType === 'enum') {
+            nextData.fieldType = 'enum'
+          }
+        }
+        return { ...node, data: nextData }
+      })
+    }
+  } catch {
+    // Canlı seçenek zenginleştirmesi başarısız olursa mevcut düğüm verisi korunur
+  }
   return {
     id: r.id,
     name: r.name,
-    nodes: normalized.nodes,
+    nodes: hydratedNodes,
     edges: r.edges as FlowEdge[],
     isActive: r.isActive,
     createdAt: toIso(r.createdAt),
@@ -409,11 +676,16 @@ export async function getActiveFlow(direction: string = 'inbound', explicitClini
   }
 }
 
-export async function saveFlow(nodes: FlowNode[], edges: FlowEdge[], direction: string = 'inbound'): Promise<ConversationFlow> {
-  const clinicId = requireClinicId()
+export async function saveFlow(
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+  direction: string = 'inbound',
+  explicitClinicId?: string,
+): Promise<ConversationFlow> {
+  const clinicId = explicitClinicId ?? requireClinicId()
   const normalized = normalizeFlowNodes(nodes)
   nodes = normalized.nodes
-  const existing = await getActiveFlow(direction)
+  const existing = await getActiveFlow(direction, clinicId, { skipAutoSync: true })
   await db
     .update(conversationFlows)
     .set({ isActive: false })
@@ -425,7 +697,7 @@ export async function saveFlow(nodes: FlowNode[], edges: FlowEdge[], direction: 
   if (existing && !existing.id.startsWith('default-')) {
     const [updated] = await db
       .update(conversationFlows)
-      .set({ nodes, edges, isActive: true, updatedAt: new Date() })
+      .set({ name: 'main', nodes, edges, isActive: true, updatedAt: new Date() })
       .where(eq(conversationFlows.id, existing.id))
       .returning()
     return {
@@ -440,7 +712,7 @@ export async function saveFlow(nodes: FlowNode[], edges: FlowEdge[], direction: 
   }
   const [inserted] = await db
     .insert(conversationFlows)
-    .values({ clinicId, nodes, edges, direction })
+    .values({ clinicId, name: 'main', nodes, edges, direction })
     .returning()
   return {
     id: inserted.id,
@@ -489,11 +761,33 @@ export function flowToToolFields(flow: ConversationFlow): {
     const safeName = originalName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase()
 
     if (properties[safeName]) continue
+    const readableTitle =
+      node.data.sourceTableName && node.data.sourceColumnName
+        ? `${node.data.sourceTableName} · ${node.data.sourceColumnName}`
+        : node.data.label || originalName
+    const typeHint =
+      node.data.fieldType === 'date'
+        ? ' (YYYY-MM-DD tarih formatında)'
+        : node.data.fieldType === 'time'
+          ? ' (SS:DD 24 saat formatında)'
+          : node.data.fieldType === 'boolean'
+            ? ' (Evet ise "true", Hayır ise "false")'
+            : node.data.fieldType === 'number'
+              ? ' (yalnızca sayısal değer)'
+              : ''
+    const isMultiOption =
+      node.data.sourceColumnType === 'multiselect' ||
+      (node.data.fieldType !== 'enum' && Boolean(node.data.enumValues?.length))
+    const optionsHint = isMultiOption && node.data.enumValues?.length
+      ? ` (Seçenekler: ${node.data.enumValues.join(', ')})`
+      : ''
     const prop: { type: string; description: string; enum?: string[] } = {
       type: 'STRING',
-      description: node.data.description ? `${originalName}: ${node.data.description}` : originalName,
+      description: node.data.description
+        ? `${readableTitle} (${originalName}): ${node.data.description}${typeHint}${optionsHint}`
+        : `${readableTitle} (${originalName})${typeHint}${optionsHint}`,
     }
-    if (node.data.fieldType === 'enum' && node.data.enumValues?.length) {
+    if (!isMultiOption && node.data.fieldType === 'enum' && node.data.enumValues?.length) {
       prop.enum = node.data.enumValues
     }
     properties[safeName] = prop
@@ -508,12 +802,15 @@ const OPERATOR_LABELS: Record<string, string> = {
   contains: 'içeriyorsa',
   notContains: 'içermiyorsa',
   startsWith: 'ile başlıyorsa',
+  endsWith: 'ile bitiyorsa',
   regex: 'regex eşleşiyorsa',
   gt: '>',
   gte: '>=',
   lt: '<',
   lte: '<=',
   between: 'arasındaysa',
+  existsInTable: 'tabloda kayıtlıysa',
+  notExistsInTable: 'tabloda kayıtlı değilse',
   in: 'listesindeyse',
   isEmpty: 'boşsa',
   notEmpty: 'boş değilse',
@@ -521,10 +818,25 @@ const OPERATOR_LABELS: Record<string, string> = {
 }
 
 function formatRuleText(r: FlowConditionRule): string {
+  if (r.sourceColumnId === '__row_exists__' || r.field.endsWith('____kayitli')) {
+    const valLow = String(r.value ?? 'true').trim().toLowerCase()
+    const expectsMatch = (r.operator !== 'notEquals') === (valLow !== 'false' && valLow !== 'hayır')
+    const tableLabel = r.sourceTableName || r.fieldLabel || r.field
+    return `"${tableLabel}" tablosunda arayan numara/kayıt ${expectsMatch ? 'kayıtlı ise' : 'kayıtlı değilse'} (${r.field}, gerekirse veriTablosuSorgula aracını kullan)`
+  }
+  const fieldTitle =
+    r.sourceTableName && r.sourceColumnName
+      ? `${r.sourceTableName} · ${r.sourceColumnName} (${r.field})`
+      : r.fieldLabel
+        ? `${r.fieldLabel} (${r.field})`
+        : r.field
   const opLabel = OPERATOR_LABELS[r.operator] || r.operator
-  if (r.operator === 'isEmpty' || r.operator === 'notEmpty') return `"${r.field}" ${opLabel}`
-  if (r.operator === 'between') return `"${r.field}" ${r.value || ''} ile ${r.valueTo || ''} ${opLabel}`
-  return `"${r.field}" ${opLabel} "${r.value || ''}"`
+  if (r.operator === 'existsInTable' || r.operator === 'notExistsInTable') {
+    return `"${fieldTitle}" ${opLabel} (gerekirse veriTablosuSorgula aracını kullan)`
+  }
+  if (r.operator === 'isEmpty' || r.operator === 'notEmpty') return `"${fieldTitle}" ${opLabel}`
+  if (r.operator === 'between') return `"${fieldTitle}" ${r.value || ''} ile ${r.valueTo || ''} ${opLabel}`
+  return `"${fieldTitle}" ${opLabel} "${r.value || ''}"`
 }
 
 export function flowToPromptText(flow: ConversationFlow): string {
@@ -571,11 +883,21 @@ export function flowToPromptText(flow: ConversationFlow): string {
         lines.push(`${prefix}   ↳ Müşterinin konuşmasını bekle ve ne söylediğini dinle.`)
         step++
         break
-      case 'FIELD':
-        lines.push(`${prefix}${step}. "${node.data.fieldName}" bilgisini sor${node.data.required ? ' (zorunlu)' : ''}: "${node.data.description}"`)
+      case 'FIELD': {
+        const readableField =
+          node.data.sourceTableName && node.data.sourceColumnName
+            ? `${node.data.sourceTableName} · ${node.data.sourceColumnName} (${node.data.fieldName})`
+            : node.data.label && node.data.label !== node.data.fieldName
+              ? `${node.data.label} (${node.data.fieldName})`
+              : String(node.data.fieldName || '')
+        const questionHint = node.data.description
+          ? `: "${node.data.description}"`
+          : ` — "${node.data.label || node.data.fieldName}" bilgisini doğal bir Türkçe soruyla iste.`
+        lines.push(`${prefix}${step}. "${readableField}" bilgisini sor${node.data.required ? ' (zorunlu)' : ''}${questionHint}`)
         lines.push(`${prefix}   ↳ Müşterinin konuşmasını ve cevabını bekle; cevap almadan sıradaki adıma geçme.`)
         step++
         break
+      }
       case 'CONDITION': {
         const field = node.data.conditionField
         const val = node.data.conditionValue || ''
@@ -586,10 +908,20 @@ export function flowToPromptText(flow: ConversationFlow): string {
           lines.push(`${prefix}${step}. KOŞUL (KULLANICI NİYETİ): Kullanıcının ifadesi "${val}" niyetini taşıyorsa:`)
         } else if (field === 'kayitli' || field === 'caller.isKnownPatient') {
           const isRegisteredExpected = val.toLowerCase() !== 'false' && val.toLowerCase() !== 'hayır'
-          lines.push(`${prefix}${step}. KOŞUL (HASTA KAYIT DURUMU): musteriSorgula sonucuna göre hasta sistemde ${isRegisteredExpected ? 'kayıtlı ise (kayitli=true)' : 'kayıtlı değilse (kayitli=false)'}:`)
+          lines.push(`${prefix}${step}. KOŞUL (KİŞİ KAYIT DURUMU): musteriSorgula sonucuna göre kişi sistemde ${isRegisteredExpected ? 'kayıtlı ise (kayitli=true)' : 'kayıtlı değilse (kayitli=false)'}:`)
         } else {
-          const op = OPERATOR_LABELS[node.data.operator || 'equals'] || '=='
-          lines.push(`${prefix}${step}. KOŞUL: "${field}" ${op} "${val}" ise:`)
+          const singleRuleText = formatRuleText({
+            field: String(field || ''),
+            operator: node.data.operator || 'equals',
+            value: val,
+            valueTo: node.data.conditionValueTo,
+            fieldLabel: node.data.conditionFieldLabel,
+            sourceTableId: node.data.sourceTableId,
+            sourceTableName: node.data.sourceTableName,
+            sourceColumnId: node.data.sourceColumnId,
+            sourceColumnName: node.data.sourceColumnName,
+          })
+          lines.push(`${prefix}${step}. KOŞUL: ${singleRuleText} ise:`)
         }
         step++
         const edges = edgeMap.get(nodeId) || []
@@ -621,19 +953,23 @@ export function flowToPromptText(flow: ConversationFlow): string {
         } else if (act === 'send_wa_location') {
           lines.push(`${prefix}${step}. ARAYANA WHATSAPP KONUMU GÖNDER: Kullanıcı konum, adres veya yol tarifi istediğinde whatsappKonumGonder aracını çağır. Araç başarılı olursa konumun WhatsApp'tan gönderildiğini söyle.`)
         } else if (act === 'save_patient_note' || act === 'notBirak') {
-          lines.push(`${prefix}${step}. HASTADAN NOT AL: Karşı tarafın yanıtını / mesajını hastaNotKaydet aracını çağırarak kaydet.`)
+          lines.push(`${prefix}${step}. MÜŞTERİDEN NOT AL: Karşı tarafın yanıtını / mesajını hastaNotKaydet aracını çağırarak kaydet.`)
         } else if (act === 'end_call') {
           const msg = (node.data as Record<string, unknown>).message || ''
           lines.push(`${prefix}${step}. BİLGİ VER VE BİTİR: ${msg ? `"${msg}" diyerek ` : ''}cagriySonlandir aracını çağır.`)
         } else if (act === 'set_variable') {
           lines.push(`${prefix}${step}. DEĞİŞKEN ATA: "${actionData.variableName || ''}" alanına "${actionData.variableValue || ''}" değerini ata ve devam et.`)
         } else if (act === 'send_sms') {
-          lines.push(`${prefix}${step}. SMS GÖNDER: Hastaya "${actionData.message || ''}" içerikli bilgilendirme SMS'ini ilet.`)
+          lines.push(`${prefix}${step}. SMS GÖNDER: Müşteriye "${actionData.message || ''}" içerikli bilgilendirme SMS'ini ilet.`)
         } else if (act === 'wait_reprompt' || act === 'wait') {
-          lines.push(`${prefix}${step}. BEKLE / YENİDEN SOR: "${actionData.message || 'Sizi dinliyorum, nasıl yardımcı olabilirim?'}" cümlesiyle hastayı yönlendir.`)
+          lines.push(`${prefix}${step}. BEKLE / YENİDEN SOR: "${actionData.message || 'Sizi dinliyorum, nasıl yardımcı olabilirim?'}" cümlesiyle müşteriyi yönlendir.`)
           lines.push(`${prefix}   ↳ Müşterinin konuşmasını ve cevabını bekle.`)
         } else if (act === 'switch_prompt') {
           lines.push(`${prefix}${step}. MOD / TALİMAT DEĞİŞTİR: Bundan sonraki konuşmada şu talimata göre davran: "${actionData.promptInstruction || actionData.message || ''}".`)
+        } else if (act === 'save_record') {
+          const tblNote = actionData.targetTableName ? ` (${actionData.targetTableName})` : ''
+          const targetIdHint = actionData.targetTableId ? ` ("hedef_tablo_id": "${actionData.targetTableId}")` : ''
+          lines.push(`${prefix}${step}. VERİ TABLOSUNA KAYDET${tblNote}: Toplanan tablo alanlarını kaydetmek için veriTablosunaKaydet${targetIdHint} aracını çağır (akış motoru aktifse sistem otomatik kaydeder) ve akışa devam et.`)
         } else {
           lines.push(`${prefix}${step}. RANDEVU OLUŞTUR: Toplanan bilgilerle randevuOlustur aracını çağır.`)
         }
@@ -700,17 +1036,17 @@ export function flowToPromptText(flow: ConversationFlow): string {
   }
 
   if (isMinimalGreetingEndFlow(flow)) {
-    lines.push(`\nMİNİMAL AKIŞ KURALI:\nKarşılama mesajını yalnızca bir kez söyle. Sonra karşı tarafın konuşmasını bekle; kendiliğinden randevu, şikayet, tarih, saat veya başka soru sorma. Karşı taraf klinikle ilgili bir soru sorarsa yalnızca o soruya kısa cevap ver ve yeni konu başlatma. Karşı taraf konu dışına çıkarsa ilk seferde nazikçe klinik/randevu konusuna yönlendir; konu dışına devam ederse "Yardımcı olabileceğim bir klinik işleminiz yoksa görüşmeyi sonlandırıyorum, iyi günler." deyip cagriySonlandir aracını çağır.`)
+    lines.push(`\nMİNİMAL AKIŞ KURALI:\nKarşılama mesajını yalnızca bir kez söyle. Sonra karşı tarafın konuşmasını bekle; kendiliğinden randevu, talep, tarih, saat veya başka soru sorma. Karşı taraf işletmeyle ilgili bir soru sorarsa yalnızca o soruya kısa cevap ver ve yeni konu başlatma. Karşı taraf konu dışına çıkarsa ilk seferde nazikçe işletme/randevu konusuna yönlendir; konu dışına devam ederse "Yardımcı olabileceğim başka bir işleminiz yoksa görüşmeyi sonlandırıyorum, iyi günler." deyip cagriySonlandir aracını çağır.`)
   } else {
     const outgoing = edgeMap.get(startNode.id) || []
     if (outgoing.length === 0) {
-      lines.push(`\nGENEL KLİNİK İLETİŞİM VE KONU DIŞI KURALI:
-Karşılama mesajını söyledikten sonra hastanın klinik, tedavi ve randevu sorularına doğal, samimi ve net cevaplar ver. Ancak karşı taraf klinik dışı sohbet açar veya konuyu dağıtıp vakit kaybettirirse:
-1) İlk seferde nazikçe "Size yalnızca kliniğimiz ve randevu işlemleriniz konusunda yardımcı olabilirim, randevu veya bilgi talebiniz var mı?" diyerek konuya yönlendir.
-2) Karşı taraf ikinci kez konu dışına çıkar veya alakasız konuşmaya devam ederse sohbeti KESİNLİKLE uzatma; "Yardımcı olabileceğim bir klinik işleminiz yoksa görüşmemizi sonlandırıyorum, sağlıklı günler dilerim." de ve cagriySonlandir aracını çağır.`)
+      lines.push(`\nGENEL İLETİŞİM VE KONU DIŞI KURALI:
+Karşılama mesajını söyledikten sonra müşterinin işletme, hizmet ve randevu sorularına doğal, samimi ve net cevaplar ver. Ancak karşı taraf konu dışı sohbet açar veya konuyu dağıtıp vakit kaybettirirse:
+1) İlk seferde nazikçe "Size yalnızca işletmemiz ve randevu işlemleriniz konusunda yardımcı olabilirim, randevu veya bilgi talebiniz var mı?" diyerek konuya yönlendir.
+2) Karşı taraf ikinci kez konu dışına çıkar veya alakasız konuşmaya devam ederse sohbeti KESİNLİKLE uzatma; "Yardımcı olabileceğim başka bir işleminiz yoksa görüşmemizi sonlandırıyorum, iyi günler dilerim." de ve cagriySonlandir aracını çağır.`)
     } else {
       lines.push(`\nGENEL İLETİŞİM VE KONU DIŞI KURALI:
-Akış adımlarını takip ederken karşı taraf klinikle ilgili bir soru sorarsa kısaca yanıtlayıp mevcut akış adımına dön. Karşı taraf klinik dışı bir konu açar veya konuyu dağıtırsa ilk seferde nazikçe mevcut randevu/klinik adımına yönlendir; üst üste ikinci kez konu dışına çıkarsa "Yardımcı olabileceğim bir klinik işleminiz yoksa görüşmemizi sonlandırıyorum, iyi günler." deyip cagriySonlandir aracını çağır.`)
+Akış adımlarını takip ederken karşı taraf işletmeyle ilgili bir soru sorarsa kısaca yanıtlayıp mevcut akış adımına dön. Karşı taraf konu dışı bir başlık açar veya konuyu dağıtırsa ilk seferde nazikçe mevcut randevu/işlem adımına yönlendir; üst üste ikinci kez konu dışına çıkarsa "Yardımcı olabileceğim başka bir işleminiz yoksa görüşmemizi sonlandırıyorum, iyi günler." deyip cagriySonlandir aracını çağır.`)
     }
   }
 

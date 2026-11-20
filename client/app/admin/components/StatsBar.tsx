@@ -38,7 +38,7 @@ export default function StatsBar() {
   const activeAccounts = stats.accounts?.active ?? 0
   const keySourceLabel =
     stats.keySource === 'clinic'
-      ? 'Kliniğe Özel Anahtar'
+      ? 'İşletmeye Özel Anahtar'
       : stats.keySource === 'shared'
       ? 'Ortak Anahtar'
       : undefined

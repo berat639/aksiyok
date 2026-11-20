@@ -2,7 +2,14 @@ import { sql } from 'drizzle-orm'
 import { db } from '../client'
 import { currentClinicId } from '../../tenancy/context'
 
-export type AiUsageSource = 'live_phone' | 'live_web' | 'whatsapp' | 'embedding' | 'simulator'
+export type AiUsageSource =
+  | 'live_phone'
+  | 'live_web'
+  | 'web_live'
+  | 'web_text'
+  | 'whatsapp'
+  | 'embedding'
+  | 'simulator'
 
 let usageSchemaReady = false
 
@@ -196,6 +203,23 @@ export async function getClinicTokenStats(clinicId?: string | null) {
       bySource: {} as Record<string, number>,
       costTry: { today: 0, month: 0, bySource: {} as Record<string, number> },
     }
+  }
+}
+
+export async function getDailyAiCallCount(clinicId?: string | null): Promise<number> {
+  const effectiveClinicId = clinicId ?? currentClinicId()
+  if (!effectiveClinicId) return 0
+  try {
+    await ensureAiUsageTable()
+    const rows = await db.execute<{ calls: number }>(sql`
+      SELECT COALESCE(SUM(call_count), 0)::int AS calls
+      FROM clinic_ai_usage_daily
+      WHERE clinic_id = ${effectiveClinicId}::uuid
+        AND day = (now() AT TIME ZONE 'Europe/Istanbul')::date
+    `)
+    return Number(rows[0]?.calls ?? 0)
+  } catch {
+    return 0
   }
 }
 

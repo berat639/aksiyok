@@ -205,7 +205,7 @@ export default function VipAssistantTab() {
           lineHeight: 1.5,
         }}
       >
-        <span style={{ color: '#60a5fa', fontWeight: 600 }}>💡 Nasıl Çalışır:</span> Arayan numara Asterisk santralinden otomatik tespit edilir. Sistem arayan kişiden ASLA telefon veya kimlik istemez. Doğrudan belirlediğiniz özel karşılama ile başlar ve Google Grounding aktifse internetteki güncel bilgileri sorgulayıp yanıtlar.
+        <span style={{ color: '#60a5fa', fontWeight: 600 }}>💡 Nasıl Çalışır:</span> Arayan numara telefon santralinden otomatik tespit edilir. Sistem arayan kişiden ASLA telefon veya kimlik istemez. Doğrudan belirlediğiniz özel karşılama ile başlar ve Google Grounding aktifse internetteki güncel bilgileri sorgulayıp yanıtlar.
       </div>
 
       {/* Table Container */}

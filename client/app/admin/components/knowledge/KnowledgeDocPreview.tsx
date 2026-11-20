@@ -2,7 +2,6 @@
 import { useEffect } from 'react'
 import type { KnowledgeDoc, CategoryDef } from '../KnowledgeTab'
 import { DocBadges, fmtDate } from './KnowledgeDocList'
-import { CALL_DIRECTION_LABELS } from '@/lib/knowledge-input-rules'
 import InfoTooltip from '../ui/InfoTooltip'
 import d from '../../../../styles/clinic-depth.module.css'
 import s from './KnowledgeTab.module.css'
@@ -46,7 +45,7 @@ export default function KnowledgeDocPreview({ doc, category, toggling, onClose, 
         <div className={s.drawerBody}>
           <div className={d.subcard}>
             <div className={s.kv}>
-              <span className={s.kvKey}>Kullanım yeri</span><span>{CALL_DIRECTION_LABELS[doc.callDirection || 'both']}</span>
+              <span className={s.kvKey}>Geçerli kanallar</span><span>Gelen, Giden, Web ve WhatsApp</span>
               <span className={s.kvKey}>Bilgi bankası</span>
               <span>{doc.embeddedAt ? `İşlendi · ${fmtDate(doc.embeddedAt)}` : 'Henüz işlenmedi'}</span>
               <span className={s.kvKey}>Son güncelleme</span><span>{fmtDate(doc.updatedAt)}</span>
@@ -57,7 +56,7 @@ export default function KnowledgeDocPreview({ doc, category, toggling, onClose, 
             <div className={s.label}>
               İçerik
               <InfoTooltip title="Bu metin ne işe yarar?">
-                Yapay zeka asistan, aramalarda bu metni okuyarak hastalara doğru bilgi verir. Belge pasifse asistan bu metni kullanmaz.
+                Yapay zeka asistan; gelen arama, giden arama, web ve WhatsApp kanallarının tümünde bu metni okuyarak doğru bilgi verir. Belge pasifse asistan bu metni kullanmaz.
               </InfoTooltip>
               <span className={s.counter}>{doc.content.length.toLocaleString('tr-TR')} karakter</span>
             </div>

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
+import { and, desc, eq, gte, inArray, ne, or, sql } from 'drizzle-orm'
 import { db } from '../db/client'
 import {
   appointmentTreatments,
@@ -11,7 +11,7 @@ import {
   users,
 } from '../db/schema'
 import { ensureTreatmentPlanningSchema } from '../db/treatment-planning-schema'
-import { ensureAiAppointmentReviewSchema, logPatientActivity } from '../db/repositories/dental'
+import { ensureAiAppointmentReviewSchema, findPatientByPhone, logPatientActivity } from '../db/repositories/dental'
 import {
   getNotificationPolicy,
   type NotificationChannelKey,
@@ -19,16 +19,67 @@ import {
 import { enqueueWhatsAppNotification, patientPhoneMatches } from '../db/repositories/whatsapp'
 import { activeConfig, decrypt, getRow, resolveEffectiveConfig } from '../integrations/managed/store'
 import type { Config } from '../integrations/managed/model'
-import { normalizePhone } from '../integrations/whatsapp'
+import { last10Digits, normalizePhone } from '../integrations/whatsapp'
 import { broadcastSSE } from '../events'
 import { runWithTenantContext } from '../tenancy/context'
 import { sendEmail } from './email'
 import { sendSMS } from './netgsm'
 import { notifyDoctorUser, notifyRole } from './notification'
-import { hasPatientConsent } from './patient-consent'
+import { hasContactConsent, hasPatientConsent } from './patient-consent'
 import { TreatmentPlanError } from './treatment-planning'
 
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex')
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export type NotificationRecipient = {
+  id?: string | null
+  name: string
+  phone?: string | null
+  email?: string | null
+}
+
+/**
+ * Finds the next active upcoming appointment by explicit UUID, patient phone link,
+ * or normalized intake phone (so general-business / flow appointments without a `patients` row match too).
+ */
+export async function findUpcomingAppointmentByPhone(clinicId: string, phone: string, explicitId?: string) {
+  if (explicitId && UUID_RE.test(explicitId)) {
+    const [byId] = await db
+      .select()
+      .from(dentalAppointments)
+      .where(and(eq(dentalAppointments.id, explicitId), eq(dentalAppointments.clinicId, clinicId)))
+      .limit(1)
+    if (byId) return byId
+  }
+
+  const p10 = last10Digits(phone)
+  const patient = phone ? await findPatientByPhone(phone, clinicId) : null
+  const intakePhonePred = p10.length >= 10
+    ? sql`RIGHT(regexp_replace(COALESCE(${dentalAppointments.intakePatientPhone}, ''), '[^0-9]', '', 'g'), 10) = ${p10}`
+    : null
+
+  const ownerPred = patient && intakePhonePred
+    ? or(eq(dentalAppointments.patientId, patient.id), intakePhonePred)
+    : patient
+      ? eq(dentalAppointments.patientId, patient.id)
+      : intakePhonePred
+
+  if (!ownerPred) return null
+
+  const [upcoming] = await db
+    .select()
+    .from(dentalAppointments)
+    .where(and(
+      eq(dentalAppointments.clinicId, clinicId),
+      ownerPred,
+      eq(dentalAppointments.isActive, true),
+      sql`${dentalAppointments.status} NOT IN ('cancelled', 'completed', 'no_show')`,
+      gte(dentalAppointments.startTime, new Date(Date.now() - 2 * 60 * 60 * 1000)),
+    ))
+    .orderBy(dentalAppointments.startTime)
+    .limit(1)
+  return upcoming ?? null
+}
 
 export type AppointmentNotificationKind =
   | 'appointment_created'
@@ -38,12 +89,13 @@ export type AppointmentNotificationKind =
 export type PatientResponseAction = 'confirm' | 'postpone' | 'cancel'
 
 /**
- * Returns the patient's allowed notification channels sorted strictly by the
- * clinic manager's configured priority order in Integrations/Settings.
+ * Returns the recipient's allowed notification channels sorted strictly by the
+ * business manager's configured priority order in Integrations/Settings.
  */
-export async function resolveOrderedPatientChannels(
+export async function resolveOrderedContactChannels(
   clinicId: string,
-  patientId: string,
+  patientId: string | null,
+  phone?: string | null,
   preferredSubset?: NotificationChannelKey[] | null,
 ): Promise<NotificationChannelKey[]> {
   const policy = await getNotificationPolicy(clinicId)
@@ -53,10 +105,20 @@ export async function resolveOrderedPatientChannels(
   for (const channel of policy.channelPriority) {
     if (!policy.enabledChannels[channel]) continue
     if (subset && !subset.has(channel)) continue
-    const consented = await hasPatientConsent(clinicId, patientId, channel)
+    const consented = patientId
+      ? await hasPatientConsent(clinicId, patientId, channel)
+      : (phone ? await hasContactConsent(clinicId, phone, channel) : false)
     if (consented) ordered.push(channel)
   }
   return ordered
+}
+
+export async function resolveOrderedPatientChannels(
+  clinicId: string,
+  patientId: string,
+  preferredSubset?: NotificationChannelKey[] | null,
+): Promise<NotificationChannelKey[]> {
+  return resolveOrderedContactChannels(clinicId, patientId, null, preferredSubset)
 }
 
 /**
@@ -112,12 +174,13 @@ async function resolveClinicHostname(clinicId: string): Promise<string> {
       desc(clinicDomains.isPrimary),
     )
     .limit(1)
-  const host = rows[0]?.hostname || (process.env.DEFAULT_CLINIC_HOSTS || 'pineclinic.thinpine.com').split(',')[0]?.trim() || 'pineclinic.thinpine.com'
+  const defaultHost = (process.env.DEFAULT_TENANT_HOSTS || process.env.DEFAULT_CLINIC_HOSTS || 'axamaz.com').split(',')[0]?.trim() || 'axamaz.com'
+  const host = rows[0]?.hostname || defaultHost
   return host
 }
 
 function buildAppointmentLink(hostname: string, token: string): string {
-  const cleanHost = hostname.toLowerCase().replace(/^https?:\/\//, '').split('/')[0] || 'pineclinic.thinpine.com'
+  const cleanHost = hostname.toLowerCase().replace(/^https?:\/\//, '').split('/')[0] || 'axamaz.com'
   const protocol = cleanHost.startsWith('localhost') || cleanHost.startsWith('127.0.0.1') ? 'http' : 'https'
   return `${protocol}://${cleanHost}/appointment/${token}`
 }
@@ -140,12 +203,19 @@ export async function scheduleAppointmentNotification(params: {
       .where(and(eq(dentalAppointments.id, params.appointmentId), eq(dentalAppointments.clinicId, params.clinicId)))
       .limit(1)
 
-    if (!appt || !appt.patientId || !appt.isActive) return
+    if (!appt || (!appt.patientId && !appt.intakePatientPhone) || !appt.isActive) return
     if (['cancelled', 'completed', 'no_show', 'pending_review'].includes(appt.status)) return
     if (appt.startTime.getTime() <= Date.now()) return
 
+    const [patient] = appt.patientId
+      ? await db.select({ id: patients.id, name: patients.name, phone: patients.phone }).from(patients)
+          .where(and(eq(patients.id, appt.patientId), eq(patients.clinicId, params.clinicId))).limit(1)
+      : []
+    const recipientPhone = appt.intakePatientPhone || patient?.phone || null
+    const recipientName = appt.intakePatientName || patient?.name || null
+
     const policy = await getNotificationPolicy(params.clinicId)
-    const channels = await resolveOrderedPatientChannels(params.clinicId, appt.patientId)
+    const channels = await resolveOrderedContactChannels(params.clinicId, appt.patientId, recipientPhone)
     if (!channels.length) return
 
     // Reuse existing token for this appointment if one already exists
@@ -172,11 +242,11 @@ export async function scheduleAppointmentNotification(params: {
       const rowTokenHash = hashToken(rowTokenPlain)
       await db.execute(sql`
         INSERT INTO appointment_notification_jobs (
-          clinic_id, patient_id, appointment_id, kind, status, step_index,
+          clinic_id, patient_id, recipient_name, recipient_phone, appointment_id, kind, status, step_index,
           channels, token_hash, token_plain, next_attempt_at, dedupe_key, payload, updated_at
         )
         VALUES (
-          ${params.clinicId}, ${appt.patientId}, ${params.appointmentId}, ${params.kind},
+          ${params.clinicId}, ${appt.patientId || null}, ${recipientName}, ${recipientPhone}, ${params.appointmentId}, ${params.kind},
           'pending', 0, ${JSON.stringify(channels)}::jsonb, ${rowTokenHash}, ${rowTokenPlain},
           ${instantAttemptAt.toISOString()}, ${dedupeKey},
           ${JSON.stringify({ startTime: appt.startTime.toISOString(), endTime: appt.endTime.toISOString() })}::jsonb,
@@ -187,6 +257,8 @@ export async function scheduleAppointmentNotification(params: {
           status = 'pending',
           step_index = 0,
           channels = EXCLUDED.channels,
+          recipient_name = COALESCE(EXCLUDED.recipient_name, appointment_notification_jobs.recipient_name),
+          recipient_phone = COALESCE(EXCLUDED.recipient_phone, appointment_notification_jobs.recipient_phone),
           next_attempt_at = EXCLUDED.next_attempt_at,
           payload = EXCLUDED.payload,
           updated_at = NOW()
@@ -215,11 +287,11 @@ export async function scheduleAppointmentNotification(params: {
         const confirmDedupeKey = `appt_confirm_24h:${params.appointmentId}:${appt.startTime.toISOString()}`
         await db.execute(sql`
           INSERT INTO appointment_notification_jobs (
-            clinic_id, patient_id, appointment_id, kind, status, step_index,
+            clinic_id, patient_id, recipient_name, recipient_phone, appointment_id, kind, status, step_index,
             channels, token_hash, token_plain, next_attempt_at, dedupe_key, payload, updated_at
           )
           VALUES (
-            ${params.clinicId}, ${appt.patientId}, ${params.appointmentId}, 'appointment_reminder_24h',
+            ${params.clinicId}, ${appt.patientId || null}, ${recipientName}, ${recipientPhone}, ${params.appointmentId}, 'appointment_reminder_24h',
             'pending', 0, ${JSON.stringify(channels)}::jsonb, ${confirmTokenHash}, ${confirmTokenPlain},
             ${reminderAt.toISOString()}, ${confirmDedupeKey},
             ${JSON.stringify({ startTime: appt.startTime.toISOString(), endTime: appt.endTime.toISOString() })}::jsonb,
@@ -229,6 +301,8 @@ export async function scheduleAppointmentNotification(params: {
             status = 'pending',
             step_index = 0,
             channels = EXCLUDED.channels,
+            recipient_name = COALESCE(EXCLUDED.recipient_name, appointment_notification_jobs.recipient_name),
+            recipient_phone = COALESCE(EXCLUDED.recipient_phone, appointment_notification_jobs.recipient_phone),
             next_attempt_at = EXCLUDED.next_attempt_at,
             updated_at = NOW()
         `)
@@ -259,14 +333,17 @@ export async function cancelAppointmentNotifications(clinicId: string, appointme
  */
 export async function deliverSingleChannelNotification(params: {
   clinic: typeof clinics.$inferSelect
-  patient: typeof patients.$inferSelect
+  patient: NotificationRecipient
   channel: NotificationChannelKey
   subject: string
   message: string
   externalKey: string
 }): Promise<boolean> {
   const { clinic, patient, channel, subject, message, externalKey } = params
-  if (!await hasPatientConsent(clinic.id, patient.id, channel)) return false
+  const hasConsent = patient.id
+    ? await hasPatientConsent(clinic.id, patient.id, channel)
+    : (patient.phone ? await hasContactConsent(clinic.id, patient.phone, channel) : false)
+  if (!hasConsent) return false
 
   if (channel === 'whatsapp') {
     if (!clinic.whatsappEnabled || !patient.phone) return false
@@ -275,7 +352,7 @@ export async function deliverSingleChannelNotification(params: {
       patient.phone,
       `${message}\n\nWhatsApp bildirimlerini kapatmak için DUR yazabilirsiniz.`,
       externalKey,
-      patient.id,
+      patient.id ?? null,
     )
     return true
   }
@@ -309,12 +386,14 @@ export async function deliverSingleChannelNotification(params: {
     if (!patient.phone || process.env.TELEPHONY_ENABLED === '0') return false
     const config = await activeConfig(clinic.id, 'phone')
     if (!config?.callerId) return false
-    const matches = await db
-      .select({ id: patients.id })
-      .from(patients)
-      .where(and(eq(patients.clinicId, clinic.id), patientPhoneMatches(patient.phone)))
-      .limit(2)
-    if (matches.length !== 1 || matches[0].id !== patient.id) return false
+    if (patient.id) {
+      const matches = await db
+        .select({ id: patients.id })
+        .from(patients)
+        .where(and(eq(patients.clinicId, clinic.id), patientPhoneMatches(patient.phone)))
+        .limit(2)
+      if (matches.length !== 1 || matches[0].id !== patient.id) return false
+    }
     const { initiateOutboundCall } = await import('./asterisk-ami')
     const result = await initiateOutboundCall(patient.phone, clinic.id)
     return Boolean(result.success)
@@ -325,12 +404,13 @@ export async function deliverSingleChannelNotification(params: {
 
 async function formatAppointmentMessage(params: {
   clinic: typeof clinics.$inferSelect
-  patient: typeof patients.$inferSelect
+  patient: NotificationRecipient
   appointment: typeof dentalAppointments.$inferSelect
   kind: AppointmentNotificationKind
   tokenPlain: string | null
 }): Promise<{ subject: string; message: string }> {
   const { clinic, patient, appointment, kind, tokenPlain } = params
+  const isDental = clinic.businessTemplate === 'dental_clinic'
   const dateStr = appointment.startTime.toLocaleDateString('tr-TR', {
     timeZone: 'Europe/Istanbul',
     day: 'numeric',
@@ -350,11 +430,13 @@ async function formatAppointmentMessage(params: {
     if (doc?.name) doctorName = doc.name
   }
 
-  const linked = await db
-    .select({ procedureName: treatmentPlans.procedureName, toothNumber: treatmentPlans.toothNumber })
-    .from(appointmentTreatments)
-    .innerJoin(treatmentPlans, eq(appointmentTreatments.treatmentPlanId, treatmentPlans.id))
-    .where(and(eq(appointmentTreatments.appointmentId, appointment.id), ne(treatmentPlans.status, 'cancelled')))
+  const linked = isDental
+    ? await db
+        .select({ procedureName: treatmentPlans.procedureName, toothNumber: treatmentPlans.toothNumber })
+        .from(appointmentTreatments)
+        .innerJoin(treatmentPlans, eq(appointmentTreatments.treatmentPlanId, treatmentPlans.id))
+        .where(and(eq(appointmentTreatments.appointmentId, appointment.id), ne(treatmentPlans.status, 'cancelled')))
+    : []
 
   const proceduresSummary = linked.length > 0
     ? linked.map(item => item.toothNumber && /^[1-4][1-8]$/.test(item.toothNumber) ? `#${item.toothNumber} ${item.procedureName}` : item.procedureName).join(', ')
@@ -363,24 +445,26 @@ async function formatAppointmentMessage(params: {
   const hostname = await resolveClinicHostname(clinic.id)
   const link = tokenPlain ? buildAppointmentLink(hostname, tokenPlain) : ''
   const doctorPart = doctorName ? ` (${doctorName})` : ''
+  const placeSuffix = isDental ? 'kliniğimizde' : 'işletmemizde'
+  const placeGenitive = isDental ? 'kliniğimizdeki' : 'işletmemizdeki'
 
   if (kind === 'appointment_created') {
     return {
       subject: `${clinic.name} - Randevu Bilgilendirmesi`,
-      message: `Sayın ${patient.name}, ${clinic.name} kliniğimizde ${dateStr} saat ${timeStr}${doctorPart} için randevunuz oluşturulmuştur (${proceduresSummary}).${link ? `\n\nRandevu durumunuzu onaylamak veya gelemeyecekseniz bildirmek için: ${link}` : ''}`,
+      message: `Sayın ${patient.name}, ${clinic.name} ${placeSuffix} ${dateStr} saat ${timeStr}${doctorPart} için randevunuz oluşturulmuştur (${proceduresSummary}).${link ? `\n\nRandevu durumunuzu onaylamak veya gelemeyecekseniz bildirmek için: ${link}` : ''}`,
     }
   }
 
   if (kind === 'appointment_rescheduled') {
     return {
       subject: `${clinic.name} - Randevu Saati Güncellendi`,
-      message: `Sayın ${patient.name}, ${clinic.name} kliniğimizdeki randevunuz ${dateStr} saat ${timeStr}${doctorPart} olarak güncellenmiştir (${proceduresSummary}).${link ? `\n\nRandevu durumunuzu onaylamak veya gelemeyecekseniz bildirmek için: ${link}` : ''}`,
+      message: `Sayın ${patient.name}, ${clinic.name} ${placeGenitive} randevunuz ${dateStr} saat ${timeStr}${doctorPart} olarak güncellenmiştir (${proceduresSummary}).${link ? `\n\nRandevu durumunuzu onaylamak veya gelemeyecekseniz bildirmek için: ${link}` : ''}`,
     }
   }
 
   return {
     subject: `${clinic.name} - Randevu Teyit Hatırlatması`,
-    message: `Sayın ${patient.name}, yarın (${dateStr}) saat ${timeStr}${doctorPart} ${clinic.name} kliniğimizde randevunuz bulunmaktadır.${link ? `\n\nGeleceğinizi onaylamak, erteleme talep etmek veya gelemeyecekseniz bildirmek için lütfen tıklayın: ${link}` : ''}`,
+    message: `Sayın ${patient.name}, yarın (${dateStr}) saat ${timeStr}${doctorPart} ${clinic.name} ${placeSuffix} randevunuz bulunmaktadır.${link ? `\n\nGeleceğinizi onaylamak, erteleme talep etmek veya gelemeyecekseniz bildirmek için lütfen tıklayın: ${link}` : ''}`,
   }
 }
 
@@ -404,7 +488,9 @@ export async function processAppointmentNotificationJobs() {
   for (const raw of dueRows as Array<Record<string, any>>) {
     const jobId = String(raw.id)
     const clinicId = String(raw.clinic_id)
-    const patientId = String(raw.patient_id)
+    const patientId = raw.patient_id ? String(raw.patient_id) : null
+    const rawRecipientName = raw.recipient_name ? String(raw.recipient_name) : null
+    const rawRecipientPhone = raw.recipient_phone ? String(raw.recipient_phone) : null
     const appointmentId = raw.appointment_id ? String(raw.appointment_id) : null
     const kind = String(raw.kind) as AppointmentNotificationKind
     const tokenPlain = raw.token_plain ? String(raw.token_plain) : null
@@ -448,14 +534,27 @@ export async function processAppointmentNotificationJobs() {
         continue
       }
 
-      const [patient] = await db
-        .select()
-        .from(patients)
-        .where(and(eq(patients.id, patientId), eq(patients.clinicId, clinicId)))
-        .limit(1)
+      const [patientRow] = patientId
+        ? await db
+            .select()
+            .from(patients)
+            .where(and(eq(patients.id, patientId), eq(patients.clinicId, clinicId)))
+            .limit(1)
+        : []
       const [clinic] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
 
-      if (!patient || !clinic) {
+      const recipient: NotificationRecipient | null = patientRow
+        ? { id: patientRow.id, name: patientRow.name, phone: patientRow.phone, email: patientRow.email }
+        : (rawRecipientPhone || appointment.intakePatientPhone)
+          ? {
+              id: null,
+              name: rawRecipientName || appointment.intakePatientName || appointment.title.split(' - ')[0] || 'Değerli Müşterimiz',
+              phone: rawRecipientPhone || appointment.intakePatientPhone || null,
+              email: null,
+            }
+          : null
+
+      if (!recipient || !clinic) {
         await db.execute(sql`UPDATE appointment_notification_jobs SET status = 'cancelled', updated_at = NOW() WHERE id = ${jobId}`)
         continue
       }
@@ -471,7 +570,7 @@ export async function processAppointmentNotificationJobs() {
         continue
       }
 
-      const orderedChannels = await resolveOrderedPatientChannels(clinicId, patientId)
+      const orderedChannels = await resolveOrderedContactChannels(clinicId, recipient.id ?? null, recipient.phone)
       if (!orderedChannels.length) {
         await db.execute(sql`UPDATE appointment_notification_jobs SET status = 'blocked', updated_at = NOW() WHERE id = ${jobId}`)
         continue
@@ -480,7 +579,7 @@ export async function processAppointmentNotificationJobs() {
       const startStep = Math.max(0, Number(raw.step_index || 0))
       const { subject, message } = await formatAppointmentMessage({
         clinic,
-        patient,
+        patient: recipient,
         appointment,
         kind,
         tokenPlain,
@@ -498,7 +597,7 @@ export async function processAppointmentNotificationJobs() {
         try {
           const ok = await deliverSingleChannelNotification({
             clinic,
-            patient,
+            patient: recipient,
             channel: ch,
             subject,
             message,
@@ -601,11 +700,19 @@ export async function applyPatientAppointmentResponse(input: {
     throw new TreatmentPlanError('Randevu bulunamadı veya aktif değil', 404)
   }
 
+  const [clinicRow] = await db
+    .select({ businessTemplate: clinics.businessTemplate })
+    .from(clinics)
+    .where(eq(clinics.id, input.clinicId))
+    .limit(1)
+  const isDental = clinicRow?.businessTemplate === 'dental_clinic'
+  const subjectNoun = isDental ? 'Hasta' : 'Müşteri'
+
   const [patient] = appointment.patientId
     ? await db.select().from(patients).where(and(eq(patients.id, appointment.patientId), eq(patients.clinicId, input.clinicId))).limit(1)
     : []
 
-  const patientName = patient?.name || appointment.intakePatientName || appointment.title.split(' - ')[0] || 'Hasta'
+  const patientName = patient?.name || appointment.intakePatientName || appointment.title.split(' - ')[0] || subjectNoun
   const apptDateLabel = appointment.startTime.toLocaleString('tr-TR', {
     timeZone: 'Europe/Istanbul',
     day: 'numeric',
@@ -624,10 +731,10 @@ export async function applyPatientAppointmentResponse(input: {
   const nextTimeConfirmed = input.action === 'confirm'
   const responseSummaryPrefix =
     input.action === 'confirm'
-      ? `✅ [Hasta Onayladı]`
+      ? `✅ [${subjectNoun} Onayladı]`
       : input.action === 'postpone'
-        ? `⏳ [Hasta Erteleme Talep Etti${cleanPreferredDate ? ` · Tercih: ${cleanPreferredDate}` : ''}]`
-        : `❌ [Hasta Gelemeyeceğini Bildirdi / İptal]`
+        ? `⏳ [${subjectNoun} Erteleme Talep Etti${cleanPreferredDate ? ` · Tercih: ${cleanPreferredDate}` : ''}]`
+        : `❌ [${subjectNoun} Gelemeyeceğini Bildirdi / İptal]`
 
   const combinedNotes = [
     appointment.notes?.trim() || '',
@@ -659,11 +766,11 @@ export async function applyPatientAppointmentResponse(input: {
       appointmentId: appointment.id,
       category: 'patient_response',
       event_type: 'patient_response',
-      title: 'Hasta Bildirim Yanıtı',
+      title: `${subjectNoun} Bildirim Yanıtı`,
       old_value: appointment.status,
       new_value: nextStatus,
       actorType: 'patient',
-      actorName: `${patientName} (Hasta)`,
+      actorName: `${patientName} (${subjectNoun})`,
       note: cleanNote || (cleanPreferredDate ? `Tercih edilen tarih: ${cleanPreferredDate}` : null),
     })
   }
@@ -705,7 +812,7 @@ export async function applyPatientAppointmentResponse(input: {
           ? `✅ Randevu Onaylandı: ${patientName}`
           : input.action === 'postpone'
             ? `⏳ Erteleme Talebi: ${patientName}`
-            : `❌ Hasta Gelemeyecek (İptal): ${patientName}`
+            : `❌ ${subjectNoun} Gelemeyecek (İptal): ${patientName}`
       const body =
         input.action === 'confirm'
           ? `${patientName}, ${apptDateLabel} randevusuna geleceğini onayladı.`
@@ -762,7 +869,12 @@ export async function getPublicAppointmentByToken(token: string) {
     throw new TreatmentPlanError('Randevu bulunamadı', 404)
   }
 
-  const [clinic] = await db.select({ id: clinics.id, name: clinics.name }).from(clinics).where(eq(clinics.id, clinicId)).limit(1)
+  const [clinic] = await db
+    .select({ id: clinics.id, name: clinics.name, businessTemplate: clinics.businessTemplate })
+    .from(clinics)
+    .where(eq(clinics.id, clinicId))
+    .limit(1)
+  const isDental = clinic?.businessTemplate === 'dental_clinic'
   const [patient] = appointment.patientId
     ? await db.select({ id: patients.id, name: patients.name }).from(patients).where(eq(patients.id, appointment.patientId)).limit(1)
     : []
@@ -770,18 +882,21 @@ export async function getPublicAppointmentByToken(token: string) {
     ? await db.select({ id: users.id, name: users.name, specialty: users.specialty }).from(users).where(eq(users.id, appointment.doctorId)).limit(1)
     : []
 
-  const treatments = await db
-    .select({
-      procedureName: treatmentPlans.procedureName,
-      toothNumber: treatmentPlans.toothNumber,
-    })
-    .from(appointmentTreatments)
-    .innerJoin(treatmentPlans, eq(appointmentTreatments.treatmentPlanId, treatmentPlans.id))
-    .where(and(eq(appointmentTreatments.appointmentId, appointment.id), ne(treatmentPlans.status, 'cancelled')))
+  const treatments = isDental
+    ? await db
+        .select({
+          procedureName: treatmentPlans.procedureName,
+          toothNumber: treatmentPlans.toothNumber,
+        })
+        .from(appointmentTreatments)
+        .innerJoin(treatmentPlans, eq(appointmentTreatments.treatmentPlanId, treatmentPlans.id))
+        .where(and(eq(appointmentTreatments.appointmentId, appointment.id), ne(treatmentPlans.status, 'cancelled')))
+    : []
 
   return {
-    clinicName: clinic?.name || 'Diş Kliniği',
-    patientName: patient?.name || appointment.intakePatientName || 'Sayın Hastamız',
+    clinicName: clinic?.name || (isDental ? 'Diş Kliniği' : 'İşletme'),
+    businessTemplate: clinic?.businessTemplate || 'general',
+    patientName: patient?.name || appointment.intakePatientName || (isDental ? 'Sayın Hastamız' : 'Sayın Müşterimiz'),
     doctorName: doctor?.name || null,
     doctorSpecialty: doctor?.specialty || null,
     startTime: appointment.startTime.toISOString(),

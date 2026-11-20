@@ -247,9 +247,9 @@ export async function saveTreatmentPlan(input: SavePlanInput, clinicId: string, 
       const doctorIds = [...new Set(normalized.flatMap(item => item.doctorIds && item.doctorIds.length ? item.doctorIds : (item.doctorId ? [item.doctorId] : [])))]
       if (doctorIds.length) {
         const doctors = await tx.select({ id: clinicMemberships.userId }).from(clinicMemberships).where(and(
-          eq(clinicMemberships.clinicId, clinicId), eq(clinicMemberships.role, 'hekim'), eq(clinicMemberships.active, true), inArray(clinicMemberships.userId, doctorIds),
+          eq(clinicMemberships.clinicId, clinicId), inArray(clinicMemberships.role, ['calisan', 'hekim']), eq(clinicMemberships.active, true), inArray(clinicMemberships.userId, doctorIds),
         ))
-        if (doctors.length !== doctorIds.length) throw new TreatmentPlanError('Seçilen hekim kliniğe ait değil')
+        if (doctors.length !== doctorIds.length) throw new TreatmentPlanError('Seçilen çalışan/uzman işletmeye ait değil')
       }
       const materialIds = [...new Set(normalized.flatMap(item => item.materials.map(m => m.inventoryItemId)))]
       const stock = materialIds.length ? await tx.select().from(inventoryItems).where(and(eq(inventoryItems.clinicId, clinicId), inArray(inventoryItems.id, materialIds))) : []
@@ -464,8 +464,8 @@ export async function createStandaloneTreatment(patientId: string, input: Treatm
     }
     if (input.doctorId) {
       const [doctor] = await tx.select({ id: clinicMemberships.userId }).from(clinicMemberships).where(and(eq(clinicMemberships.userId, input.doctorId),
-        eq(clinicMemberships.clinicId, clinicId), eq(clinicMemberships.role, 'hekim'), eq(clinicMemberships.active, true))).limit(1)
-      if (!doctor) throw new TreatmentPlanError('Seçilen hekim kliniğe ait değil')
+        eq(clinicMemberships.clinicId, clinicId), inArray(clinicMemberships.role, ['calisan', 'hekim']), eq(clinicMemberships.active, true))).limit(1)
+      if (!doctor) throw new TreatmentPlanError('Seçilen çalışan/uzman işletmeye ait değil')
     }
     const ids = materials.map(item => item.inventoryItemId)
     const stock = ids.length ? await tx.select().from(inventoryItems).where(and(eq(inventoryItems.clinicId, clinicId), inArray(inventoryItems.id, ids))) : []
@@ -508,9 +508,9 @@ export async function completeTreatmentItem(id: string, clinicId: string, values
     if (resolvedDoctorIds.length > 0) {
       const doctors = await tx.select({ id: clinicMemberships.userId }).from(clinicMemberships).where(and(
         inArray(clinicMemberships.userId, resolvedDoctorIds),
-        eq(clinicMemberships.clinicId, clinicId), eq(clinicMemberships.role, 'hekim'), eq(clinicMemberships.active, true),
+        eq(clinicMemberships.clinicId, clinicId), inArray(clinicMemberships.role, ['calisan', 'hekim']), eq(clinicMemberships.active, true),
       ))
-      if (doctors.length !== resolvedDoctorIds.length) throw new TreatmentPlanError('Seçilen hekim kliniğe ait değil')
+      if (doctors.length !== resolvedDoctorIds.length) throw new TreatmentPlanError('Seçilen çalışan/uzman işletmeye ait değil')
     }
     const [details] = await tx.select().from(treatmentPlanDetails).where(eq(treatmentPlanDetails.treatmentId, id)).for('update')
     if (values.status === 'completed' && details?.stockState === 'planned') {

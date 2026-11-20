@@ -21,7 +21,7 @@ export default function KullanicilarTab() {
   const [users, setUsers] = useState<User[]>([])
   const activeAdminCount = users.filter((x) => x.role === 'yonetici' && x.active !== false).length
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState({ email: '', name: '', password: '', role: 'hekim', phone: '', specialty: '', color: '#60a5fa' })
+  const [form, setForm] = useState({ email: '', name: '', password: '', role: 'calisan', phone: '', specialty: '', color: '#60a5fa' })
   const [error, setError] = useState('')
 
   // Edit states
@@ -35,7 +35,7 @@ export default function KullanicilarTab() {
     color: string
     active: boolean
     password?: string
-  }>({ name: '', email: '', phone: '', role: 'hekim', specialty: '', color: '#60a5fa', active: true, password: '' })
+  }>({ name: '', email: '', phone: '', role: 'calisan', specialty: '', color: '#60a5fa', active: true, password: '' })
   const [editError, setEditError] = useState('')
   const [isSavingUser, setIsSavingUser] = useState(false)
   const [confirmDeleteUser, setConfirmDeleteUser] = useState<User | null>(null)
@@ -59,7 +59,7 @@ export default function KullanicilarTab() {
     if (res.ok) {
       setUsers([...users, { ...data, active: true }]);
       setShowForm(false);
-      setForm({ email: '', name: '', password: '', role: 'hekim', phone: '', specialty: '', color: '#60a5fa' });
+      setForm({ email: '', name: '', password: '', role: 'calisan', phone: '', specialty: '', color: '#60a5fa' });
       fetchUsers();
     }
     else setError(data.error || 'Hata')
@@ -71,7 +71,7 @@ export default function KullanicilarTab() {
       name: u.name || '',
       email: u.email || '',
       phone: u.phone || '',
-      role: u.role || 'hekim',
+      role: u.role || 'calisan',
       specialty: u.specialty || '',
       color: u.color || '#60a5fa',
       active: u.active ?? true,
@@ -90,7 +90,7 @@ export default function KullanicilarTab() {
       return
     }
     if (editingUser.role === 'yonetici' && editingUser.active !== false && activeAdminCount <= 1 && (!editForm.active || editForm.role !== 'yonetici')) {
-      const msg = 'Güvenlik Uyarısı: Klinikteki tek aktif yönetici hesabı dondurulamaz veya yetkisi düşürülemez.'
+      const msg = 'Güvenlik Uyarısı: İşletmedeki tek aktif yönetici hesabı dondurulamaz veya yetkisi düşürülemez.'
       setEditError(msg)
       toast.error(msg)
       return
@@ -103,8 +103,8 @@ export default function KullanicilarTab() {
         email: editForm.email,
         phone: editForm.phone,
         role: editForm.role,
-        specialty: editForm.role === 'hekim' ? editForm.specialty : null,
-        color: editForm.role === 'hekim' ? editForm.color : null,
+        specialty: editForm.role !== 'yonetici' ? editForm.specialty : null,
+        color: editForm.role !== 'yonetici' ? editForm.color : null,
         active: editForm.active
       }
       if (editForm.password && editForm.password.trim().length >= 6) {
@@ -165,13 +165,12 @@ export default function KullanicilarTab() {
           <input placeholder="E-posta *" type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} required style={inputStyle} />
           <input placeholder="Şifre *" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} required minLength={6} style={inputStyle} />
           <select value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} style={inputStyle}>
-            <option value="hekim">Hekim</option>
-            <option value="host">Resepsiyon</option>
+            <option value="calisan">Çalışan</option>
           </select>
           <PhoneMaskedInput placeholder="Telefon — 0 (5XX) XXX XX XX (opsiyonel)" value={form.phone} onValueChange={phone => setForm({ ...form, phone })} style={inputStyle} />
-          {form.role === 'hekim' && (
+          {form.role !== 'yonetici' && (
             <>
-              <input placeholder="Uzmanlık (ör. Ortodonti)" value={form.specialty} onChange={e => setForm({ ...form, specialty: e.target.value })} style={inputStyle} />
+              <input placeholder="Ünvan / Uzmanlık (ör. Uzman, Temsilci)" value={form.specialty} onChange={e => setForm({ ...form, specialty: e.target.value })} style={inputStyle} />
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 12, color: 'var(--foreground-2)' }}>Renk:</span>
                 <input type="color" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} style={{ width: 32, height: 28, border: 'none', borderRadius: 4, cursor: 'pointer' }} />
@@ -200,8 +199,8 @@ export default function KullanicilarTab() {
               </td>
               <td style={{ padding: '10px 12px', fontSize: 13, color: 'var(--foreground-2)', borderBottom: '1px solid var(--divider)' }}>{u.email}</td>
               <td style={{ padding: '10px 12px', borderBottom: '1px solid var(--divider)' }}>
-                <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, background: u.role === 'yonetici' ? 'rgba(239,68,68,0.1)' : u.role === 'hekim' ? 'rgba(59,130,246,0.1)' : 'rgba(16,185,129,0.1)', color: u.role === 'yonetici' ? 'var(--danger)' : u.role === 'hekim' ? 'var(--accent)' : 'var(--success)', fontWeight: 600 }}>
-                  {u.role === 'yonetici' ? 'Yönetici' : u.role === 'hekim' ? 'Hekim' : 'Resepsiyon'}
+                <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11, background: u.role === 'yonetici' ? 'rgba(239,68,68,0.1)' : (u.role === 'hekim' || u.role === 'calisan') ? 'rgba(59,130,246,0.1)' : 'rgba(16,185,129,0.1)', color: u.role === 'yonetici' ? 'var(--danger)' : (u.role === 'hekim' || u.role === 'calisan') ? 'var(--accent)' : 'var(--success)', fontWeight: 600 }}>
+                  {u.role === 'yonetici' ? 'Yönetici' : u.role === 'hekim' ? 'Hekim' : u.role === 'calisan' ? 'Çalışan' : 'Personel'}
                 </span>
               </td>
               <td style={{ padding: '10px 12px', fontSize: 13, borderBottom: '1px solid var(--divider)' }}>
@@ -300,17 +299,21 @@ export default function KullanicilarTab() {
                       <input value="Yönetici (Seed User)" disabled style={{ ...inputStyle, opacity: 0.75, cursor: 'not-allowed' }} />
                     ) : (
                       <select value={editForm.role} onChange={e => setEditForm({ ...editForm, role: e.target.value })} style={inputStyle}>
-                        <option value="hekim">Hekim</option>
-                        <option value="host">Resepsiyon</option>
+                        <option value="calisan">Çalışan</option>
+                        {editForm.role !== 'calisan' && (
+                          <option value={editForm.role}>
+                            {editForm.role === 'hekim' ? 'Hekim (Eski Rol)' : editForm.role === 'host' ? 'Resepsiyon (Eski Rol)' : editForm.role}
+                          </option>
+                        )}
                       </select>
                     )}
                   </div>
                 </div>
 
-                {editForm.role === 'hekim' && (
+                {editForm.role !== 'yonetici' && (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     <div>
-                      <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>Uzmanlık</label>
+                      <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>Ünvan / Uzmanlık</label>
                       <input value={editForm.specialty} onChange={e => setEditForm({ ...editForm, specialty: e.target.value })} style={inputStyle} />
                     </div>
                     <div>
@@ -329,7 +332,7 @@ export default function KullanicilarTab() {
                     type="button"
                     onClick={() => {
                       if (editingUser.role === 'yonetici') {
-                        toast.error('⚠️ Yönetici hesabı yalnızca satışçı tarafından Klinikler sekmesinden dondurulabilir.')
+                        toast.error('⚠️ Yönetici hesabı yalnızca satışçı tarafından İşletmeler sekmesinden dondurulabilir.')
                         return
                       }
                       setEditForm({ ...editForm, active: !editForm.active })

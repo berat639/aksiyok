@@ -40,93 +40,52 @@ async function getMany(keys: string[]): Promise<Record<string, string>> {
   return map
 }
 
-// ── Calendar settings ───────────────────────────────────────────────────────
-const CAL_REFRESH = 'calendar.refresh_token'
-const CAL_EMAIL = 'calendar.email'
-const CAL_ID = 'calendar.calendar_id'
-
-export interface CalendarSettings {
-  refreshToken?: string | null
-  email?: string | null
-  calendarId?: string | null
-}
-
-export async function getCalendarSettings(): Promise<CalendarSettings> {
-  const map = await getMany([CAL_REFRESH, CAL_EMAIL, CAL_ID])
-  return {
-    refreshToken: map[CAL_REFRESH] ?? null,
-    email: map[CAL_EMAIL] ?? null,
-    calendarId: map[CAL_ID] ?? null,
-  }
-}
-
-export async function setCalendarSettings(patch: CalendarSettings): Promise<void> {
-  const updates: Array<Promise<void>> = []
-  if (patch.refreshToken !== undefined) {
-    if (patch.refreshToken === null || patch.refreshToken === '') {
-      updates.push(deleteSetting(CAL_REFRESH))
-    } else {
-      updates.push(setSetting(CAL_REFRESH, patch.refreshToken))
-    }
-  }
-  if (patch.email !== undefined) {
-    if (patch.email === null || patch.email === '') {
-      updates.push(deleteSetting(CAL_EMAIL))
-    } else {
-      updates.push(setSetting(CAL_EMAIL, patch.email))
-    }
-  }
-  if (patch.calendarId !== undefined) {
-    if (patch.calendarId === null || patch.calendarId === '') {
-      updates.push(deleteSetting(CAL_ID))
-    } else {
-      updates.push(setSetting(CAL_ID, patch.calendarId))
-    }
-  }
-  await Promise.all(updates)
-}
-
-export async function disconnectCalendar(): Promise<void> {
-  await Promise.all([
-    deleteSetting(CAL_REFRESH),
-    deleteSetting(CAL_EMAIL),
-    deleteSetting(CAL_ID),
-  ])
-}
-
 // ── AI model settings ───────────────────────────────────────────────────────
 const AI_MODEL = 'ai.model'
 
-export async function getAiModel(): Promise<string | null> {
-  return getSetting(AI_MODEL)
+export async function getAiModel(explicitClinicId?: string): Promise<string | null> {
+  return getSetting(AI_MODEL, explicitClinicId)
 }
 
-export async function setAiModel(model: string): Promise<{ model: string; updatedAt: string }> {
-  await setSetting(AI_MODEL, model)
+export async function setAiModel(model: string, explicitClinicId?: string): Promise<{ model: string; updatedAt: string }> {
+  await setSetting(AI_MODEL, model, explicitClinicId)
   return { model, updatedAt: new Date().toISOString() }
 }
 
 // ── Greeting settings ───────────────────────────────────────────────────────
 const AI_GREETING = 'ai.greeting'
 const AI_GREETING_OUTBOUND = 'ai.greeting_outbound'
+const AI_GREETING_WEB = 'ai.greeting_web'
+const AI_GREETING_WHATSAPP = 'ai.greeting_whatsapp'
 
 export async function getGreeting(direction: string = 'inbound', explicitClinicId?: string): Promise<string | null> {
   if (direction === 'outbound') {
     const val = (await getSetting(AI_GREETING_OUTBOUND, explicitClinicId)) || (await getSetting('greeting_message_outbound', explicitClinicId))
     return val || null
   }
+  if (direction === 'web') {
+    const val = await getSetting(AI_GREETING_WEB, explicitClinicId)
+    return val || null
+  }
+  if (direction === 'whatsapp') {
+    const val = await getSetting(AI_GREETING_WHATSAPP, explicitClinicId)
+    return val || null
+  }
   const val = (await getSetting(AI_GREETING, explicitClinicId)) || (await getSetting('greeting_message', explicitClinicId))
   return val || null
 }
 
-export async function setGreeting(text: string, direction: string = 'inbound'): Promise<{ greeting: string; updatedAt: string }> {
-  const key = direction === 'outbound' ? AI_GREETING_OUTBOUND : AI_GREETING
-  await setSetting(key, text)
-  // Also sync with legacy key to be safe
+export async function setGreeting(text: string, direction: string = 'inbound', explicitClinicId?: string): Promise<{ greeting: string; updatedAt: string }> {
   if (direction === 'outbound') {
-    await setSetting('greeting_message_outbound', text).catch(() => {})
+    await setSetting(AI_GREETING_OUTBOUND, text, explicitClinicId)
+    await setSetting('greeting_message_outbound', text, explicitClinicId).catch(() => {})
+  } else if (direction === 'web') {
+    await setSetting(AI_GREETING_WEB, text, explicitClinicId)
+  } else if (direction === 'whatsapp') {
+    await setSetting(AI_GREETING_WHATSAPP, text, explicitClinicId)
   } else {
-    await setSetting('greeting_message', text).catch(() => {})
+    await setSetting(AI_GREETING, text, explicitClinicId)
+    await setSetting('greeting_message', text, explicitClinicId).catch(() => {})
   }
   return { greeting: text, updatedAt: new Date().toISOString() }
 }
@@ -134,102 +93,13 @@ export async function setGreeting(text: string, direction: string = 'inbound'): 
 // ── Outbound Caller ID settings ─────────────────────────────────────────────
 const OUTBOUND_CALLER_ID = 'outbound_caller_id'
 
-export async function getOutboundCallerId(): Promise<string> {
-  return (await getSetting(OUTBOUND_CALLER_ID)) || '08503096119'
+export async function getOutboundCallerId(explicitClinicId?: string): Promise<string> {
+  return (await getSetting(OUTBOUND_CALLER_ID, explicitClinicId)) || '08503096119'
 }
 
-export async function setOutboundCallerId(callerId: string): Promise<{ callerId: string; updatedAt: string }> {
-  await setSetting(OUTBOUND_CALLER_ID, callerId)
+export async function setOutboundCallerId(callerId: string, explicitClinicId?: string): Promise<{ callerId: string; updatedAt: string }> {
+  await setSetting(OUTBOUND_CALLER_ID, callerId, explicitClinicId)
   return { callerId, updatedAt: new Date().toISOString() }
-}
-
-// ── Connection mode settings ────────────────────────────────────────────────
-const CONNECTION_MODE = 'ai.connection_mode'
-
-export type ConnectionMode = 'server' | 'direct'
-
-export async function getConnectionMode(): Promise<ConnectionMode> {
-  const val = await getSetting(CONNECTION_MODE)
-  return val === 'direct' ? 'direct' : 'server'
-}
-
-export async function setConnectionMode(mode: ConnectionMode): Promise<{ mode: ConnectionMode; updatedAt: string }> {
-  await setSetting(CONNECTION_MODE, mode)
-  return { mode, updatedAt: new Date().toISOString() }
-}
-
-// ── Prompt section settings ─────────────────────────────────────────────────
-const PROMPT_PREFIX = 'prompt.'
-
-export interface PromptSectionRow {
-  key: string
-  value: string
-  updatedAt: string | null
-}
-
-/** Get all prompt.* sections from DB */
-export async function getAllPromptSections(): Promise<Record<string, PromptSectionRow>> {
-  const clinicId = requireClinicId()
-  const result = await db.execute(drizzleSql`
-    SELECT key, value, updated_at
-    FROM clinic_settings
-    WHERE clinic_id = ${clinicId} AND key LIKE 'prompt.%'
-  `)
-  const rows = (result as unknown as { rows?: Array<{ key: string; value: string; updated_at: string | null }> }).rows
-    ?? (result as unknown as Array<{ key: string; value: string; updated_at: string | null }>)
-  const map: Record<string, PromptSectionRow> = {}
-  for (const row of rows) {
-    map[row.key] = { key: row.key, value: row.value, updatedAt: row.updated_at ?? null }
-  }
-  return map
-}
-
-/** Get a single prompt section from DB */
-export async function getPromptSection(key: string): Promise<string | null> {
-  if (!key.startsWith(PROMPT_PREFIX)) return null
-  return getSetting(key)
-}
-
-/** Set a prompt section in DB */
-export async function setPromptSection(key: string, value: string): Promise<void> {
-  if (!key.startsWith(PROMPT_PREFIX)) throw new Error('Key must start with prompt.')
-  await setSetting(key, value)
-}
-
-/** Delete a prompt section (revert to default) */
-export async function resetPromptSection(key: string): Promise<void> {
-  if (!key.startsWith(PROMPT_PREFIX)) throw new Error('Key must start with prompt.')
-  await deleteSetting(key)
-}
-
-// ── Tool description settings ───────────────────────────────────────────────
-const TOOLS_PREFIX = 'tools.'
-
-/** Get all tools.* descriptions from DB */
-export async function getToolDescriptions(): Promise<Record<string, string>> {
-  const clinicId = requireClinicId()
-  const result = await db.execute(drizzleSql`
-    SELECT key, value
-    FROM clinic_settings
-    WHERE clinic_id = ${clinicId} AND key LIKE 'tools.%'
-  `)
-  const rows = (result as unknown as { rows?: Array<{ key: string; value: string }> }).rows
-    ?? (result as unknown as Array<{ key: string; value: string }>)
-  const map: Record<string, string> = {}
-  for (const row of rows) map[row.key] = row.value
-  return map
-}
-
-/** Set a tool description in DB */
-export async function setToolDescription(key: string, value: string): Promise<void> {
-  if (!key.startsWith(TOOLS_PREFIX)) throw new Error('Key must start with tools.')
-  await setSetting(key, value)
-}
-
-/** Delete a tool description (revert to default) */
-export async function resetToolDescription(key: string): Promise<void> {
-  if (!key.startsWith(TOOLS_PREFIX)) throw new Error('Key must start with tools.')
-  await deleteSetting(key)
 }
 
 // ── Branding settings ───────────────────────────────────────────────────────

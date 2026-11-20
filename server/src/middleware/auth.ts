@@ -1,7 +1,13 @@
 import { SignJWT, jwtVerify } from 'jose'
 import { getUserById, getSessionByJti } from '../db/repositories/users'
 import { ensurePlatformAdminMembership, getActiveMembership } from '../db/repositories/tenancy'
-import { resolveTenantFromRequest } from '../tenancy/context'
+import {
+  findTenantByHostname,
+  getTenantByClinicId,
+  hostnameFromRequest,
+  isSharedAppHostname,
+  setRequestTenant,
+} from '../tenancy/context'
 import { canManagePlatform } from '../platform/access'
 
 const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || 'voiceai-dev-secret-change-me')
@@ -60,9 +66,15 @@ export async function authenticateRequest(cookie: string | undefined, request?: 
 
   let hostname: string | undefined
   if (request) {
-    const tenant = await resolveTenantFromRequest(request)
-    if (!tenant || tenant.clinicId !== payload.clinicId) return null
-    hostname = tenant.hostname
+    const reqHost = hostnameFromRequest(request)
+    const hostTenant = await findTenantByHostname(reqHost)
+    if (hostTenant && !isSharedAppHostname(reqHost) && hostTenant.clinicId !== payload.clinicId) {
+      return null
+    }
+    const clinicTenant = await getTenantByClinicId(payload.clinicId, reqHost)
+    if (!clinicTenant) return null
+    setRequestTenant(request, clinicTenant)
+    hostname = clinicTenant.hostname
   }
 
   return {

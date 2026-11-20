@@ -171,8 +171,128 @@ export async function sendWhatsAppText(to: string, creds: WhatsAppCredentials, t
   return { messageId: data.key.id }
 }
 export interface IncomingWhatsAppMessage {
-  externalId: string; remoteJid: string; phone: string | null; text: string; fromMe: boolean; timestamp: number
+  externalId: string; remoteJid: string; phone: string | null; text: string; fromMe: boolean; timestamp: number; pushName?: string | null
 }
+export interface EvolutionContactEntry {
+  phone: string
+  phoneLast10: string
+  remoteJid: string
+  contactName: string
+  explicitAddressBook: boolean
+}
+
+function sanitizeContactName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const cleaned = raw.replace(/\s+/g, ' ').trim()
+  if (!cleaned || cleaned.length > 120) return null
+  if (cleaned === '.' || cleaned === '~' || cleaned === '-') return null
+  // Yalnızca rakam, +, boşluk veya tire/parantez içeren telefon numarası dizgelerini isim kabul etme
+  if (/^[+\d\s().-]+$/.test(cleaned)) return null
+  return cleaned
+}
+
+export function parseEvolutionContactsList(
+  raw: unknown,
+  excludedPhone?: string | null,
+  options?: { webhookStrict?: boolean },
+): EvolutionContactEntry[] {
+  const list: any[] = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as any)?.contacts)
+      ? (raw as any).contacts
+      : Array.isArray((raw as any)?.data)
+        ? (raw as any).data
+        : raw && typeof raw === 'object'
+          ? [raw]
+          : []
+
+  const byPhone10 = new Map<string, EvolutionContactEntry>()
+
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    if (item.isMyContact === false || item.isGroup === true) continue
+
+    const jidCandidates = [item.remoteJid, item.id, item.jid, item.wuid]
+      .map(j => (typeof j === 'string' ? j.replace(/:\d+@/, '@').trim() : ''))
+      .filter(Boolean)
+
+    const phoneJid = jidCandidates.find(j => /^\d+@(s\.whatsapp\.net|c\.us)$/.test(j))
+    const rawDigits = phoneJid
+      ? phoneJid.split('@')[0]
+      : typeof item.number === 'string' || typeof item.number === 'number'
+        ? String(item.number)
+        : ''
+    if (!rawDigits) continue
+
+    let phone: string
+    try {
+      phone = normalizePhone(rawDigits)
+    } catch {
+      continue
+    }
+    if (excludedPhone && phonesMatch(phone, excludedPhone)) continue
+    const phoneLast10 = last10Digits(phone)
+    if (!phoneLast10) continue
+
+    const explicitBookName =
+      sanitizeContactName(item.name) ||
+      sanitizeContactName(item.savedName) ||
+      sanitizeContactName(item.fullName) ||
+      sanitizeContactName(item.firstName)
+
+    const fallbackPushName = options?.webhookStrict
+      ? (item.isMyContact === true ? sanitizeContactName(item.pushName) : null)
+      : sanitizeContactName(item.pushName) || sanitizeContactName(item.verifiedName)
+
+    const contactName = explicitBookName || fallbackPushName
+    if (!contactName) continue
+
+    const explicitAddressBook = Boolean(explicitBookName || item.isMyContact === true)
+    const remoteJid = `${phone.slice(1)}@s.whatsapp.net`
+    const existing = byPhone10.get(phoneLast10)
+    if (!existing || (explicitAddressBook && !existing.explicitAddressBook)) {
+      byPhone10.set(phoneLast10, {
+        phone,
+        phoneLast10,
+        remoteJid,
+        contactName,
+        explicitAddressBook,
+      })
+    }
+  }
+
+  return Array.from(byPhone10.values())
+}
+
+export function parseEvolutionContactsWebhook(payload: unknown, excludedPhone?: string | null): EvolutionContactEntry[] {
+  const p = payload as any
+  const event = String(p?.event || '').replace(/[.-]/g, '_').toUpperCase()
+  if (event !== 'CONTACTS_SET' && event !== 'CONTACTS_UPSERT' && event !== 'CONTACTS_UPDATE') return []
+  return parseEvolutionContactsList(p?.data, excludedPhone, { webhookStrict: true })
+}
+
+export async function fetchEvolutionContacts(
+  creds: WhatsAppCredentials,
+  excludedPhone?: string | null,
+): Promise<EvolutionContactEntry[]> {
+  const path = `/chat/findContacts/${encodeURIComponent(creds.instanceName)}`
+  let raw: unknown
+  try {
+    raw = await evolutionRequest<unknown>(creds, path, { where: {} }, 'POST')
+  } catch (err) {
+    if (err instanceof EvolutionError && [400, 404, 405].includes(err.status)) {
+      try {
+        raw = await evolutionRequest<unknown>(creds, path, {}, 'POST')
+      } catch {
+        raw = await evolutionRequest<unknown>(creds, path, undefined, 'GET')
+      }
+    } else {
+      throw err
+    }
+  }
+  return parseEvolutionContactsList(raw, excludedPhone)
+}
+
 /** Only recent direct messages are eligible. LIDs are never interpreted as telephone numbers. */
 export function parseEvolutionMessages(payload: unknown, now = Date.now()): IncomingWhatsAppMessage[] {
   const p = payload as any
@@ -199,7 +319,16 @@ export function parseEvolutionMessages(payload: unknown, now = Date.now()): Inco
       .find(j => typeof j === 'string' && /^\d+@s\.whatsapp\.net$/.test(j))
     let phone: string | null = null
     try { if (phoneJid) phone = normalizePhone(phoneJid.split('@')[0].split(':')[0]) } catch { /* unresolved sender identity */ }
-    return [{ externalId: key.id, remoteJid: phone ? `${phone.slice(1)}@s.whatsapp.net` : remoteJid, phone, text: text.trim(), fromMe: key.fromMe === true, timestamp }]
+    const pushName = sanitizeContactName(data?.pushName)
+    return [{
+      externalId: key.id,
+      remoteJid: phone ? `${phone.slice(1)}@s.whatsapp.net` : remoteJid,
+      phone,
+      text: text.trim(),
+      fromMe: key.fromMe === true,
+      timestamp,
+      ...(pushName ? { pushName } : {}),
+    }]
   })
 }
 

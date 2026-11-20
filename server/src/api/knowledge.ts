@@ -45,9 +45,8 @@ function limitError(title: string | undefined, content: string | undefined): str
   return null
 }
 
-function normalizeDirection(raw: unknown): 'inbound' | 'outbound' | 'both' {
-  const val = String(raw ?? '').trim().toLowerCase()
-  if (val === 'inbound' || val === 'outbound' || val === 'both') return val
+function normalizeDirection(_raw?: unknown): 'both' {
+  // Bilgi tabanı belgeleri kanal ayrımı olmaksızın tüm kanallarda (gelen, giden, web, WhatsApp) geçerlidir.
   return 'both'
 }
 
@@ -264,7 +263,7 @@ async function handleUpdate({ params, body, set }: { params: Record<string, stri
       category: validCategory,
       title: title !== undefined ? String(title).trim() : undefined,
       content: content !== undefined ? String(content) : undefined,
-      callDirection: callDirection !== undefined ? normalizeDirection(callDirection) : undefined,
+      callDirection: normalizeDirection(callDirection),
       active,
     },
     embeddedData?.primaryEmbedding,

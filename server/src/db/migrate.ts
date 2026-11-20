@@ -1,5 +1,7 @@
 import { integrationDDL } from '../integrations/managed/schema'
 import { treatmentPlanningDDL } from './treatment-planning-schema'
+import { dynamicTablesDDL } from './dynamic-tables-schema'
+import { subscriptionDDL } from '../services/subscriptions'
 /**
  * Database migration — raw SQL CREATE TABLE IF NOT EXISTS.
  * No generated files needed. Safe to run multiple times.
@@ -281,13 +283,13 @@ async function runMigrations() {
   if ((catCount[0]?.cnt ?? 0) === 0) {
     await sql`
       INSERT INTO knowledge_categories (slug, label, icon, color, sort_order) VALUES
-        ('genel',    'Genel',    '🌐', '#60a5fa', 0),
-        ('tedavi',   'Tedavi',   '🦷', '#34d399', 1),
-        ('estetik',  'Estetik',  '✨', '#a78bfa', 2),
-        ('kampanya', 'Kampanya', '🎯', '#fb923c', 3),
-        ('sss',      'SSS',      '❓', '#f59e0b', 4),
-        ('hizmet',   'Hizmet',   '⚕️', '#38bdf8', 5),
-        ('musteri',  'Hasta',    '👤', '#f472b6', 6)
+        ('genel',         'Genel',         '🌐', '#60a5fa', 0),
+        ('hizmetler',     'Hizmetler',     '💼', '#38bdf8', 1),
+        ('fiyatlandirma', 'Fiyatlandırma', '💳', '#8b5cf6', 2),
+        ('kampanya',      'Kampanya',      '🎯', '#fb923c', 3),
+        ('sss',           'SSS',           '❓', '#f59e0b', 4),
+        ('musteri',       'Müşteri',       '👤', '#10b981', 5),
+        ('randevu',       'Randevu',       '📅', '#3b82f6', 6)
       ON CONFLICT DO NOTHING
     `
     console.log('[Migration] Varsayılan kategoriler oluşturuldu')
@@ -310,7 +312,7 @@ async function runMigrations() {
       id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       phone            TEXT NOT NULL UNIQUE,
       contact_name     TEXT,
-      greeting         TEXT NOT NULL DEFAULT 'Merhaba! Ben kişisel asistanınız Pine Asistan, hoş geldiniz! Nasıl yardımcı olabilirim?',
+      greeting         TEXT NOT NULL DEFAULT 'Merhaba! Ben yapay zeka asistanınızım, hoş geldiniz! Nasıl yardımcı olabilirim?',
       custom_prompt    TEXT,
       grounding_enabled BOOLEAN NOT NULL DEFAULT true,
       active           BOOLEAN NOT NULL DEFAULT true,
@@ -324,13 +326,14 @@ async function runMigrations() {
 
   await sql`
     CREATE TABLE IF NOT EXISTS clinics (
-      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      name            TEXT NOT NULL,
-      netgsm_usercode TEXT,
-      netgsm_password TEXT,
-      sms_sender_id   TEXT,
-      is_active       BOOLEAN NOT NULL DEFAULT true,
-      created_at      TIMESTAMPTZ DEFAULT now()
+      id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name              TEXT NOT NULL,
+      business_template TEXT NOT NULL DEFAULT 'general',
+      netgsm_usercode   TEXT,
+      netgsm_password   TEXT,
+      sms_sender_id     TEXT,
+      is_active         BOOLEAN NOT NULL DEFAULT true,
+      created_at        TIMESTAMPTZ DEFAULT now()
     )
   `
 
@@ -381,7 +384,7 @@ async function runMigrations() {
       password_hash TEXT NOT NULL,
       name          TEXT NOT NULL,
       avatar        TEXT,
-      role          TEXT NOT NULL DEFAULT 'host',
+      role          TEXT NOT NULL DEFAULT 'calisan',
       specialty     TEXT,
       color         TEXT,
       active        BOOLEAN NOT NULL DEFAULT true,
@@ -945,6 +948,21 @@ async function runMigrations() {
   await sql`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS meta_verify_token TEXT`
   await sql`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS whatsapp_templates JSONB NOT NULL DEFAULT '[]'::jsonb`
   await sql`ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMPTZ`
+  await sql`ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS sender_push_name TEXT`
+  await sql`ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS active_dynamic_context JSONB`
+  await sql`
+    CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      clinic_id    UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+      phone        TEXT NOT NULL,
+      phone_last10 TEXT NOT NULL,
+      remote_jid   TEXT,
+      contact_name TEXT NOT NULL,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS wa_contacts_clinic_phone10_idx ON whatsapp_contacts (clinic_id, phone_last10)`
+  await sql`CREATE INDEX IF NOT EXISTS wa_contacts_clinic_jid_idx ON whatsapp_contacts (clinic_id, remote_jid)`
 
   // ── Per-clinic Gemini API key & AI token usage metering (Faz 6) ──────────
   await sql`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS gemini_api_key TEXT`
@@ -1019,7 +1037,7 @@ async function runMigrations() {
   const existingClinic = await sql`SELECT id FROM clinics ORDER BY created_at LIMIT 1`
   const defaultClinicId = existingClinic[0]?.id ?? (await sql`
     INSERT INTO clinics (name, is_active)
-    VALUES (${process.env.DEFAULT_CLINIC_NAME || 'Varsayılan Klinik'}, true)
+    VALUES (${process.env.DEFAULT_TENANT_NAME || process.env.DEFAULT_CLINIC_NAME || 'Varsayılan İşletme'}, true)
     RETURNING id
   `)[0]!.id
 
@@ -1036,7 +1054,7 @@ async function runMigrations() {
       mersis_number TEXT,
       address TEXT,
       email TEXT,
-      invoice_prefix TEXT NOT NULL DEFAULT 'KLC',
+      invoice_prefix TEXT NOT NULL DEFAULT 'FTR',
       e_document_provider TEXT NOT NULL DEFAULT 'none',
       updated_at TIMESTAMPTZ DEFAULT now()
     )
@@ -1163,7 +1181,7 @@ async function runMigrations() {
     CREATE TABLE IF NOT EXISTS clinic_memberships (
       clinic_id  UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
       user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      role       TEXT NOT NULL DEFAULT 'host',
+      role       TEXT NOT NULL DEFAULT 'calisan',
       active     BOOLEAN NOT NULL DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT now(),
       updated_at TIMESTAMPTZ DEFAULT now(),
@@ -1227,6 +1245,35 @@ async function runMigrations() {
   await sql`ALTER TABLE vip_assistants DROP CONSTRAINT IF EXISTS vip_assistants_phone_unique`
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS vip_assistants_clinic_phone_unique ON vip_assistants (clinic_id, phone)`
 
+  // Add business_template column idempotently; backfill legacy dental clinics ONLY on first creation
+  await sql.unsafe(`
+    DO $$
+    DECLARE
+      has_catalog boolean := to_regclass('public.treatment_catalog') IS NOT NULL;
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'clinics' AND column_name = 'business_template'
+      ) THEN
+        ALTER TABLE clinics ADD COLUMN business_template TEXT NOT NULL DEFAULT 'general';
+        UPDATE clinics c
+        SET business_template = 'dental_clinic'
+        WHERE EXISTS (SELECT 1 FROM patients p WHERE p.clinic_id = c.id)
+           OR EXISTS (SELECT 1 FROM treatment_plans tp WHERE tp.clinic_id = c.id)
+           OR EXISTS (SELECT 1 FROM treatment_groups tg WHERE tg.clinic_id = c.id);
+        IF has_catalog THEN
+          EXECUTE '
+            UPDATE clinics c
+            SET business_template = ''dental_clinic''
+            WHERE c.business_template = ''general''
+              AND EXISTS (SELECT 1 FROM treatment_catalog tc WHERE tc.clinic_id = c.id)
+          ';
+        END IF;
+      END IF;
+    END $$;
+  `)
+  await sql`CREATE INDEX IF NOT EXISTS clinics_business_template_idx ON clinics (business_template)`
+
   await sql`
     CREATE TABLE IF NOT EXISTS doctor_leaves (
       id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1273,7 +1320,7 @@ async function runMigrations() {
       clinic_id          UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
       email              TEXT NOT NULL,
       name               TEXT NOT NULL,
-      role               TEXT NOT NULL DEFAULT 'hekim',
+      role               TEXT NOT NULL DEFAULT 'calisan',
       specialty          TEXT,
       color              TEXT,
       token_hash         TEXT NOT NULL UNIQUE,
@@ -1291,6 +1338,24 @@ async function runMigrations() {
   await sql`CREATE INDEX IF NOT EXISTS staff_invitations_clinic_status_idx ON staff_invitations (clinic_id, status)`
   await sql`CREATE INDEX IF NOT EXISTS staff_invitations_email_idx ON staff_invitations (clinic_id, email)`
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS flow_ai_messages (
+      id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      clinic_id      UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+      direction      TEXT NOT NULL DEFAULT 'inbound',
+      role           TEXT NOT NULL,
+      content        TEXT NOT NULL,
+      applied_flow   BOOLEAN NOT NULL DEFAULT false,
+      node_count     INTEGER,
+      edge_count     INTEGER,
+      change_summary TEXT,
+      previous_flow  JSONB,
+      created_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS flow_ai_messages_clinic_dir_created_idx ON flow_ai_messages (clinic_id, direction, created_at ASC)`
+
   // Copy legacy global settings into the default clinic without removing the
   // old table yet; this keeps rollback and mixed-version deployments safe.
   await sql`
@@ -1299,8 +1364,11 @@ async function runMigrations() {
     ON CONFLICT (clinic_id, key) DO NOTHING
   `
 
-  const configuredHosts = new Set<string>(['pineclinic.thinpine.com', 'localhost', '127.0.0.1'])
-  for (const raw of (process.env.DEFAULT_CLINIC_HOSTS || '').split(',')) {
+  const configuredHosts = new Set<string>(['axamaz.com', 'localhost', '127.0.0.1'])
+  const rawHosts = [process.env.DEFAULT_TENANT_HOSTS, process.env.DEFAULT_CLINIC_HOSTS]
+    .filter(Boolean)
+    .join(',')
+  for (const raw of rawHosts.split(',')) {
     const host = raw.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0]?.split(':')[0]
     if (host) configuredHosts.add(host)
   }
@@ -1317,6 +1385,8 @@ async function runMigrations() {
 
   for (const ddl of integrationDDL) await sql.unsafe(ddl)
   for (const ddl of treatmentPlanningDDL) await sql.unsafe(ddl)
+  for (const ddl of dynamicTablesDDL) await sql.unsafe(ddl)
+  for (const ddl of subscriptionDDL) await sql.unsafe(ddl)
 
   console.log('[Migration] Tamamlandı — şema hazır')
   await sql.end()

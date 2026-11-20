@@ -1,12 +1,15 @@
 import { Type, type FunctionDeclaration } from '@google/genai'
-import { getToolDescriptions } from '../db/repositories/settings'
-import { getDefaultToolDescription } from '../data/default-tools'
 
 export async function buildToolDeclarations(direction: string = 'inbound'): Promise<FunctionDeclaration[]> {
   const { getActiveFlow, flowToToolFields } = await import('../db/repositories/flows')
-  let dbDescs: Record<string, string> = {}
-  try { dbDescs = await getToolDescriptions() } catch { /* use defaults */ }
-  const desc = (key: string) => dbDescs[key] ?? getDefaultToolDescription(key) ?? ''
+  let tableNamesHint = ''
+  try {
+    const { getClinicDynamicPromptMetadata } = await import('../db/repositories/dynamic-tables')
+    const meta = await getClinicDynamicPromptMetadata()
+    if (meta.tableNames.length > 0) {
+      tableNamesHint = meta.tableNames.join(', ')
+    }
+  } catch { /* ignore */ }
 
   // Build randevuOlustur fields from flow (zero hardcoded fields)
   const flow = await getActiveFlow(direction)
@@ -21,56 +24,100 @@ export async function buildToolDeclarations(direction: string = 'inbound'): Prom
         : { type: Type.STRING, description: v.description }
     }
     fieldRequired = required
-  } else {
-    // Fallback: clinic-scoped custom fields
-    let allFields: Array<{ name: string; description: string; required?: boolean; active?: boolean }> = []
-    try {
-      const raw = dbDescs['tools.custom_fields']
-      if (raw) allFields = JSON.parse(raw)
-    } catch { /* ignore */ }
-
-    if (allFields.length > 0) {
-      for (const f of allFields) {
-        if (f.active === false) continue
-        const safeName = f.name.replace(/[^a-z0-9_]/gi, '_').toLowerCase()
-        fieldProps[safeName] = { type: Type.STRING, description: f.description }
-        if (f.required) fieldRequired.push(safeName)
-      }
-    }
   }
 
   // Ensure doktor_id and musteri_adi are always available as optional params
   if (!fieldProps['doktor_id']) {
-    fieldProps['doktor_id'] = { type: Type.STRING, description: 'Mevcut hasta için atanacak doktorun ID\'si (musteriSorgula sonucundaki doktor_gecmisi\'nden). Eğer hasta seçim yapmazsa veya farketmez derse boş (null) bırakın.' }
+    fieldProps['doktor_id'] = { type: Type.STRING, description: 'Mevcut kişi için atanacak sorumlu çalışanın ID\'si (musteriSorgula sonucundaki doktor_gecmisi\'nden). Eğer kişi seçim yapmazsa veya farketmez derse boş (null) bırakın.' }
   }
   if (!fieldProps['musteri_adi']) {
-    fieldProps['musteri_adi'] = { type: Type.STRING, description: 'Müşteri adı soyadı (kayıtlı müşteri için musteriSorgula\'dan gelen ad)' }
+    fieldProps['musteri_adi'] = { type: Type.STRING, description: 'Müşteri adı soyadı (kayıtlı kişi için musteriSorgula\'dan gelen ad)' }
   }
 
   const tools: FunctionDeclaration[] = [
     {
       name: 'akisBilgisiGuncelle',
-      description: 'Akışla yürütülen görüşmede müşterinin yeni veya düzeltilmiş bilgilerini kaydeder ve sıradaki kısa görevi alır. Müşteriden yeni bir bilgi aldığında, işlem çağırmadan önce kullan.',
+      description: 'Akışla yürütülen görüşmede müşterinin yeni veya düzeltilmiş bilgilerini kaydeder ve sıradaki kısa görevi alır. Müşteriden yeni bir bilgi aldığında (veri tablosu alanları dahil), işlem çağırmadan önce kullan.',
       parameters: {
         type: Type.OBJECT,
         properties: {
-          bilgiler: { type: Type.OBJECT, description: 'Müşterinin açıkça verdiği alanlar. Örnek: musteri_adi, telefon, tarih, saat, sikayet.' },
+          bilgiler: {
+            type: Type.OBJECT,
+            description: 'Müşterinin açıkça verdiği alan adı → değer çiftleri (veri tablosu alanlarında tam anahtar adını kullanın).',
+            properties: {
+              musteri_adi: { type: Type.STRING, description: 'Hasta / müşteri adı ve soyadı' },
+              telefon: { type: Type.STRING, description: 'Telefon numarası' },
+              tarih: { type: Type.STRING, description: 'Tarih (YYYY-MM-DD)' },
+              saat: { type: Type.STRING, description: 'Saat (HH:MM)' },
+              sikayet: { type: Type.STRING, description: 'Şikayet, talep veya açıklama' },
+              ...fieldProps,
+            },
+          },
           yeni_kisi: { type: Type.BOOLEAN, description: 'Müşteri başka kişi için yeni işlem istiyorsa true.' },
         },
       },
     },
     {
-      name: 'randevuOlustur',
-      description: 'Müşteri randevu almak istediğinde randevu oluşturur ve kaydeder. Aynı arama içinde birden fazla kişi için sırayla birden fazla kez çağrılabilir.',
+      name: 'veriTablosunaKaydet',
+      description: 'Görüşme boyunca müşteriden toplanan veri tablosu sütunlarını (anket, müşteri veya özel tablo alanları) ilgili veri tablosuna kaydeder veya günceller.',
       parameters: {
         type: Type.OBJECT,
         properties: {
-          musteri_adi: { type: Type.STRING, description: 'Hasta adı ve soyadı' },
-          telefon: { type: Type.STRING, description: 'Hasta telefon numarası' },
+          hedef_tablo_id: {
+            type: Type.STRING,
+            description: 'Kaydın yazılacağı hedef veri tablosu kimliği (akış talimatında belirtilmişse gönderin, aksi halde boş bırakabilirsiniz).',
+          },
+          bilgiler: {
+            type: Type.OBJECT,
+            description: 'Kaydedilecek alan adı → değer çiftleri.',
+            properties: {
+              musteri_adi: { type: Type.STRING, description: 'Müşteri adı ve soyadı' },
+              telefon: { type: Type.STRING, description: 'Telefon numarası' },
+              ...fieldProps,
+            },
+          },
+        },
+      },
+    },
+    {
+      name: 'veriTablosuSorgula',
+      description: `Aktif veri tablolarında (${tableNamesHint || 'Müşteriler, Ürün & Demirbaş Stoku, Anket vb.'}) telefon numarası, ilan/kayıt linki (URL), ilan başlığı veya aranan değerle kayıt olup olmadığını okuma amaçlı sorgular. Tablo/link sorgularında asla Google veya dış arama yapma; yalnızca bu aracın döndürdüğü gerçek satır verisini kullan.`,
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          tablo: {
+            type: Type.STRING,
+            description: tableNamesHint
+              ? `Sorgulanacak veri tablosunun adı veya kimliği (Mevcut tablolar: ${tableNamesHint}). Boş bırakılırsa tüm aktif tablolarda arar.`
+              : 'Sorgulanacak veri tablosunun adı veya kimliği (ör. "Müşteriler", "Ürün & Demirbaş Stoku"). Boş bırakılırsa tüm tablolarda arar.',
+          },
+          aranan_deger: {
+            type: Type.STRING,
+            description: 'Aranacak tam link/URL (ör. sahibinden veya platform ilanı bağlantısı), ürün/ilan adı, kayıt başlığı, kod, isim veya sütun değeri.',
+          },
+          sutun: {
+            type: Type.STRING,
+            description: 'İsteğe bağlı: Yalnızca belirli bir sütunda aramak için sütun adı.',
+          },
+          telefon: {
+            type: Type.STRING,
+            description: 'İsteğe bağlı: Arayan kişinin telefon numarası ile tabloda kayıtlı olup olmadığını kontrol etmek için telefon numarası.',
+          },
+        },
+      },
+    },
+    {
+      name: 'randevuOlustur',
+      description: 'Müşteri veya kişi randevu almak istediğinde randevu oluşturur ve kaydeder. Aynı arama içinde birden fazla kişi için sırayla birden fazla kez çağrılabilir.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          musteri_adi: { type: Type.STRING, description: 'Kişinin adı ve soyadı' },
+          telefon: { type: Type.STRING, description: 'Kişinin telefon numarası' },
           tarih: { type: Type.STRING, description: 'Randevu tarihi (YYYY-MM-DD formatında)' },
           saat: { type: Type.STRING, description: 'Randevu saati (HH:MM formatında)' },
-          sikayet: { type: Type.STRING, description: 'Hastanın şikayeti veya işlem talebi' },
-          doktor_id: { type: Type.STRING, description: 'Tercih edilen hekim ID\'si (Hasta hekim belirtmezse veya farketmez derse boş bırakın)' },
+          sikayet: { type: Type.STRING, description: 'Kişinin talebi, konusu veya işlem açıklaması' },
+          doktor_id: { type: Type.STRING, description: 'Tercih edilen sorumlu çalışan ID\'si (Kişi belirtmezse veya farketmez derse boş bırakın)' },
           ...fieldProps,
         },
         required: ['musteri_adi', 'telefon', 'tarih', 'saat'],
@@ -87,29 +134,29 @@ export async function buildToolDeclarations(direction: string = 'inbound'): Prom
           telefon: { type: Type.STRING, description: 'Telefon numarası' },
           tarih: { type: Type.STRING, description: 'Yeni tarih (YYYY-MM-DD)' },
           saat: { type: Type.STRING, description: 'Yeni saat (HH:MM)' },
-          durum: { type: Type.STRING, enum: ['confirmed', 'postponed', 'cancelled'], description: 'Hasta geleceğini onaylıyorsa confirmed, gelemeyeceğini/iptal ettiğini söylüyorsa cancelled, başka tarihe ertelemek istiyorsa postponed' },
+          durum: { type: Type.STRING, enum: ['confirmed', 'postponed', 'cancelled'], description: 'Kişi geleceğini onaylıyorsa confirmed, gelemeyeceğini/iptal ettiğini söylüyorsa cancelled, başka tarihe ertelemek istiyorsa postponed' },
           sorun_veya_talep: { type: Type.STRING, description: 'Şikayet / talep / iptal veya erteleme nedeni' },
         },
       },
     },
     {
       name: 'randevuDurumBildir',
-      description: 'Hasta mevcut randevusuna geleceğini onayladığında (confirmed), gelemeyeceğini/iptal ettiğini söylediğinde (cancelled) veya ertelemek istediğinde (postponed) randevu durumunu interaktif takvimde günceller.',
+      description: 'Kişi mevcut randevusuna geleceğini onayladığında (confirmed), gelemeyeceğini/iptal ettiğini söylediğinde (cancelled) veya ertelemek istediğinde (postponed) randevu durumunu interaktif takvimde günceller.',
       parameters: {
         type: Type.OBJECT,
         properties: {
           durum: { type: Type.STRING, enum: ['confirm', 'postpone', 'cancel'], description: 'confirm = Geleceğim/Onaylıyorum, postpone = Ertelemek/Tarih değiştirmek istiyorum, cancel = Gelmiyorum/İptal' },
-          not: { type: Type.STRING, description: 'Hastanın belirttiği mazeret, iptal nedeni veya not' },
-          tercih_edilen_tarih: { type: Type.STRING, description: 'Erteleme talebinde hastanın tercih ettiği yeni tarih/gün bilgisi' },
+          not: { type: Type.STRING, description: 'Kişinin belirttiği mazeret, iptal nedeni veya not' },
+          tercih_edilen_tarih: { type: Type.STRING, description: 'Erteleme talebinde kişinin tercih ettiği yeni tarih/gün bilgisi' },
           randevu_id: { type: Type.STRING, description: 'Biliniyorsa randevu ID\'si' },
-          telefon: { type: Type.STRING, description: 'Hastanın telefon numarası' },
+          telefon: { type: Type.STRING, description: 'Kişinin telefon numarası' },
         },
         required: ['durum'],
       },
     },
     {
       name: 'musteriSorgula',
-      description: 'Arayan telefon numarasına göre hastayı sorgular; kayıtlı ise ad soyad ve geçmiş randevularını döndürür.',
+      description: 'Arayan telefon numarasına göre kişiyi sorgular; kayıtlı ise ad soyad ve geçmiş randevularını döndürür.',
       parameters: {
         type: Type.OBJECT,
         properties: {
@@ -144,7 +191,7 @@ export async function buildToolDeclarations(direction: string = 'inbound'): Prom
     },
     {
       name: 'searchKnowledgeBase',
-      description: 'Klinik hakkında, doktorlar, hizmetler veya çalışma saatleri hakkında bilgi tabanında arama yapar.',
+      description: 'İşletme hakkında, çalışanlar, hizmetler veya çalışma saatleri hakkında bilgi tabanında arama yapar.',
       parameters: {
         type: Type.OBJECT,
         properties: {
@@ -155,13 +202,13 @@ export async function buildToolDeclarations(direction: string = 'inbound'): Prom
     },
     {
       name: 'hastaNotKaydet',
-      description: 'Hasta randevu oluşturmayıp kliniğe bir not, mesaj veya şikayet iletmek istediğinde bankonun görmesi için not kaydeder.',
+      description: 'Kişi randevu oluşturmayıp işletmeye bir not, mesaj veya talep iletmek istediğinde yetkililerin görmesi için not kaydeder.',
       parameters: {
         type: Type.OBJECT,
         properties: {
-          telefon: { type: Type.STRING, description: 'Hastanın telefon numarası' },
-          not: { type: Type.STRING, description: 'Hastanın kliniğe iletmek istediği not veya mesaj' },
-          hasta_adi: { type: Type.STRING, description: 'Hastanın adı ve soyadı (biliniyorsa)' },
+          telefon: { type: Type.STRING, description: 'Kişinin telefon numarası' },
+          not: { type: Type.STRING, description: 'Kişinin işletmeye iletmek istediği not veya mesaj' },
+          hasta_adi: { type: Type.STRING, description: 'Kişinin adı ve soyadı (biliniyorsa)' },
         },
         required: ['telefon', 'not'],
       },

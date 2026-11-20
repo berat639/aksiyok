@@ -66,9 +66,9 @@ export default function StaffInviteAcceptPage() {
   }, [token])
 
   const roleLabel = (role?: string) => {
-    if (role === 'hekim') return 'Hekim'
-    if (role === 'yonetici') return 'Klinik Yöneticisi'
-    return 'Kayıt / Resepsiyon Personeli'
+    if (role === 'hekim') return 'Uzman / Görevli'
+    if (role === 'yonetici') return 'İşletme Yöneticisi'
+    return 'Çalışan'
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -199,7 +199,7 @@ export default function StaffInviteAcceptPage() {
             </div>
             <h1 style={{ margin: '0 0 8px', fontSize: '1.08rem', fontWeight: 800 }}>Hesabınız Aktifleştirildi!</h1>
             <p style={{ margin: '0 0 18px', fontSize: '0.82rem', color: 'var(--foreground-2)', lineHeight: 1.5 }}>
-              KVKK onayınız kaydedildi ve şifreniz oluşturuldu. Artık <strong>{invite?.email}</strong> adresinizle klinik paneline giriş yapabilirsiniz.
+              KVKK onayınız kaydedildi ve şifreniz oluşturuldu. Artık <strong>{invite?.email}</strong> adresinizle yönetim paneline giriş yapabilirsiniz.
             </p>
             <button
               type="button"
@@ -346,7 +346,7 @@ export default function StaffInviteAcceptPage() {
                     style={{ marginTop: 2 }}
                   />
                   <span>
-                    <strong>6698 Sayılı KVKK Aydınlatma Metni</strong>&apos;ni okudum; kimlik, iletişim ve mesleki verilerimin klinik yönetim sistemi kapsamında işlenmesine açık rıza veriyorum.
+                    <strong>6698 Sayılı KVKK Aydınlatma Metni</strong>&apos;ni okudum; kimlik, iletişim ve mesleki verilerimin işletme yönetim sistemi kapsamında işlenmesine açık rıza veriyorum.
                   </span>
                 </label>
 
@@ -382,7 +382,7 @@ export default function StaffInviteAcceptPage() {
                       overflowY: 'auto',
                     }}
                   >
-                    <strong>Klinik Personeli KVKK Aydınlatma Metni:</strong> 6698 sayılı Kişisel Verilerin Korunması Kanunu uyarınca; ad-soyad, e-posta, telefon, uzmanlık ve vardiya/randevu işlem kayıtlarınız yalnızca klinik randevu planlaması, hasta bilgilendirme süreçleri ve yasal sağlık mevzuatı yükümlülüklerinin yerine getirilmesi amacıyla işlenmektedir. Şifreniz tek yönlü kriptografik özet (hash) olarak saklanır ve klinik yöneticisi dahil hiçbir üçüncü kişi tarafından görüntülenemez.
+                    <strong>Personel KVKK Aydınlatma Metni:</strong> 6698 sayılı Kişisel Verilerin Korunması Kanunu uyarınca; ad-soyad, e-posta, telefon, uzmanlık ve vardiya/randevu işlem kayıtlarınız yalnızca işletme randevu/operasyon planlaması, müşteri iletişim süreçleri ve ilgili yasal mevzuat yükümlülüklerinin yerine getirilmesi amacıyla işlenmektedir. Şifreniz tek yönlü kriptografik özet (hash) olarak saklanır ve işletme yöneticisi dahil hiçbir üçüncü kişi tarafından görüntülenemez.
                   </div>
                 )}
               </div>

@@ -50,7 +50,7 @@ export async function sendAmiAction(action: Record<string, string>, timeoutMs = 
         }
         if (!frame.includes(`ActionID: ${actionId}`)) continue
         raw += frame + '\r\n\r\n'
-        if (frame.includes('Response: Error')) { finish(false,'Asterisk işlemi reddetti'); return }
+        if (frame.includes('Response: Error')) { finish(false,'Santral işlemi reddetti'); return }
         if (frame.includes('EventList: Complete') || frame.includes('EventList: complete')) { finish(true,'Tamamlandı'); return }
         if (/Response: (Success|Follows)/.test(frame) && !/EventList: start/i.test(frame)) { finish(true,'Tamamlandı'); return }
       }

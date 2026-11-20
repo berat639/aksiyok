@@ -4,7 +4,7 @@ import type { Edge, Node } from '@xyflow/react'
 import { useSimulatorVoice, type SimulatorVoiceStatus } from '@/hooks/useSimulatorVoice'
 
 export interface SimulatorVoicePanelProps {
-  direction: 'inbound' | 'outbound'
+  direction: 'inbound' | 'outbound' | 'web' | 'whatsapp'
   nodes: Node[]
   edges: Edge[]
   callerProfile: { kayitli: 'true' | 'false' }
@@ -73,7 +73,7 @@ export default function SimulatorVoicePanel(props: SimulatorVoicePanelProps) {
       </div>
 
       <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--foreground-2)' }}>
-        Taslak akışınız hasta olarak mikrofonunuzla denenir. Konuşmalar yazılı kayda eklenir. Yayındaki akış ve telefon hattı etkilenmez; hiçbir gerçek kayıt oluşturulmaz.
+        Taslak akışınız müşteri olarak mikrofonunuzla denenir. Konuşmalar yazılı kayda eklenir. Yayındaki akış ve telefon hattı etkilenmez; hiçbir gerçek kayıt oluşturulmaz.
       </p>
 
       {error && (

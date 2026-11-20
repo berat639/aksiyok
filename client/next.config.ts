@@ -5,6 +5,7 @@ import path from 'path'
 const BACKEND_PROXY_URL = process.env.BACKEND_PROXY_URL || 'http://localhost:3001'
 
 const config: NextConfig = {
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
   output: process.env.NODE_ENV === 'production' ? 'standalone' : undefined,
   outputFileTracingRoot: path.resolve(__dirname, '..'),
 

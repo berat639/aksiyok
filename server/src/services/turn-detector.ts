@@ -446,23 +446,22 @@ export function analyzeTurkishTurnCompleteness(
 }
 
 export const SEMANTIC_TURN_PROMPT_INSTRUCTION =
-  'AKILLI KONUŞMA SIRASI (LIVEKIT EOU & TÜRKÇE SOV MOTORU): Türkçe Özne-Nesne-Yüklem diziliminde yüklem cümlenin en sonunda gelir. Karşı taraf cümlesini bağlaçla ("ve", "ama", "yani", "şey"), edatla ("için", "ile", "gibi"), hâl veya mastar ekiyle ("dişime...", "randevu almak...", "doktordan..."), yarım kalmış telefon numarasıyla veya düşünme duraksamasıyla bıraktıysa yüklemi söyleyene kadar bekle; sözünü kesme. Öksürük, hapşırık, boğaz temizleme veya anlık ortam seslerinde konuşma sırası alma.'
+  'AKILLI KONUŞMA SIRASI (TÜRKÇE SOV): Türkçe cümlede yüklem sonda gelir. Karşı taraf bağlaç ("ve", "ama", "yani", "şey"), edat, hâl/mastar eki, eksik telefon numarası veya duraksamayla kaldıysa yüklem gelene kadar bekle; sözünü kesme.'
 
-export const STRICT_TURKISH_LANGUAGE_LOCK = `MUTLAK TÜRKÇE DİL KİLİDİ (EN YÜKSEK ÖNCELİKLİ SİSTEM KURALI — İHLAL EDİLEMEZ):
-1. Sen YALNIZCA ve SADECE TÜRKÇE (tr-TR) konuşan bir asistansın. Çıktı dilin her koşulda %100 Türkçe olmak zorundadır.
-2. İngilizce veya başka herhangi bir yabancı dilde TEK BİR KELİME, CÜMLE, BAĞLAÇ veya ÜNLEM ("Hello", "Hi", "Sure", "Okay", "Yes", "Sorry", "How can I help you", "I'm sorry", "Let me check", "One moment", "Thank you", "Of course", "Please" vb.) üretmen KESİNLİKLE YASAKTIR.
-3. Mikrofondan gelen ses gürültülü, bozuk, kesik veya anlaşılmaz olsa dahi; ya da karşı tarafın sesi İngilizce bir kelimeye ("Hello" -> "Alo", "Yes" -> "Evet", "Okay" -> "Tamam") benzese, hatta karşı taraf açıkça İngilizce konuşsa bile ASLA İngilizceye geçme, her zaman %100 TÜRKÇE yanıt ver.
-4. Sesi anlamadıysan İngilizce konuşmak yerine yalnızca Türkçe olarak "Sizi tam duyamadım, lütfen tekrar eder misiniz?" de.`
+export const STRICT_TURKISH_LANGUAGE_LOCK = `MUTLAK TÜRKÇE DİL KİLİDİ (ZORUNLU):
+Yalnızca %100 TÜRKÇE (tr-TR) dinle, anla ve yanıtla. Yabancı dilde tek kelime ("Hello", "Okay", "Sure", "Sorry" vb.) üretme; gürültüde veya yabancı seste dahi yalnızca Türkçe olarak "Sizi tam duyamadım, lütfen tekrar eder misiniz?" de.`
 
 export const ENGLISH_INTERCEPT_RECOVERY_PROMPT =
-  'SİSTEM UYARISI (DİL İHLALİ ENGELİ): Az önce yanlışlıkla İngilizce yanıt üretmeye başladın ve sesin kesildi. Bu görüşmede İngilizce tek bir kelime bile söylemek KESİNLİKLE YASAKTIR. Şimdi son cevabını veya sıradaki soruyu YALNIZCA TÜRKÇE olarak, kısa ve doğal bir cümleyle tekrar söyle.'
+  'DİL UYARISI: Yalnızca Türkçe konuşmalısın. Son cevabını veya sıradaki soruyu kısa, doğal Türkçe ile tekrar söyle.'
 
 export function wrapWithTurkishLanguageLock(prompt: string): string {
-  const trimmed = (prompt || '').trim()
-  if (trimmed.startsWith('MUTLAK TÜRKÇE DİL KİLİDİ')) {
-    return `${trimmed}\n\n${STRICT_TURKISH_LANGUAGE_LOCK}`
-  }
-  return `${STRICT_TURKISH_LANGUAGE_LOCK}\n\n${trimmed}\n\n${STRICT_TURKISH_LANGUAGE_LOCK}`
+  const cleaned = (prompt || '')
+    .split(STRICT_TURKISH_LANGUAGE_LOCK)
+    .map(part => part.trim())
+    .filter(Boolean)
+    .join('\n\n')
+  if (!cleaned) return STRICT_TURKISH_LANGUAGE_LOCK
+  return `${STRICT_TURKISH_LANGUAGE_LOCK}\n\n${cleaned}\n\n${STRICT_TURKISH_LANGUAGE_LOCK}`
 }
 
 const STRICT_ENGLISH_WORDS = new Set([

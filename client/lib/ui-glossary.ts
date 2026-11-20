@@ -5,10 +5,10 @@
 
 /** Koşul alanları (akış koşullarında kullanılan değişken adları). */
 export const FIELD_LABELS = {
-  'caller.isKnownPatient': 'Kayıtlı hasta mı?',
+  'caller.isKnownPatient': 'Kayıtlı kişi / müşteri mi?',
   'caller.isVip': 'Özel hattan mı arıyor?',
   'caller.hasUpcomingAppointment': 'Yaklaşan randevusu var mı?',
-  'clinic.isOpen': 'Klinik şu an açık mı?',
+  'clinic.isOpen': 'İşletme şu an açık mı?',
   'time.hour': 'Saat',
   'time.weekday': 'Haftanın günü',
   'call.direction': 'Görüşme yönü',
@@ -22,12 +22,15 @@ export const OPERATOR_LABELS = {
   equals: 'eşitse',
   notEquals: 'eşit değilse',
   startsWith: 'ile başlıyorsa',
+  endsWith: 'ile bitiyorsa',
   in: 'şunlardan biriyse',
   gt: 'büyükse',
   gte: 'en az',
   lt: 'küçükse',
   lte: 'en fazla',
   between: 'arasındaysa',
+  existsInTable: 'tabloda kayıtlıysa',
+  notExistsInTable: 'tabloda kayıtlı değilse',
   isEmpty: 'cevap verilmediyse',
   notEmpty: 'cevap verildiyse',
 } as const
@@ -56,7 +59,7 @@ export const TERM_LABELS = {
   inbound: 'Gelen arama',
   outbound: 'Giden arama',
   greeting: 'Karşılama mesajı',
-  doctorBlock: 'Hekim listesi',
+  doctorBlock: 'Çalışan listesi',
   knowledgeBlock: 'Bilgi bankası',
   prompt: 'Talimat',
   token: 'Yapay zeka kullanımı',

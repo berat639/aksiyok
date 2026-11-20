@@ -10,10 +10,46 @@ export interface WhatsAppLiveInput {
   useLiveAudio?: boolean
   clinicId?: string
   systemPrompt: string
+  history?: Array<{ role: string; text: string }>
   text: string
   tools: FunctionDeclaration[]
   executeTool: (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>
   onUsage?: (usage: { promptTokens: number; responseTokens: number; totalTokens: number; model: string }) => void
+}
+
+function buildWhatsAppContents(
+  history: Array<{ role: string; text: string }> | undefined,
+  currentText: string,
+): Array<Record<string, unknown>> {
+  const turns: Array<{ role: 'user' | 'model'; text: string }> = []
+  for (const item of (history ?? []).slice(-16)) {
+    const text = typeof item?.text === 'string' ? item.text.trim() : ''
+    if (!text) continue
+    const role: 'user' | 'model' = item.role === 'model' || item.role === 'assistant' ? 'model' : 'user'
+    const last = turns[turns.length - 1]
+    if (last && last.role === role) {
+      last.text = `${last.text}\n${text}`
+    } else {
+      turns.push({ role, text })
+    }
+  }
+  const trimmedCurrent = currentText.trim()
+  const last = turns[turns.length - 1]
+  if (last && last.role === 'user' && last.text === trimmedCurrent) {
+    turns.pop()
+  }
+  const contents: Array<Record<string, unknown>> = turns.map(t => ({
+    role: t.role,
+    parts: [{ text: t.text }],
+  }))
+  const finalLast = turns[turns.length - 1]
+  if (finalLast && finalLast.role === 'user') {
+    const prevParts = contents[contents.length - 1].parts as Array<{ text: string }>
+    prevParts.push({ text: currentText })
+  } else {
+    contents.push({ role: 'user', parts: [{ text: currentText }] })
+  }
+  return contents
 }
 
 const DEFAULT_WHATSAPP_TEXT_MODEL = 'gemini-3.8-flash'
@@ -55,9 +91,7 @@ async function generateWhatsAppReplyText(
 ): Promise<string> {
   const textModel = (input.textModel || process.env.GEMINI_TEXT_MODEL || DEFAULT_WHATSAPP_TEXT_MODEL).trim()
   const systemInstruction = await resolveWhatsAppSystemInstruction(input.systemPrompt, input.clinicId)
-  const contents: Array<Record<string, unknown>> = [
-    { role: 'user', parts: [{ text: input.text }] },
-  ]
+  const contents = buildWhatsAppContents(input.history, input.text)
   let toolCount = 0
 
   for (let round = 0; round < 8; round++) {
@@ -191,7 +225,14 @@ export async function generateWhatsAppReplyLive(
     void connecting.then(s => { if (settled) s.close() }).catch(() => {})
     session = await Promise.race([connecting, reply.then(() => { throw new Error('Bağlantı süresi aşıldı.') })])
     await Promise.race([ready, reply])
-    if (!settled) session.sendRealtimeInput({ text: input.text })
+    const recentTranscript = (input.history ?? [])
+      .slice(-12)
+      .map(h => `${h.role === 'model' || h.role === 'assistant' ? 'Asistan' : 'Kullanıcı'}: ${(h.text || '').trim()}`)
+      .filter(line => !line.endsWith(':'))
+      .join('\n')
+      .slice(-4000)
+    const liveTurnText = recentTranscript ? `Önceki konuşma:\n${recentTranscript}\n\nSon mesaj:\n${input.text}` : input.text
+    if (!settled) session.sendRealtimeInput({ text: liveTurnText })
     return await reply
   } finally {
     settled = true; clearTimeout(timeout)
@@ -202,5 +243,11 @@ export async function generateWhatsAppReplyLive(
 export const handoffDeclaration: FunctionDeclaration = {
   name: 'insanaAktar',
   description: 'Kullanıcı personel istediğinde sohbeti personele devreder ve otomatik yanıtları durdurur.',
+  parameters: { type: Type.OBJECT, properties: {} },
+}
+
+export const pauseOffTopicDeclaration: FunctionDeclaration = {
+  name: 'konuDisiSohbetDuraklat',
+  description: 'Klinik veya randevu dışı ısrarlı mesaj sınırı aşıldığında bu sohbet için yapay zekanın otomatik yanıtlamasını duraklatır.',
   parameters: { type: Type.OBJECT, properties: {} },
 }

@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     })
     if (!authResponse.ok) return NextResponse.json({ error: 'Oturum geçersiz' }, { status: authResponse.status === 401 ? 401 : 403 })
     const user = await authResponse.json()
-    if (!user?.id || !user?.clinicId || !['yonetici', 'moderator', 'hekim', 'host'].includes(user.role))
+    if (!user?.id || !user?.clinicId || !['yonetici', 'moderator', 'hekim', 'host', 'sekreter', 'asistan'].includes(user.role))
       return NextResponse.json({ error: 'Yetki yok' }, { status: 403 })
     const now = Date.now()
     const key = `${user.clinicId}:${user.id}`

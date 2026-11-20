@@ -18,9 +18,13 @@ export function isPlatformAdminHostname(
 export function isPlatformAdminRequest(request: Request): boolean {
   const hostname = hostnameFromRequest(request)
   if (isPlatformAdminHostname(hostname)) return true
-  return process.env.NODE_ENV !== 'production'
-    && !process.env.PLATFORM_ADMIN_HOSTS?.trim()
-    && ['localhost', '127.0.0.1', '::1'].includes(hostname)
+  if (!process.env.PLATFORM_ADMIN_HOSTS?.trim()) {
+    if (hostname === 'axamaz.com' || hostname === 'www.axamaz.com') return true
+    if (process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1', '::1'].includes(hostname)) {
+      return true
+    }
+  }
+  return false
 }
 
 export function hasMatchingRequestOrigin(request: Request): boolean {

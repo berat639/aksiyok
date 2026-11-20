@@ -430,14 +430,9 @@ export interface RankedDoc {
   score: number
 }
 
-function buildDirectionClause(direction: string = 'inbound', tableAlias?: string) {
-  const col = tableAlias ? drizzleSql.raw(`${tableAlias}.call_direction`) : drizzleSql`call_direction`
-  const dir = (direction || 'inbound').toLowerCase()
-  if (dir === 'both' || dir === 'all') return drizzleSql`true`
-  if (dir === 'whatsapp') {
-    return drizzleSql`(${col} IN ('both', 'inbound', 'whatsapp'))`
-  }
-  return drizzleSql`(${col} = 'both' OR ${col} = ${dir})`
+function buildDirectionClause(_direction: string = 'all', _tableAlias?: string) {
+  // Bilgi tabanı belgeleri gelen arama, giden arama, web ve WhatsApp kanallarının tümünde geçerlidir.
+  return drizzleSql`true`
 }
 
 export async function retrieveTopK(

@@ -26,3 +26,29 @@ export function verifiedPublicHostname(
   return actual.length === expected.length && timingSafeEqual(actual, expected) ? hostname : ''
 }
 import { createHmac, timingSafeEqual } from 'node:crypto'
+
+const BUILTIN_SHARED_APP_HOSTS = new Set<string>([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  'axamaz.com',
+  'www.axamaz.com',
+  'app.axamaz.com',
+  'panel.axamaz.com',
+])
+
+export function isSharedAppHostname(
+  hostname: string | null | undefined,
+  extraHostsEnv: string | undefined = process.env.SHARED_APP_HOSTS,
+): boolean {
+  const normalized = normalizeHostname(hostname)
+  if (!normalized) return false
+  if (BUILTIN_SHARED_APP_HOSTS.has(normalized)) return true
+  if (extraHostsEnv) {
+    for (const part of extraHostsEnv.split(/[\s,]+/)) {
+      const candidate = normalizeHostname(part)
+      if (candidate && candidate === normalized) return true
+    }
+  }
+  return false
+}

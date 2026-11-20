@@ -1,15 +1,30 @@
 import { Elysia } from 'elysia'
 import { randomUUID } from 'crypto'
-import { getUserByEmail, createUser, createSession, deleteSessionByJti, updateUser } from '../db/repositories/users'
+import { and, desc, eq } from 'drizzle-orm'
+import { db } from '../db/client'
+import { clinicMemberships, clinics } from '../db/schema'
+import { getUserByEmail, createSession, deleteSessionByJti, updateUser } from '../db/repositories/users'
 import { signToken, authenticateRequest } from '../middleware/auth'
 import { ensurePlatformAdminMembership, getActiveMembership } from '../db/repositories/tenancy'
-import { resolveTenantFromRequest } from '../tenancy/context'
+import {
+  currentTenant,
+  getTenantByClinicId,
+  hostnameFromRequest,
+  isSharedAppHostname,
+  resolveTenantFromRequest,
+  setRequestTenant,
+} from '../tenancy/context'
 import { canManagePlatform } from '../platform/access'
+import { getClinicEntitlements } from '../services/subscriptions'
 
 export const authPlugin = new Elysia({ prefix: '/api/auth' })
 
   .post('/login', async ({ body, set, cookie, request }) => {
-    const { email, password } = body as { email: string; password: string }
+    const { email, password, clinicId: requestedClinicId } = body as {
+      email: string
+      password: string
+      clinicId?: string
+    }
     if (!email || !password) { set.status = 400; return { error: 'Email ve şifre gerekli' } }
 
     const user = await getUserByEmail(email.toLowerCase().trim())
@@ -18,21 +33,86 @@ export const authPlugin = new Elysia({ prefix: '/api/auth' })
     const valid = await Bun.password.verify(password, user.passwordHash)
     if (!valid) { set.status = 401; return { error: 'Geçersiz kimlik bilgileri' } }
 
-    const tenant = await resolveTenantFromRequest(request)
+    const reqHost = hostnameFromRequest(request)
+    let tenant = await resolveTenantFromRequest(request)
+    let membership: { clinicId: string; userId: string; role: string; active: boolean } | null = null
+
+    if (isSharedAppHostname(reqHost) || !tenant) {
+      const userClinics = await db
+        .select({
+          clinicId: clinics.id,
+          isActive: clinics.isActive,
+          role: clinicMemberships.role,
+          active: clinicMemberships.active,
+          createdAt: clinicMemberships.createdAt,
+        })
+        .from(clinicMemberships)
+        .innerJoin(clinics, eq(clinicMemberships.clinicId, clinics.id))
+        .where(and(eq(clinicMemberships.userId, user.id), eq(clinicMemberships.active, true)))
+        .orderBy(desc(clinics.isActive), desc(clinicMemberships.createdAt))
+
+      if (requestedClinicId) {
+        const matched = userClinics.find((m) => m.clinicId === requestedClinicId)
+        if (matched) {
+          membership = {
+            clinicId: matched.clinicId,
+            userId: user.id,
+            role: matched.role,
+            active: matched.active,
+          }
+          tenant = await getTenantByClinicId(matched.clinicId, reqHost)
+        } else if (user.isPlatformAdmin) {
+          const targetTenant = await getTenantByClinicId(requestedClinicId, reqHost)
+          if (targetTenant) {
+            membership = await ensurePlatformAdminMembership(user.id, requestedClinicId)
+            tenant = targetTenant
+          }
+        }
+      } else if (user.isPlatformAdmin && tenant) {
+        const defaultMatch = userClinics.find((m) => m.clinicId === tenant!.clinicId)
+        membership = defaultMatch
+          ? {
+              clinicId: defaultMatch.clinicId,
+              userId: user.id,
+              role: defaultMatch.role,
+              active: defaultMatch.active,
+            }
+          : await ensurePlatformAdminMembership(user.id, tenant.clinicId)
+      } else {
+        const chosen = userClinics.find((m) => m.isActive) ?? userClinics[0]
+        if (chosen) {
+          membership = {
+            clinicId: chosen.clinicId,
+            userId: user.id,
+            role: chosen.role,
+            active: chosen.active,
+          }
+          tenant = await getTenantByClinicId(chosen.clinicId, reqHost)
+        }
+      }
+
+      if (tenant) {
+        setRequestTenant(request, tenant)
+      }
+    } else {
+      const existingMembership = await getActiveMembership(user.id, tenant.clinicId)
+      membership =
+        existingMembership ??
+        (user.isPlatformAdmin ? await ensurePlatformAdminMembership(user.id, tenant.clinicId) : null)
+    }
+
     if (!tenant) {
       set.status = 404
-      return { error: 'Bu domain için aktif klinik bulunamadı. Klinikler platform panelinden oluşturulmalıdır.' }
+      return { error: 'Bu alan adı için aktif işletme bulunamadı. İşletmeler platform panelinden oluşturulmalıdır.' }
     }
     if (tenant.isActive === false && !user.isPlatformAdmin) {
       set.status = 403
-      return { error: 'Bu klinik şu anda dondurulmuştur (askıya alınmıştır). Giriş yapılamaz.' }
+      return { error: 'Bu işletme şu anda dondurulmuştur (askıya alınmıştır). Giriş yapılamaz.' }
     }
-
-    const existingMembership = await getActiveMembership(user.id, tenant.clinicId)
-    const membership = existingMembership ?? (user.isPlatformAdmin
-      ? await ensurePlatformAdminMembership(user.id, tenant.clinicId)
-      : null)
-    if (!membership) { set.status = 403; return { error: 'Bu klinik için erişim yetkiniz yok' } }
+    if (!membership) {
+      set.status = 403
+      return { error: 'Bu işletme için erişim yetkiniz yok' }
+    }
 
     const jti = randomUUID()
     const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000)
@@ -54,6 +134,8 @@ export const authPlugin = new Elysia({ prefix: '/api/auth' })
       path: '/',
     })
 
+    const plan = await getClinicEntitlements(tenant.clinicId)
+
     return {
       id: user.id,
       name: user.name,
@@ -61,8 +143,10 @@ export const authPlugin = new Elysia({ prefix: '/api/auth' })
       role: membership.role,
       clinicId: tenant.clinicId,
       hostname: tenant.hostname,
+      businessTemplate: tenant.businessTemplate ?? 'general',
       isPlatformAdmin: user.isPlatformAdmin,
       canManagePlatform: canManagePlatform(user, request),
+      plan,
     }
   })
 
@@ -81,12 +165,17 @@ export const authPlugin = new Elysia({ prefix: '/api/auth' })
   .get('/me', async ({ cookie, set, request }) => {
     const user = await authenticateRequest(((cookie.token?.value as string | undefined) as string | undefined), request)
     if (!user) { set.status = 401; return { error: 'Oturum geçersiz' } }
-    const tenant = await resolveTenantFromRequest(request)
+    const tenant = currentTenant() ?? (await getTenantByClinicId(user.clinicId, hostnameFromRequest(request)))
     if (tenant?.isActive === false && !user.isPlatformAdmin) {
       set.status = 403
-      return { error: 'Bu klinik şu anda dondurulmuştur (askıya alınmıştır).' }
+      return { error: 'Bu işletme şu anda dondurulmuştur (askıya alınmıştır).' }
     }
-    return user
+    const plan = await getClinicEntitlements(user.clinicId)
+    return {
+      ...user,
+      businessTemplate: tenant?.businessTemplate ?? 'general',
+      plan,
+    }
   })
 
   .put('/password', async ({ body, cookie, set, request }) => {

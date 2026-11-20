@@ -21,7 +21,46 @@ import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 import { PhoneMaskedInput } from '@/lib/phone-mask'
 import NodeInfoBadge from './flow/NodeInfoBadge'
+import FlowAiChatBox from './flow/FlowAiChatBox'
 import SimulatorVoicePanel from './flow/SimulatorVoicePanel'
+import ConfirmModal from './ConfirmModal'
+import InfoTooltip from './ui/InfoTooltip'
+import ClinicalDatePicker from './dynamic-tables/ui/ClinicalDatePicker'
+import {
+  FIELD_TYPE_META,
+  type DynamicAppointmentConfigDef,
+  type DynamicFieldType,
+  type DynamicTableDef,
+} from './dynamic-tables/types'
+import {
+  DYNAMIC_TABLE_ROW_EXISTS_COL_ID,
+  VIRTUAL_APPOINTMENT_TABLE,
+  VIRTUAL_APPOINTMENT_TABLE_ID,
+  buildBooleanFieldSet,
+  buildDynamicSampleFlow,
+  buildDynamicTableExistsKey,
+  buildFieldLabelMap,
+  clearDynamicSourceMeta,
+  evaluateLocalConditionNode,
+  findSelectableFlowTable,
+  formatDynamicColumnDisplayLabel,
+  formatDynamicTableExistsLabel,
+  formatDynamicTableIcon,
+  getDefaultOperatorForFieldKind,
+  getDynamicTemplateOptions,
+  getOperatorsForFieldKind,
+  getSelectableFlowTables,
+  inferClinicDynamicProfile,
+  inferConditionFieldKind,
+  isDynamicTableExistsField,
+  isVirtualAppointmentTable,
+  mapDynamicColumnToFlowField,
+  rebindLegacyNodesToDynamicTables,
+  resolveDynamicColumnMeta,
+  sanitizeFlowSlug,
+  type FlowFieldType,
+  type FlowModuleConfigHint,
+} from '@/lib/flow-dynamic-fields'
 import {
   summarizeFlow,
   flowGraphHash,
@@ -50,6 +89,7 @@ interface BaseNodeTransient {
   _canDelete?: boolean
   _summary?: NodeSummary
   _explain?: (nodeId: string) => Promise<string | null>
+  _fieldLabels?: Record<string, string>
 }
 
 interface FieldData extends BaseNodeTransient {
@@ -58,26 +98,52 @@ interface FieldData extends BaseNodeTransient {
   fieldName: string
   description: string
   required: boolean
-  fieldType: 'text' | 'date' | 'time' | 'enum' | 'user'
+  fieldType: FlowFieldType
   enumValues?: string[]
+  sourceTableId?: string
+  sourceTableSlug?: string
+  sourceTableName?: string
+  sourceColumnId?: string
+  sourceColumnSlug?: string
+  sourceColumnName?: string
+  sourceColumnType?: DynamicFieldType
+}
+
+interface ConditionRuleItem {
+  field: string
+  operator: string
+  value?: string
+  valueTo?: string
+  fieldLabel?: string
+  sourceTableId?: string
+  sourceTableSlug?: string
+  sourceTableName?: string
+  sourceColumnId?: string
+  sourceColumnSlug?: string
+  sourceColumnName?: string
+  sourceColumnType?: DynamicFieldType
 }
 
 interface ConditionData extends BaseNodeTransient {
   [key: string]: unknown
   label: string
   conditionField: string
+  conditionFieldLabel?: string
   operator:
     | 'equals'
     | 'notEquals'
     | 'contains'
     | 'notContains'
     | 'startsWith'
+    | 'endsWith'
     | 'regex'
     | 'gt'
     | 'gte'
     | 'lt'
     | 'lte'
     | 'between'
+    | 'existsInTable'
+    | 'notExistsInTable'
     | 'in'
     | 'isEmpty'
     | 'notEmpty'
@@ -85,13 +151,23 @@ interface ConditionData extends BaseNodeTransient {
   conditionValue: string
   conditionValueTo?: string
   conditionLogic?: 'AND' | 'OR'
-  rules?: Array<{ field: string; operator: string; value?: string; valueTo?: string }>
+  rules?: ConditionRuleItem[]
+  sourceTableId?: string
+  sourceTableSlug?: string
+  sourceTableName?: string
+  sourceColumnId?: string
+  sourceColumnSlug?: string
+  sourceColumnName?: string
+  sourceColumnType?: DynamicFieldType
 }
 
 interface ActionData extends BaseNodeTransient {
   [key: string]: unknown
   label: string
   action: string
+  targetTableId?: string
+  targetTableSlug?: string
+  targetTableName?: string
   message?: string
   variableName?: string
   variableValue?: string
@@ -114,26 +190,17 @@ interface EndData extends BaseNodeTransient {
   message?: string
 }
 
-// ── Preset Fields ─────────────────────────────────────────────────────────────
-const PRESET_FIELDS: Array<{
-  value: string
-  label: string
-  type: 'text' | 'date' | 'time' | 'enum' | 'user'
-  desc: string
-  group: 'inbound' | 'outbound'
-  samples: string[]
-}> = [
-  { value: 'musteri_adi', label: 'Hasta Adı ve Soyadı', type: 'text', desc: 'Adınızı ve soyadınızı alabilir miyim?', group: 'inbound', samples: ['Ahmet Yılmaz', 'Zeynep Kaya'] },
-  { value: 'telefon', label: 'Telefon Numarası', type: 'text', desc: 'Size ulaşabileceğimiz telefon numaranızı alabilir miyim?', group: 'inbound', samples: ['05321234567', '05449876543'] },
-  { value: 'sikayet', label: 'Hasta Şikâyeti / Talebi', type: 'text', desc: 'Şikâyetiniz veya randevu talebiniz nedir?', group: 'inbound', samples: ['Diş ağrısı ve kontrol', 'İmplant muayenesi', 'Diş taşı temizliği'] },
-  { value: 'tarih', label: 'Randevu Tarihi', type: 'date', desc: 'Hangi tarihe randevu oluşturmak istersiniz?', group: 'inbound', samples: ['2026-11-05', '2026-11-10'] },
-  { value: 'saat', label: 'Randevu Saati', type: 'time', desc: 'Saat kaç için randevu istersiniz?', group: 'inbound', samples: ['10:30', '14:00', '16:30'] },
-  { value: 'doktor_id', label: 'Doktor Seçimi', type: 'user', desc: 'Hangi doktora gelmek istersiniz?', group: 'inbound', samples: ['Dr. Emre Bey', 'Farketmez'] },
-  { value: 'islem_turu', label: 'İşlem Türü', type: 'text', desc: 'Hangi işlem için randevu almak istiyorsunuz?', group: 'inbound', samples: ['Kanal tedavisi', 'Muayene'] },
-  { value: 'memnuniyet', label: 'Memnuniyet Durumu (Anket)', type: 'text', desc: 'Son kliniğimize ziyaretinizden ve tedavinizden memnun kaldınız mı?', group: 'outbound', samples: ['Evet, çok memnun kaldım', 'Biraz ağrım devam ediyor'] },
-  { value: 'puan', label: 'Değerlendirme Puanı (1-10)', type: 'text', desc: 'Hizmetimizi 1 ile 10 arasında değerlendirecek olsanız kaç puan verirsiniz?', group: 'outbound', samples: ['10', '9', '7'] },
-  { value: 'hastaNotu', label: 'Hasta Notu / Önerisi', type: 'text', desc: 'Bizlere iletmek istediğiniz özel bir notunuz veya öneriniz var mı?', group: 'outbound', samples: ['Teşekkür ederim, her şey çok iyiydi', 'Kontrol randevusu rica ediyorum'] },
-]
+// ── Fallback Labels for Legacy / Unbound Field Keys ──────────────────────────
+const LEGACY_FIELD_LABELS: Record<string, { label: string; samples?: string[] }> = {
+  musteri_adi: { label: 'Ad Soyad', samples: ['Ahmet Yılmaz', 'Zeynep Kaya'] },
+  ad_soyad: { label: 'Ad Soyad', samples: ['Ahmet Yılmaz', 'Zeynep Kaya'] },
+  telefon: { label: 'Telefon Numarası', samples: ['05321234567', '05449876543'] },
+  sikayet: { label: 'Talep / Konu', samples: ['Detaylı bilgi ve randevu', 'Kontrol talebi'] },
+  tarih: { label: 'Randevu Tarihi', samples: ['2026-11-05', '2026-11-10'] },
+  saat: { label: 'Randevu Saati', samples: ['10:30', '14:00', '16:30'] },
+  memnuniyet: { label: 'Memnuniyet Durumu' },
+  hastaNotu: { label: 'Kişi Notu / Talebi' },
+}
 
 const ACTION_LABELS: Record<string, string> = {
   save_appointment_pending: '📝 Randevu Talebi Oluştur (Onay Bekler)',
@@ -206,7 +273,13 @@ function validateFlowClient(nodes: Node[], edges: Edge[]): FlowIssue[] {
     }
 
     if (node.type === 'conditionNode') {
-      if (!d.conditionField || !d.operator) {
+      const hasRules = Array.isArray(d.rules) && d.rules.length > 0
+      if (hasRules) {
+        const missingRuleField = d.rules.some((r: any) => !r?.field || !String(r.field).trim() || !r?.operator)
+        if (missingRuleField) {
+          issues.push({ nodeId: node.id, level: 'error', message: 'Eklenen tüm koşul satırlarında kontrol edilecek bilgiyi seçin.' })
+        }
+      } else if (!d.conditionField || !d.operator) {
         issues.push({ nodeId: node.id, level: 'error', message: 'Yönlendirme için kontrol edilecek bilgiyi seçin.' })
       } else if ((d.conditionField === 'user_intent' || d.operator === 'intent') && !String(d.conditionValue || '').trim()) {
         issues.push({ nodeId: node.id, level: 'error', message: 'Yapay zekanın algılayacağı niyeti veya isteği açıklayın.' })
@@ -247,7 +320,7 @@ function validateFlowClient(nodes: Node[], edges: Edge[]): FlowIssue[] {
   return issues
 }
 
-function buildPromptPreview(nodes: Node[], edges: Edge[]): string {
+function buildPromptPreview(nodes: Node[], edges: Edge[], fieldLabelMap: Record<string, string> = {}): string {
   if (nodes.length === 0) return 'Akışta henüz düğüm bulunmuyor.'
   const lines: string[] = [
     'KONUŞMA AKIŞI VE TALİMATLARI:',
@@ -276,7 +349,7 @@ function buildPromptPreview(nodes: Node[], edges: Edge[]): string {
     const prefix = '  '.repeat(indent)
 
     if (pathVisited.has(nodeId)) {
-      lines.push(`${prefix}${step}. Döngü: "${d.fieldName || d.label || nodeId}" adımına geri dön ve müşterinin konuşmasını bekle.`)
+      lines.push(`${prefix}${step}. Döngü: "${d.label || fieldLabelMap[d.fieldName] || d.fieldName || nodeId}" adımına geri dön ve müşterinin konuşmasını bekle.`)
       step++
       return
     }
@@ -289,18 +362,23 @@ function buildPromptPreview(nodes: Node[], edges: Edge[]): string {
         lines.push(`${prefix}   ↳ Müşterinin konuşmasını bekle ve ne söylediğini dinle.`)
         step++
         break
-      case 'fieldNode':
-        lines.push(`${prefix}${step}. "${d.fieldName || 'alan'}" bilgisini sor${d.required ? ' (zorunlu)' : ''}: "${d.description || ''}"`)
+      case 'fieldNode': {
+        const readableName =
+          d.sourceTableName && d.sourceColumnName
+            ? `${d.sourceTableName} · ${d.sourceColumnName}`
+            : fieldLabelMap[d.fieldName] || d.label || d.fieldName || 'alan'
+        lines.push(`${prefix}${step}. "${readableName}" bilgisini sor${d.required ? ' (zorunlu)' : ''}: "${d.description || ''}"`)
         lines.push(`${prefix}   ↳ Müşterinin konuşmasını ve cevabını bekle; cevap almadan sıradaki adıma geçme.`)
         step++
         break
+      }
       case 'conditionNode': {
         const field = d.conditionField || ''
         const val = d.conditionValue || ''
         if (field === 'user_intent' || d.operator === 'intent') {
           lines.push(`${prefix}${step}. KOŞUL (KULLANICI NİYETİ): Kullanıcının ifadesi "${val}" niyetini taşıyorsa:`)
         } else {
-          lines.push(`${prefix}${step}. KOŞUL: ${describeCondition(d)} ise:`)
+          lines.push(`${prefix}${step}. KOŞUL: ${describeCondition(d, fieldLabelMap)} ise:`)
         }
         step++
         const nextEdges = edgeMap.get(nodeId) || []
@@ -325,7 +403,9 @@ function buildPromptPreview(nodes: Node[], edges: Edge[]): string {
         } else if (act === 'send_wa_message') {
           lines.push(`${prefix}${step}. WHATSAPP MESAJI GÖNDER: "${d.message || ''}"`)
         } else if (act === 'save_patient_note' || act === 'notBirak') {
-          lines.push(`${prefix}${step}. HASTADAN NOT AL: hastaNotKaydet aracını çağırarak notu kaydet.`)
+          lines.push(`${prefix}${step}. MÜŞTERİDEN NOT AL: hastaNotKaydet aracını çağırarak notu kaydet.`)
+        } else if (act === 'save_record') {
+          lines.push(`${prefix}${step}. VERİ TABLOSUNA KAYDET: Toplanan tablo bilgilerini${d.targetTableName ? ` "${d.targetTableName}" tablosuna` : ' ilgili dinamik veri tablosuna'} kaydet.`)
         } else if (act === 'end_call') {
           lines.push(`${prefix}${step}. BİLGİ VER VE BİTİR: ${d.message ? `"${d.message}" diyerek ` : ''}cagriySonlandir aracını çağır.`)
         } else if (act === 'wait_reprompt' || act === 'wait') {
@@ -623,9 +703,31 @@ function StartNode({ id, data, selected }: { id: string; data: StartData; select
   )
 }
 
+const FIELD_TYPE_BADGE_LABELS: Record<string, string> = {
+  date: 'Tarih',
+  time: 'Saat',
+  enum: 'Seçenek',
+  user: 'Hekim',
+  number: 'Sayı',
+  boolean: 'Evet/Hayır',
+  phone: 'Telefon',
+  email: 'E-posta',
+}
+
 function FieldNode({ id, data, selected }: { id: string; data: FieldData; selected?: boolean }) {
-  const fieldInfo = PRESET_FIELDS.find(f => f.value === data.fieldName)
-  const displayLabel = fieldInfo ? fieldInfo.label : (data.fieldName ? `${data.fieldName} (Özel)` : 'Alan Seçilmedi')
+  const isDynamicTableField = Boolean(data.sourceTableName && data.sourceColumnName)
+  const legacyLabel = LEGACY_FIELD_LABELS[data.fieldName]?.label
+  const displayLabel = isDynamicTableField
+    ? formatDynamicColumnDisplayLabel(String(data.sourceTableName), String(data.sourceColumnName))
+    : data._fieldLabels?.[data.fieldName]
+    ? data._fieldLabels[data.fieldName]
+    : data.label && data.label !== data.fieldName
+    ? data.label
+    : legacyLabel
+    ? legacyLabel
+    : data.fieldName
+    ? `${data.fieldName} (Özel)`
+    : 'Alan Seçilmedi'
   const isSim = data._simStatus === 'active'
   const isVisited = data._simStatus === 'visited'
 
@@ -680,9 +782,14 @@ function FieldNode({ id, data, selected }: { id: string; data: FieldData; select
             border: '1px solid var(--flow-node-field-border)',
             padding: '2px 8px',
             borderRadius: 6,
+            maxWidth: '100%',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}
+          title={displayLabel}
         >
-          📥 {displayLabel}
+          {isDynamicTableField ? '📊' : '📥'} {displayLabel}
         </span>
         <div style={{ display: 'flex', gap: 4 }}>
           {data.required && (
@@ -692,7 +799,7 @@ function FieldNode({ id, data, selected }: { id: string; data: FieldData; select
           )}
           {data.fieldType && data.fieldType !== 'text' && (
             <span style={{ fontSize: 9, padding: '2px 6px', background: '#2563eb', borderRadius: 8, color: '#ffffff', fontWeight: 700 }}>
-              <span style={{ color: '#ffffff' }}>{{ date: 'Tarih', time: 'Saat', enum: 'Seçenek', user: 'Hekim' }[data.fieldType] || data.fieldType}</span>
+              <span style={{ color: '#ffffff' }}>{FIELD_TYPE_BADGE_LABELS[data.fieldType] || 'Özel'}</span>
             </span>
           )}
         </div>
@@ -723,15 +830,39 @@ function FieldNode({ id, data, selected }: { id: string; data: FieldData; select
   )
 }
 
-// ── Koşul Kuralları Editörü (ve / veya bağlaç çipli) ──────────────────────────
+// ── Koşul Kuralları Editörü (ve / veya bağlaç çipli + Dinamik Veri Tabloları) ──
 const BOOLEAN_CONDITION_FIELDS = new Set(['kayitli', 'caller.isKnownPatient', 'caller.isVip', 'caller.hasUpcomingAppointment', 'clinic.isOpen'])
 const EXTRA_OPERATORS: Array<{ value: string; label: string }> = [
   { value: 'contains', label: 'şu ifadeyi içeriyorsa' },
   { value: 'notContains', label: 'şu ifadeyi içermiyorsa' },
 ]
-type ConditionRule = { field: string; operator: string; value?: string; valueTo?: string }
+type ConditionRule = ConditionRuleItem
 
-function ChipListInput({ value, onChange, style }: { value: string; onChange: (v: string) => void; style: React.CSSProperties }) {
+interface CanvasFieldNodeRef {
+  fieldName: string
+  label: string
+  fieldType?: string
+  enumValues?: string[]
+  sourceTableId?: string
+  sourceTableSlug?: string
+  sourceTableName?: string
+  sourceColumnId?: string
+  sourceColumnSlug?: string
+  sourceColumnName?: string
+  sourceColumnType?: DynamicFieldType
+}
+
+function ChipListInput({
+  value,
+  onChange,
+  style,
+  presetOptions = [],
+}: {
+  value: string
+  onChange: (v: string) => void
+  style: React.CSSProperties
+  presetOptions?: string[]
+}) {
   const [draft, setDraft] = useState('')
   const items = String(value || '').split(',').map(s => s.trim()).filter(Boolean)
   const commit = (raw: string) => {
@@ -740,10 +871,44 @@ function ChipListInput({ value, onChange, style }: { value: string; onChange: (v
     onChange([...items, t].join(','))
     setDraft('')
   }
+  const togglePreset = (opt: string) => {
+    if (items.includes(opt)) {
+      onChange(items.filter(x => x !== opt).join(','))
+    } else {
+      onChange([...items, opt].join(','))
+    }
+  }
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {presetOptions.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+          {presetOptions.map(opt => {
+            const active = items.includes(opt)
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => togglePreset(opt)}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 999,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  border: active ? '1.5px solid #1d4ed8' : '1px solid var(--input-border)',
+                  background: active ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)' : 'var(--pc-surface)',
+                  boxShadow: active ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
+                  color: active ? '#ffffff' : 'var(--foreground)',
+                }}
+              >
+                <span style={{ color: active ? '#ffffff' : 'var(--foreground)' }}>{active ? `✓ ${opt}` : opt}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
       {items.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {items.map(it => (
             <span key={it} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 999, background: 'var(--pc-tint)', border: '1px solid var(--pc-border)', boxShadow: 'var(--pc-clay-pale)', fontSize: 11, fontWeight: 700, color: 'var(--pc-tint-fg)' }}>
               {it}
@@ -757,7 +922,7 @@ function ChipListInput({ value, onChange, style }: { value: string; onChange: (v
         onChange={e => setDraft(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commit(draft) } }}
         onBlur={() => commit(draft)}
-        placeholder="Bir değer yazıp Enter’a basın"
+        placeholder="Değer yazıp Enter tuşuna basın…"
         style={style}
       />
     </div>
@@ -769,101 +934,767 @@ function ConditionRulesEditor({
   update,
   inputStyle,
   customFieldNames,
-  direction = 'inbound',
+  canvasFieldNodes = [],
+  dynamicTables = [],
+  relationTitlesByTableId = {},
+  fieldLabelMap = {},
+  booleanFieldSet = BOOLEAN_CONDITION_FIELDS,
 }: {
   data: ConditionData
   update: (u: Record<string, any>) => void
   inputStyle: React.CSSProperties
   customFieldNames: string[]
+  canvasFieldNodes?: CanvasFieldNodeRef[]
+  dynamicTables?: DynamicTableDef[]
+  relationTitlesByTableId?: Record<string, string[]>
+  fieldLabelMap?: Record<string, string>
+  booleanFieldSet?: Set<string>
   direction?: 'inbound' | 'outbound' | 'web' | 'whatsapp'
 }) {
+  const [tableDraftByRule, setTableDraftByRule] = useState<Record<number, string>>({})
+
   const logic: 'AND' | 'OR' = data.conditionLogic === 'OR' ? 'OR' : 'AND'
   const rules: ConditionRule[] = Array.isArray(data.rules) && data.rules.length > 0
     ? (data.rules as ConditionRule[])
-    : [{ field: data.conditionField || '', operator: data.operator || 'equals', value: data.conditionValue, valueTo: data.conditionValueTo }]
+    : [{
+        field: data.conditionField || '',
+        operator: data.operator || 'equals',
+        value: data.conditionValue,
+        valueTo: data.conditionValueTo,
+        fieldLabel: data.conditionFieldLabel,
+        sourceTableId: data.sourceTableId,
+        sourceTableSlug: data.sourceTableSlug,
+        sourceTableName: data.sourceTableName,
+        sourceColumnId: data.sourceColumnId,
+        sourceColumnSlug: data.sourceColumnSlug,
+        sourceColumnName: data.sourceColumnName,
+        sourceColumnType: data.sourceColumnType,
+      }]
   const isIntent = rules.length === 1 && (rules[0].field === 'user_intent' || rules[0].operator === 'intent')
+
+  const TURKISH_WEEKDAY_OPTIONS: ReadonlyArray<readonly [string, string]> = [
+    ['1', 'Pazartesi'],
+    ['2', 'Salı'],
+    ['3', 'Çarşamba'],
+    ['4', 'Perşembe'],
+    ['5', 'Cuma'],
+    ['6', 'Cumartesi'],
+    ['7', 'Pazar'],
+  ]
+
+  const inferPrevRuleKind = (prevRule: ConditionRule) => {
+    const prevResolved = resolveDynamicColumnMeta(prevRule.field, dynamicTables, prevRule, relationTitlesByTableId)
+    const prevCanvas = canvasFieldNodes.find(fn => fn.fieldName === prevRule.field)
+    return inferConditionFieldKind({
+      field: prevRule.field,
+      sourceColumnId: prevRule.sourceColumnId,
+      dynamicColumnType: prevResolved?.column.fieldType || prevRule.sourceColumnType,
+      dynamicColumnAllowMultiple: Boolean(prevResolved?.column.config?.allowMultiple),
+      canvasFieldNode: prevCanvas,
+      booleanFields: booleanFieldSet,
+    })
+  }
+
+  const buildRuleFromDynamicTableExists = (table: DynamicTableDef): ConditionRule => ({
+    field: buildDynamicTableExistsKey(table.slug || table.name),
+    operator: 'equals',
+    value: 'true',
+    valueTo: undefined,
+    fieldLabel: formatDynamicTableExistsLabel(table.name),
+    sourceTableId: table.id,
+    sourceTableSlug: table.slug,
+    sourceTableName: table.name,
+    sourceColumnId: DYNAMIC_TABLE_ROW_EXISTS_COL_ID,
+    sourceColumnSlug: '__row_exists__',
+    sourceColumnName: isVirtualAppointmentTable(table.id)
+      ? 'Yaklaşan randevusu var mı?'
+      : 'Bu tabloda kayıtlı mı?',
+    sourceColumnType: 'boolean',
+  })
+
+  const buildRuleFromDynamicColumn = (
+    table: DynamicTableDef,
+    colId: string,
+    prevRule: ConditionRule,
+  ): ConditionRule | null => {
+    if (colId === DYNAMIC_TABLE_ROW_EXISTS_COL_ID) {
+      return buildRuleFromDynamicTableExists(table)
+    }
+    const col = (table.columns || []).find(c => c.id === colId)
+    if (!col) return null
+    const mapped = mapDynamicColumnToFlowField(table, col, relationTitlesByTableId)
+    const optionList = mapped.enumValues || []
+    const prevKind = inferPrevRuleKind(prevRule)
+    const nextKind = inferConditionFieldKind({
+      field: mapped.fieldName,
+      dynamicColumnType: col.fieldType,
+      dynamicColumnAllowMultiple: Boolean(col.config?.allowMultiple),
+      booleanFields: booleanFieldSet,
+    })
+    const allowedOps = getOperatorsForFieldKind(nextKind, allOperators, undefined, { hasTableContext: true }).map(o => o.value)
+    let nextOp = prevRule.operator === 'intent' ? getDefaultOperatorForFieldKind(nextKind) : (prevRule.operator || getDefaultOperatorForFieldKind(nextKind))
+    if (!allowedOps.includes(nextOp)) {
+      nextOp = getDefaultOperatorForFieldKind(nextKind)
+    }
+
+    const hadIntentOrKindMismatch =
+      prevRule.field === 'user_intent' || prevRule.operator === 'intent' || prevKind !== nextKind
+    let nextVal = hadIntentOrKindMismatch ? '' : (prevRule.value ?? '')
+    const lowNextVal = nextVal.trim().toLowerCase()
+    if (nextKind !== 'boolean' && nextKind !== 'table_exists' && (lowNextVal === 'true' || lowNextVal === 'false')) {
+      nextVal = ''
+    }
+
+    if (nextKind === 'boolean') {
+      if (nextVal !== 'true' && nextVal !== 'false') nextVal = 'true'
+    } else if (nextKind === 'select' || nextKind === 'multiselect') {
+      if (nextOp !== 'in' && optionList.length > 0 && nextVal && !optionList.includes(nextVal)) {
+        nextVal = ''
+      }
+      if (!nextVal && optionList.length > 0 && nextOp !== 'in') {
+        nextVal = optionList[0]
+      }
+    }
+    if (nextOp === 'isEmpty' || nextOp === 'notEmpty' || nextOp === 'existsInTable' || nextOp === 'notExistsInTable') {
+      nextVal = ''
+    }
+
+    return {
+      field: mapped.fieldName,
+      operator: nextOp,
+      value: nextVal,
+      valueTo: nextOp === 'between' && prevKind === nextKind ? prevRule.valueTo : undefined,
+      fieldLabel: mapped.label,
+      sourceTableId: mapped.sourceTableId,
+      sourceTableSlug: mapped.sourceTableSlug,
+      sourceTableName: mapped.sourceTableName,
+      sourceColumnId: mapped.sourceColumnId,
+      sourceColumnSlug: mapped.sourceColumnSlug,
+      sourceColumnName: mapped.sourceColumnName,
+      sourceColumnType: mapped.sourceColumnType,
+    }
+  }
+
+  const resolveRuleTitle = (r: ConditionRule): string => {
+    if (r.field === 'user_intent') return 'Hastanın isteği'
+    if (isDynamicTableExistsField(r.field, r.sourceColumnId) && r.sourceTableName) {
+      return formatDynamicTableExistsLabel(r.sourceTableName)
+    }
+    if (r.sourceTableName && r.sourceColumnName) {
+      return formatDynamicColumnDisplayLabel(r.sourceTableName, r.sourceColumnName)
+    }
+    if (r.fieldLabel) return r.fieldLabel
+    const glossaryKey = r.field === 'kayitli' ? 'caller.isKnownPatient' : r.field
+    if ((FIELD_LABELS as Record<string, string>)[glossaryKey]) {
+      return (FIELD_LABELS as Record<string, string>)[glossaryKey]
+    }
+    if (fieldLabelMap[r.field]) return fieldLabelMap[r.field]
+    return r.field || 'Koşul'
+  }
 
   const commit = (next: ConditionRule[], nextLogic: 'AND' | 'OR' = logic) => {
     const first = next[0] || { field: '', operator: 'equals' }
+    const computedLabel =
+      next.length > 1
+        ? `${next.length} Koşullu Yönlendirme`
+        : first.field
+        ? resolveRuleTitle(first)
+        : data.label || 'Koşul'
     update({
+      label: computedLabel,
       rules: next.length > 1 ? next : undefined,
       conditionLogic: next.length > 1 ? nextLogic : undefined,
       conditionField: first.field,
+      conditionFieldLabel: first.fieldLabel,
       operator: first.operator,
       conditionValue: first.value ?? '',
       conditionValueTo: first.valueTo,
+      sourceTableId: first.sourceTableId,
+      sourceTableSlug: first.sourceTableSlug,
+      sourceTableName: first.sourceTableName,
+      sourceColumnId: first.sourceColumnId,
+      sourceColumnSlug: first.sourceColumnSlug,
+      sourceColumnName: first.sourceColumnName,
+      sourceColumnType: first.sourceColumnType,
     })
   }
   const patch = (i: number, p: Partial<ConditionRule>) => commit(rules.map((r, idx) => (idx === i ? { ...r, ...p } : r)))
 
-  const operators = [
-    ...operatorOptions().filter(o => o.value !== 'between' || true),
-    ...EXTRA_OPERATORS,
-  ]
-
-  const renderField = (r: ConditionRule, i: number) => (
-    <select
-      value={r.field || ''}
-      onChange={e => {
-        const val = e.target.value
-        if (val === 'user_intent') { commit([{ field: val, operator: 'intent', value: '' }]); return }
-        const isBool = BOOLEAN_CONDITION_FIELDS.has(val)
-        patch(i, {
-          field: val,
-          operator: r.operator === 'intent' ? 'equals' : (r.operator || 'equals'),
-          ...(isBool && r.value !== 'true' && r.value !== 'false' ? { value: 'true' } : {}),
-        })
-      }}
-      style={inputStyle}
-    >
-      <option value="">Bir bilgi seçin…</option>
-      {i === 0 && rules.length === 1 && <option value="user_intent">🎯 Hastanın isteği (yapay zeka algılar)</option>}
-      <option value="kayitli">👤 Kayıtlı hasta mı?</option>
-      <optgroup label="Görüşme durumu">
-        {(Object.keys(FIELD_LABELS) as Array<keyof typeof FIELD_LABELS>)
-          .filter(k => k !== 'caller.isKnownPatient' || r.field === k)
-          .map(k => <option key={k} value={k}>{FIELD_LABELS[k]}</option>)}
-      </optgroup>
-      <optgroup label="Hazır bilgiler">
-        {PRESET_FIELDS
-          .filter(f => f.group === (direction === 'outbound' ? 'outbound' : 'inbound') || f.value === r.field)
-          .map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-      </optgroup>
-      {customFieldNames.length > 0 && (
-        <optgroup label="Akıştaki özel bilgiler">
-          {customFieldNames.map(name => <option key={name} value={name}>{name}</option>)}
-        </optgroup>
-      )}
-    </select>
+  const allOperators = useMemo(
+    () => [...operatorOptions(), ...EXTRA_OPERATORS],
+    [],
   )
 
+  const renderField = (r: ConditionRule, i: number) => {
+    const selectableTables = getSelectableFlowTables(dynamicTables, true)
+    const isTableExistsRule = isDynamicTableExistsField(r.field, r.sourceColumnId)
+    const resolvedMeta = isTableExistsRule
+      ? null
+      : resolveDynamicColumnMeta(r.field, selectableTables, r, relationTitlesByTableId)
+    const tableByExistsKey = isTableExistsRule
+      ? selectableTables.find(t => t.id === r.sourceTableId || buildDynamicTableExistsKey(t.slug || t.name) === r.field)
+      : null
+    const activeTableId =
+      tableDraftByRule[i] ||
+      resolvedMeta?.table.id ||
+      tableByExistsKey?.id ||
+      r.sourceTableId ||
+      selectableTables[0]?.id ||
+      ''
+    const activeTable = findSelectableFlowTable(activeTableId, dynamicTables) || selectableTables[0]
+    const activeColumnId =
+      isTableExistsRule &&
+      (tableByExistsKey?.id === activeTable?.id ||
+        r.sourceTableId === activeTable?.id ||
+        (isVirtualAppointmentTable(activeTable?.id) && r.field === 'caller.hasUpcomingAppointment'))
+        ? DYNAMIC_TABLE_ROW_EXISTS_COL_ID
+        : resolvedMeta?.table.id === activeTable?.id
+        ? resolvedMeta?.column.id || ''
+        : r.sourceTableId === activeTable?.id
+        ? r.sourceColumnId || ''
+        : ''
+    const isVirtualApptTable = isVirtualAppointmentTable(activeTable?.id)
+    const activeColumnDef =
+      activeColumnId && activeColumnId !== DYNAMIC_TABLE_ROW_EXISTS_COL_ID
+        ? activeTable?.columns?.find(c => c.id === activeColumnId)
+        : undefined
+    const canColumnLookupChip = Boolean(
+      !isVirtualApptTable &&
+        activeColumnDef &&
+        ['text', 'phone', 'email', 'select', 'relation', 'status', 'user'].includes(activeColumnDef.fieldType) &&
+        !(activeColumnDef.fieldType === 'relation' && activeColumnDef.config?.allowMultiple),
+    )
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {dynamicTables.length === 0 && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+              padding: '7px 10px',
+              borderRadius: 9,
+              background: 'var(--card-bg)',
+              border: '1px solid var(--input-border)',
+              fontSize: 11,
+              color: 'var(--foreground-2)',
+            }}
+          >
+            <span>Özel veri tablosu henüz yok — Randevu Takvimi koşulu seçebilirsiniz.</span>
+            <InfoTooltip title="Veri Tablosu Koşulu">
+              <strong>Veri Tabloları</strong> sekmesinden tablo ve sütun oluşturduğunuzda burada o tablo ve sütunlara göre dinamik koşullar tanımlayabilirsiniz.
+            </InfoTooltip>
+          </div>
+        )}
+
+        <div>
+          <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 3 }}>
+            Veri Tablosu
+          </label>
+          <select
+            aria-label="Koşul veri tablosu"
+            value={activeTable?.id || ''}
+            onChange={e => {
+              const nextTableId = e.target.value
+              setTableDraftByRule(prev => ({ ...prev, [i]: nextTableId }))
+              const nextTable = findSelectableFlowTable(nextTableId, dynamicTables)
+              if (!nextTable) return
+              const hasColumns = (nextTable.columns?.length || 0) > 0
+              if (
+                !hasColumns ||
+                isDynamicTableExistsField(r.field, r.sourceColumnId) ||
+                isVirtualAppointmentTable(nextTable.id)
+              ) {
+                patch(i, buildRuleFromDynamicTableExists(nextTable))
+                return
+              }
+              const firstCol = nextTable.columns?.[0]
+              if (firstCol) {
+                const built = buildRuleFromDynamicColumn(nextTable, firstCol.id, r)
+                if (built) patch(i, built)
+              }
+            }}
+            style={inputStyle}
+          >
+            {dynamicTables.length > 0 && (
+              <optgroup label="Veri Tabloları">
+                {dynamicTables.map(t => (
+                  <option key={t.id} value={t.id}>
+                    {formatDynamicTableIcon(t.icon)} {t.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="Randevu Takvimi">
+              <option value={VIRTUAL_APPOINTMENT_TABLE_ID}>📅 Randevu Takvimi</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <div>
+          <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 3 }}>
+            Tablo Sütunu (Kontrol Edilecek Alan)
+          </label>
+          {(activeTable?.columns?.length || 0) === 0 && !isVirtualApptTable ? (
+            <div style={{ padding: '7px 10px', borderRadius: 8, background: 'var(--card-bg)', border: '1px solid var(--input-border)', fontSize: 11, color: 'var(--foreground-3)' }}>
+              Bu tabloda henüz sütun tanımlanmamış.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <select
+                aria-label="Koşul tablo sütunu"
+                value={activeColumnId}
+                onChange={e => {
+                  if (!activeTable) return
+                  const built = buildRuleFromDynamicColumn(activeTable, e.target.value, r)
+                  if (built) patch(i, built)
+                }}
+                style={inputStyle}
+              >
+                <option value="">Sütun seçin…</option>
+                <optgroup label="Tablo Varlık Kontrolü">
+                  <option value={DYNAMIC_TABLE_ROW_EXISTS_COL_ID}>
+                    {isVirtualApptTable
+                      ? '📅 Yaklaşan randevusu var mı? (Evet / Hayır)'
+                      : '👤 Bu tabloda kayıtlı mı? (Evet / Hayır)'}
+                  </option>
+                </optgroup>
+                <optgroup label="Tablo Sütunları">
+                  {(activeTable?.columns || []).map(col => (
+                    <option key={col.id} value={col.id}>
+                      {col.name} ({FIELD_TYPE_META[col.fieldType]?.label || 'Alan'})
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+              {activeTable && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                  <button
+                    type="button"
+                    onClick={() => patch(i, buildRuleFromDynamicTableExists(activeTable))}
+                    style={{
+                      padding: '4px 9px',
+                      borderRadius: 999,
+                      fontSize: 10.5,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      border: activeColumnId === DYNAMIC_TABLE_ROW_EXISTS_COL_ID ? '1.5px solid #1d4ed8' : '1px solid var(--pc-border)',
+                      background: activeColumnId === DYNAMIC_TABLE_ROW_EXISTS_COL_ID
+                        ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)'
+                        : 'var(--pc-tint)',
+                      boxShadow: activeColumnId === DYNAMIC_TABLE_ROW_EXISTS_COL_ID ? 'var(--pc-clay-primary)' : 'var(--pc-clay-pale)',
+                    }}
+                  >
+                    <span style={{ color: activeColumnId === DYNAMIC_TABLE_ROW_EXISTS_COL_ID ? '#ffffff' : 'var(--pc-tint-fg)' }}>
+                      {isVirtualApptTable ? '📅 Yaklaşan randevusu var mı?' : '👤 Bu tabloda kayıtlı mı?'}
+                    </span>
+                  </button>
+                  {canColumnLookupChip && (
+                    <button
+                      type="button"
+                      onClick={() => patch(i, { operator: 'existsInTable', value: '', valueTo: undefined })}
+                      style={{
+                        padding: '4px 9px',
+                        borderRadius: 999,
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        border: r.operator === 'existsInTable' ? '1.5px solid #1d4ed8' : '1px solid var(--pc-border)',
+                        background: r.operator === 'existsInTable'
+                          ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)'
+                          : 'var(--pc-surface)',
+                        boxShadow: r.operator === 'existsInTable' ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
+                      }}
+                    >
+                      <span style={{ color: r.operator === 'existsInTable' ? '#ffffff' : 'var(--foreground)' }}>
+                        🔎 Bu sütunda kayıtlıysa
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const getRuleResolvedKindAndOps = (r: ConditionRule, _i: number) => {
+    const selectableTables = getSelectableFlowTables(dynamicTables, true)
+    const isTableExists = isDynamicTableExistsField(r.field, r.sourceColumnId)
+    const resolvedMeta = isTableExists
+      ? null
+      : resolveDynamicColumnMeta(r.field, selectableTables, r, relationTitlesByTableId)
+    const canvasNode = canvasFieldNodes.find(fn => fn.fieldName === r.field)
+    const kind = inferConditionFieldKind({
+      field: r.field,
+      sourceColumnId: r.sourceColumnId,
+      dynamicColumnType: resolvedMeta?.column.fieldType || r.sourceColumnType,
+      dynamicColumnAllowMultiple: Boolean(resolvedMeta?.column.config?.allowMultiple),
+      canvasFieldNode: canvasNode,
+      booleanFields: booleanFieldSet,
+    })
+    const ruleOperators = getOperatorsForFieldKind(kind, allOperators, r.operator, { hasTableContext: true })
+    const effectiveOp =
+      ruleOperators.some(o => o.value === r.operator) || r.operator === 'regex'
+        ? r.operator
+        : ruleOperators[0]?.value || 'equals'
+    return { kind, resolvedMeta, canvasNode, ruleOperators, effectiveOp }
+  }
+
   const renderValue = (r: ConditionRule, i: number) => {
-    if (r.operator === 'isEmpty' || r.operator === 'notEmpty') return null
-    if (BOOLEAN_CONDITION_FIELDS.has(r.field) && (r.operator === 'equals' || r.operator === 'notEquals')) {
+    const { kind, resolvedMeta, canvasNode, effectiveOp } = getRuleResolvedKindAndOps(r, i)
+    if (effectiveOp === 'isEmpty' || effectiveOp === 'notEmpty') return null
+
+    if (effectiveOp === 'existsInTable' || effectiveOp === 'notExistsInTable') {
+      const colName = resolvedMeta?.column.name || r.sourceColumnName || r.fieldLabel || 'seçili sütun'
+      const tblName = resolvedMeta?.table.name || r.sourceTableName || 'veri tablosu'
       return (
-        <select value={r.value === 'false' ? 'false' : 'true'} onChange={e => patch(i, { value: e.target.value })} style={inputStyle}>
-          <option value="true">Evet</option>
-          <option value="false">Hayır</option>
-        </select>
-      )
-    }
-    if (r.operator === 'between') {
-      return (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input type="number" value={r.value ?? ''} onChange={e => patch(i, { value: e.target.value })} placeholder="En az" style={inputStyle} />
-          <span style={{ color: 'var(--foreground-2)', fontWeight: 700 }}>ile</span>
-          <input type="number" value={r.valueTo ?? ''} onChange={e => patch(i, { valueTo: e.target.value })} placeholder="En çok" style={inputStyle} />
+        <div
+          style={{
+            padding: '8px 10px',
+            borderRadius: 9,
+            background: 'var(--pc-tint)',
+            border: '1px solid var(--pc-border)',
+            boxShadow: 'var(--pc-clay-pale)',
+            fontSize: 11,
+            fontWeight: 600,
+            color: 'var(--pc-tint-fg)',
+            lineHeight: 1.45,
+          }}
+        >
+          {effectiveOp === 'existsInTable'
+            ? `Görüşmedeki "${colName}" bilgisi "${tblName}" tablosundaki kayıtlarla eşleşirse Evet yoluna gider.`
+            : `Görüşmedeki "${colName}" bilgisi "${tblName}" tablosunda bulunamazsa Evet yoluna gider.`}
         </div>
       )
     }
-    if (r.operator === 'in') return <ChipListInput value={r.value || ''} onChange={v => patch(i, { value: v })} style={inputStyle} />
-    const numeric = ['gt', 'gte', 'lt', 'lte'].includes(r.operator)
+
+    const optionLabels = resolvedMeta?.options?.length
+      ? resolvedMeta.options
+      : canvasNode?.enumValues?.length
+      ? canvasNode.enumValues
+      : []
+
+    if ((kind === 'table_exists' || kind === 'boolean') && (effectiveOp === 'equals' || effectiveOp === 'notEquals')) {
+      return (
+        <select
+          aria-label="Evet veya Hayır değeri"
+          value={r.value === 'false' ? 'false' : 'true'}
+          onChange={e => patch(i, { value: e.target.value })}
+          style={inputStyle}
+        >
+          <option value="true">{kind === 'table_exists' ? 'Evet (Tabloda Kayıtlı)' : 'Evet'}</option>
+          <option value="false">{kind === 'table_exists' ? 'Hayır (Kayıtlı Değil)' : 'Hayır'}</option>
+        </select>
+      )
+    }
+
+    const canonicalFieldKey = r.field === 'saat' ? 'time.hour' : r.field === 'kayitli' ? 'caller.isKnownPatient' : r.field
+
+    if (canonicalFieldKey === 'time.weekday') {
+      if (effectiveOp === 'in') {
+        const selectedDays = String(r.value || '').split(',').map(s => s.trim()).filter(Boolean)
+        const toggleDay = (dayVal: string) => {
+          const next = selectedDays.includes(dayVal)
+            ? selectedDays.filter(d => d !== dayVal)
+            : [...selectedDays, dayVal].sort((a, b) => Number(a) - Number(b))
+          patch(i, { value: next.join(',') })
+        }
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              {TURKISH_WEEKDAY_OPTIONS.map(([val, lbl]) => {
+                const active = selectedDays.includes(val)
+                return (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => toggleDay(val)}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      border: active ? '1.5px solid #1d4ed8' : '1px solid var(--input-border)',
+                      background: active ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)' : 'var(--pc-surface)',
+                      boxShadow: active ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
+                    }}
+                  >
+                    <span style={{ color: active ? '#ffffff' : 'var(--foreground)' }}>{lbl}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => patch(i, { value: '1,2,3,4,5' })}
+                style={{ padding: '3px 8px', borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: 'pointer', border: '1px solid var(--pc-border)', background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)' }}
+              >
+                Hafta İçi (Pzt–Cum)
+              </button>
+              <button
+                type="button"
+                onClick={() => patch(i, { value: '6,7' })}
+                style={{ padding: '3px 8px', borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: 'pointer', border: '1px solid var(--pc-border)', background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)' }}
+              >
+                Hafta Sonu (Cmt–Paz)
+              </button>
+            </div>
+          </div>
+        )
+      }
+      return (
+        <select value={r.value || '1'} onChange={e => patch(i, { value: e.target.value })} style={inputStyle}>
+          {TURKISH_WEEKDAY_OPTIONS.map(([val, lbl]) => (
+            <option key={val} value={val}>{lbl}</option>
+          ))}
+        </select>
+      )
+    }
+
+    if (canonicalFieldKey === 'call.direction') {
+      if (effectiveOp === 'in') {
+        const parts = String(r.value || '').split(',').map(s => s.trim()).filter(Boolean)
+        return (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {([['inbound', 'Gelen arama'], ['outbound', 'Giden arama']] as const).map(([val, lbl]) => {
+              const active = parts.includes(val)
+              return (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => patch(i, { value: (active ? parts.filter(p => p !== val) : [...parts, val]).join(',') })}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 999,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    border: active ? '1.5px solid #1d4ed8' : '1px solid var(--input-border)',
+                    background: active ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)' : 'var(--pc-surface)',
+                    boxShadow: active ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
+                  }}
+                >
+                  <span style={{ color: active ? '#ffffff' : 'var(--foreground)' }}>{lbl}</span>
+                </button>
+              )
+            })}
+          </div>
+        )
+      }
+      return (
+        <select value={r.value || 'inbound'} onChange={e => patch(i, { value: e.target.value })} style={inputStyle}>
+          <option value="inbound">Gelen arama</option>
+          <option value="outbound">Giden arama</option>
+        </select>
+      )
+    }
+
+    if (canonicalFieldKey === 'call.channel') {
+      if (effectiveOp === 'in') {
+        const parts = String(r.value || '').split(',').map(s => s.trim()).filter(Boolean)
+        return (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {([['phone', 'Sesli arama'], ['whatsapp', 'WhatsApp']] as const).map(([val, lbl]) => {
+              const active = parts.includes(val)
+              return (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => patch(i, { value: (active ? parts.filter(p => p !== val) : [...parts, val]).join(',') })}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 999,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    border: active ? '1.5px solid #1d4ed8' : '1px solid var(--input-border)',
+                    background: active ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)' : 'var(--pc-surface)',
+                    boxShadow: active ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
+                  }}
+                >
+                  <span style={{ color: active ? '#ffffff' : 'var(--foreground)' }}>{lbl}</span>
+                </button>
+              )
+            })}
+          </div>
+        )
+      }
+      return (
+        <select value={r.value || 'phone'} onChange={e => patch(i, { value: e.target.value })} style={inputStyle}>
+          <option value="phone">Sesli arama</option>
+          <option value="whatsapp">WhatsApp</option>
+        </select>
+      )
+    }
+
+    if (kind === 'time') {
+      if (effectiveOp === 'between') {
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                type="text"
+                value={r.value ?? ''}
+                onChange={e => patch(i, { value: e.target.value })}
+                placeholder="09:00"
+                style={inputStyle}
+              />
+              <span style={{ color: 'var(--foreground-2)', fontWeight: 700 }}>ile</span>
+              <input
+                type="text"
+                value={r.valueTo ?? ''}
+                onChange={e => patch(i, { valueTo: e.target.value })}
+                placeholder="18:00"
+                style={inputStyle}
+              />
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              <button
+                type="button"
+                onClick={() => patch(i, { value: '09:00', valueTo: '18:00' })}
+                style={{ padding: '3px 8px', borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: 'pointer', border: '1px solid var(--pc-border)', background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)' }}
+              >
+                Mesai Saatleri (09:00–18:00)
+              </button>
+              <button
+                type="button"
+                onClick={() => patch(i, { value: '09:00', valueTo: '12:30' })}
+                style={{ padding: '3px 8px', borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: 'pointer', border: '1px solid var(--pc-border)', background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)' }}
+              >
+                Sabah (09:00–12:30)
+              </button>
+              <button
+                type="button"
+                onClick={() => patch(i, { value: '13:30', valueTo: '18:30' })}
+                style={{ padding: '3px 8px', borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: 'pointer', border: '1px solid var(--pc-border)', background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)' }}
+              >
+                Öğleden Sonra (13:30–18:30)
+              </button>
+            </div>
+          </div>
+        )
+      }
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <input
+            type="text"
+            value={r.value ?? ''}
+            onChange={e => patch(i, { value: e.target.value })}
+            placeholder="Örn: 18:00"
+            style={inputStyle}
+          />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {['09:00', '12:30', '18:00', '19:00'].map(slot => (
+              <button
+                key={slot}
+                type="button"
+                onClick={() => patch(i, { value: slot })}
+                style={{ padding: '3px 8px', borderRadius: 8, fontSize: 10, fontWeight: 700, cursor: 'pointer', border: '1px solid var(--pc-border)', background: 'var(--pc-tint)', color: 'var(--pc-tint-fg)' }}
+              >
+                {slot}
+              </button>
+            ))}
+          </div>
+        </div>
+      )
+    }
+
+    if (kind === 'date') {
+      if (effectiveOp === 'between') {
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <ClinicalDatePicker
+              value={r.value || null}
+              onChange={iso => patch(i, { value: iso || '' })}
+              placeholder="Başlangıç tarihi seçin"
+              compact
+            />
+            <span style={{ fontSize: 11, color: 'var(--foreground-2)', fontWeight: 700, textAlign: 'center' }}>ile</span>
+            <ClinicalDatePicker
+              value={r.valueTo || null}
+              onChange={iso => patch(i, { valueTo: iso || '' })}
+              placeholder="Bitiş tarihi seçin"
+              compact
+            />
+          </div>
+        )
+      }
+      return (
+        <ClinicalDatePicker
+          value={r.value || null}
+          onChange={iso => patch(i, { value: iso || '' })}
+          placeholder="Karşılaştırılacak tarihi seçin"
+          compact
+        />
+      )
+    }
+
+    if (effectiveOp === 'between') {
+      return (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input type="number" step="any" value={r.value ?? ''} onChange={e => patch(i, { value: e.target.value })} placeholder="En az" style={inputStyle} />
+          <span style={{ color: 'var(--foreground-2)', fontWeight: 700 }}>ile</span>
+          <input type="number" step="any" value={r.valueTo ?? ''} onChange={e => patch(i, { valueTo: e.target.value })} placeholder="En çok" style={inputStyle} />
+        </div>
+      )
+    }
+
+    if (effectiveOp === 'in') {
+      return (
+        <ChipListInput
+          value={r.value || ''}
+          onChange={v => patch(i, { value: v })}
+          style={inputStyle}
+          presetOptions={optionLabels}
+        />
+      )
+    }
+
+    if ((kind === 'select' || kind === 'multiselect') && optionLabels.length > 0) {
+      const currentVal = String(r.value ?? '')
+      const hasCustomVal = currentVal.length > 0 && !optionLabels.includes(currentVal)
+      return (
+        <select
+          value={currentVal}
+          onChange={e => patch(i, { value: e.target.value })}
+          style={inputStyle}
+        >
+          <option value="">Seçenek belirleyin…</option>
+          {optionLabels.map(opt => (
+            <option key={opt} value={opt}>{opt}</option>
+          ))}
+          {hasCustomVal && <option value={currentVal}>{currentVal}</option>}
+        </select>
+      )
+    }
+
+    const numeric = kind === 'number'
+    const isCurrency = (resolvedMeta?.column.fieldType || r.sourceColumnType) === 'currency'
+    const inputType = numeric ? 'number' : kind === 'phone' ? 'tel' : kind === 'email' ? 'email' : 'text'
+    const sampleHint = resolvedMeta?.samples?.[0] ? `Örn: ${resolvedMeta.samples[0]}` : 'Aranacak metni girin'
+    const placeholder = isCurrency
+      ? 'Tutar girin (₺)'
+      : numeric
+      ? 'Sayısal değer girin'
+      : kind === 'phone'
+      ? 'Örn: 0532 123 45 67'
+      : kind === 'email'
+      ? 'Örn: musteri@ornek.com'
+      : sampleHint
     return (
       <input
-        type={numeric ? 'number' : 'text'}
+        type={inputType}
+        step={numeric ? 'any' : undefined}
         value={r.value ?? ''}
         onChange={e => patch(i, { value: e.target.value })}
-        placeholder={numeric ? 'Bir sayı yazın' : 'Örn: ağrı, implant, acil'}
+        placeholder={placeholder}
         style={inputStyle}
       />
     )
@@ -872,9 +1703,46 @@ function ConditionRulesEditor({
   if (isIntent) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div>
-          <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 6 }}>Kontrol edilecek bilgi</label>
-          {renderField(rules[0], 0)}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '8px 10px',
+            borderRadius: 10,
+            background: 'var(--card-inner)',
+            border: '1px solid var(--input-border)',
+            boxShadow: 'var(--pc-neo-subcard)',
+          }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>
+            Eski niyet algılama adımı
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const targetTable =
+                dynamicTables.find(t => (t.columns?.length || 0) > 0) ||
+                dynamicTables[0] ||
+                VIRTUAL_APPOINTMENT_TABLE
+              setTableDraftByRule({ 0: targetTable.id })
+              commit([buildRuleFromDynamicTableExists(targetTable)], 'AND')
+            }}
+            style={{
+              padding: '5px 10px',
+              borderRadius: 8,
+              border: '1.5px solid #93c5fd',
+              background: 'var(--pc-surface)',
+              boxShadow: 'var(--pc-clay-btn)',
+              color: 'var(--pc-tint-fg)',
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            📊 Veri Tablosu Koşuluna Dönüştür
+          </button>
         </div>
         <div style={{ padding: 12, borderRadius: 10, background: 'var(--flow-info-bg)', border: '1px solid var(--flow-info-border)' }}>
           <label style={{ fontSize: 11, color: 'var(--flow-info-text)', display: 'block', marginBottom: 6, fontWeight: 700 }}>
@@ -897,53 +1765,109 @@ function ConditionRulesEditor({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {rules.map((r, i) => (
-        <div key={i}>
-          {i > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'center', margin: '2px 0 8px' }}>
-              <button
-                type="button"
-                title="Tıklayarak ve / veya arasında değiştirin"
-                onClick={() => commit(rules, logic === 'AND' ? 'OR' : 'AND')}
-                style={{
-                  padding: '3px 16px', borderRadius: 999, border: '1.5px solid #1d4ed8', cursor: 'pointer',
-                  background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)', boxShadow: 'var(--pc-clay-primary)',
-                  fontSize: 11, fontWeight: 800,
-                }}
-              >
-                <span style={{ color: '#ffffff' }}>{LOGIC_LABELS[logic]}</span>
-              </button>
+      {rules.map((r, i) => {
+        const { ruleOperators, effectiveOp } = getRuleResolvedKindAndOps(r, i)
+
+        return (
+          <div key={i}>
+            {i > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'center', margin: '2px 0 8px' }}>
+                <button
+                  type="button"
+                  title="Tıklayarak ve / veya arasında değiştirin"
+                  onClick={() => commit(rules, logic === 'AND' ? 'OR' : 'AND')}
+                  style={{
+                    padding: '3px 16px', borderRadius: 999, border: '1.5px solid #1d4ed8', cursor: 'pointer',
+                    background: 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)', boxShadow: 'var(--pc-clay-primary)',
+                    fontSize: 11, fontWeight: 800,
+                  }}
+                >
+                  <span style={{ color: '#ffffff' }}>{LOGIC_LABELS[logic]}</span>
+                </button>
+              </div>
+            )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 12, background: 'var(--card-inner)', border: '1px solid var(--input-border)', boxShadow: 'var(--pc-neo-subcard)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>{i === 0 ? 'Eğer' : 'Koşul ' + (i + 1)}</span>
+                {rules.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTableDraftByRule(prev => {
+                        const nextMap: Record<number, string> = {}
+                        Object.entries(prev).forEach(([k, v]) => {
+                          const idx = Number(k)
+                          if (idx < i) nextMap[idx] = v
+                          else if (idx > i) nextMap[idx - 1] = v
+                        })
+                        return nextMap
+                      })
+                      commit(rules.filter((_, idx) => idx !== i))
+                    }}
+                    aria-label="Bu koşulu sil"
+                    style={{ border: '1px solid var(--input-border)', background: 'var(--pc-surface)', boxShadow: 'var(--pc-clay-btn)', color: 'var(--danger)', borderRadius: 8, cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '2px 8px' }}
+                  >
+                    Sil
+                  </button>
+                )}
+              </div>
+              {renderField(r, i)}
+              <div>
+                <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 3 }}>
+                  Karşılaştırma Koşulu
+                </label>
+                <select
+                  aria-label="Karşılaştırma Koşulu"
+                  value={effectiveOp}
+                  onChange={e => {
+                    const nextOp = e.target.value
+                    const clearValOps = ['isEmpty', 'notEmpty', 'existsInTable', 'notExistsInTable']
+                    patch(i, {
+                      operator: nextOp,
+                      valueTo: nextOp === 'between' ? r.valueTo : undefined,
+                      ...(clearValOps.includes(nextOp) ? { value: '' } : {}),
+                    })
+                  }}
+                  style={inputStyle}
+                >
+                  {ruleOperators.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {effectiveOp === 'regex' && <option value="regex">desene uyuyorsa (eski)</option>}
+                </select>
+              </div>
+              {renderValue(r, i)}
             </div>
-          )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 12, background: 'var(--card-inner)', border: '1px solid var(--input-border)', boxShadow: 'var(--pc-neo-subcard)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>{i === 0 ? 'Eğer' : 'Koşul ' + (i + 1)}</span>
-              {rules.length > 1 && (
-                <button type="button" onClick={() => commit(rules.filter((_, idx) => idx !== i))} aria-label="Bu koşulu sil" style={{ border: '1px solid var(--input-border)', background: 'var(--pc-surface)', boxShadow: 'var(--pc-clay-btn)', color: 'var(--danger)', borderRadius: 8, cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '2px 8px' }}>Sil</button>
-              )}
-            </div>
-            {renderField(r, i)}
-            <select
-              value={r.operator || 'equals'}
-              onChange={e => patch(i, { operator: e.target.value })}
-              style={inputStyle}
-            >
-              {operators.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              {r.operator === 'regex' && <option value="regex">desene uyuyorsa (eski)</option>}
-            </select>
-            {renderValue(r, i)}
           </div>
-        </div>
-      ))}
+        )
+      })}
       <button
         type="button"
-        onClick={() => commit([...rules, { field: '', operator: 'equals', value: '' }])}
+        onClick={() => {
+          const newIndex = rules.length
+          const selectableTables = getSelectableFlowTables(dynamicTables, true)
+          const prevRule = rules[rules.length - 1]
+          const targetTable =
+            findSelectableFlowTable(prevRule?.sourceTableId || tableDraftByRule[rules.length - 1], dynamicTables) ||
+            dynamicTables.find(t => (t.columns?.length || 0) > 0) ||
+            selectableTables[0] ||
+            VIRTUAL_APPOINTMENT_TABLE
+          setTableDraftByRule(prev => ({ ...prev, [newIndex]: targetTable.id }))
+          const usedCols = new Set(rules.map(x => x.sourceColumnId).filter(Boolean))
+          const nextCol = targetTable.columns?.find(c => !usedCols.has(c.id))
+          if (nextCol) {
+            const built = buildRuleFromDynamicColumn(targetTable, nextCol.id, { field: '', operator: 'equals', value: '' })
+            if (built) {
+              commit([...rules, built])
+              return
+            }
+          }
+          commit([...rules, buildRuleFromDynamicTableExists(targetTable)])
+        }}
         style={{ alignSelf: 'flex-start', padding: '6px 12px', borderRadius: 10, border: '1.5px solid #93c5fd', background: 'var(--pc-surface)', boxShadow: 'var(--pc-clay-btn)', color: 'var(--pc-tint-fg)', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
       >
         + Koşul ekle ({LOGIC_LABELS[logic]})
       </button>
       <div style={{ fontSize: 11, color: 'var(--foreground-2)', lineHeight: 1.5 }}>
-        <strong>Yönlendirme:</strong> {describeCondition(data)} <span style={{ color: '#15803d', fontWeight: 700 }}>✓ Evet</span> yoluna, aksi halde <span style={{ color: '#dc2626', fontWeight: 700 }}>✕ Hayır</span> yoluna gidilir.
+        <strong>Yönlendirme:</strong> {describeCondition(data, fieldLabelMap)} <span style={{ color: '#15803d', fontWeight: 700 }}>✓ Evet</span> yoluna, aksi halde <span style={{ color: '#dc2626', fontWeight: 700 }}>✕ Hayır</span> yoluna gidilir.
       </div>
     </div>
   )
@@ -1029,7 +1953,7 @@ function WhatsAppLocationAddressPicker({
   const handleAddressSearch = async () => {
     const q = searchQuery.trim()
     if (q.length < 2) {
-      setSearchError('Lütfen aranacak mahalle, cadde, ilçe veya klinik adresini yazın.')
+      setSearchError('Lütfen aranacak mahalle, cadde, ilçe veya işletme adresini yazın.')
       return
     }
     setSearching(true)
@@ -1050,7 +1974,7 @@ function WhatsAppLocationAddressPicker({
             const lat = String(item.lat ?? '')
             const lng = String(item.lon ?? '')
             const displayName = String(item.display_name ?? '')
-            const shortTitle = String(item.name || displayName.split(',')[0] || 'Klinik Konumu').trim()
+            const shortTitle = String(item.name || displayName.split(',')[0] || 'İşletme Konumu').trim()
             return {
               title: shortTitle,
               address: displayName,
@@ -1078,9 +2002,9 @@ function WhatsAppLocationAddressPicker({
   }
 
   const selectSuggestion = (item: GeocodeSuggestion) => {
-    const nextTitle = (nodeData.locationTitle as string) || item.title || 'Klinik Konumu'
+    const nextTitle = (nodeData.locationTitle as string) || item.title || 'İşletme Konumu'
     const nextMsg =
-      (nodeData.locationMessage as string) || '📍 Kliniğimizin konumu ve açık adres bilgileri:'
+      (nodeData.locationMessage as string) || '📍 İşletmemizin konumu ve açık adres bilgileri:'
     const patch = {
       locationTitle: nextTitle,
       locationAddress: item.address,
@@ -1133,7 +2057,7 @@ function WhatsAppLocationAddressPicker({
           lineHeight: 1.45,
         }}
       >
-        📍 Arayan numaraya kayıtlı klinik konumu WhatsApp mesajı ve harita pini olarak gönderilir.
+        📍 Arayan numaraya kayıtlı işletme konumu WhatsApp mesajı ve harita pini olarak gönderilir.
       </div>
 
       {/* Adresten Konum Arama */}
@@ -1232,12 +2156,12 @@ function WhatsAppLocationAddressPicker({
       {/* Seçilen Konum Detayları */}
       <div>
         <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>
-          Konum Başlığı / Klinik Adı
+          Konum Başlığı / İşletme Adı
         </label>
         <input
           value={(nodeData.locationTitle as string) || ''}
           onChange={e => updateSelectedNode({ locationTitle: e.target.value })}
-          placeholder="Örn: Özel Ağız ve Diş Sağlığı Polikliniği"
+          placeholder="Örn: Axamaz İşletme Merkezi"
           style={inputStyle}
         />
       </div>
@@ -1352,7 +2276,7 @@ function WhatsAppLocationAddressPicker({
         <input
           value={(nodeData.locationMessage as string) || ''}
           onChange={e => updateSelectedNode({ locationMessage: e.target.value })}
-          placeholder="📍 Kliniğimizin konumu ve açık adres bilgileri:"
+          placeholder="📍 İşletmemizin konumu ve açık adres bilgileri:"
           style={inputStyle}
         />
       </div>
@@ -1374,7 +2298,7 @@ function WhatsAppLocationAddressPicker({
           <span style={{ fontSize: 11, fontWeight: 700, color: '#15803d' }}>✓ {saveNotice}</span>
         ) : (
           <span style={{ fontSize: 10, color: 'var(--foreground-2)' }}>
-            Seçilen adres klinik konumu olarak kaydedilir.
+            Seçilen adres işletme konumu olarak kaydedilir.
           </span>
         )}
         <button
@@ -1388,7 +2312,7 @@ function WhatsAppLocationAddressPicker({
               lng: String(nodeData.locationLng || ''),
               locationUrl: String(nodeData.locationUrl || ''),
               locationMessage: String(
-                nodeData.locationMessage || '📍 Kliniğimizin konumu ve açık adres bilgileri:',
+                nodeData.locationMessage || '📍 İşletmemizin konumu ve açık adres bilgileri:',
               ),
             })
           }
@@ -1417,16 +2341,23 @@ function WhatsAppLocationAddressPicker({
 function ConditionNode({ id, data, selected }: { id: string; data: ConditionData; selected?: boolean }) {
   const isSim = data._simStatus === 'active'
   const ruleCount = Array.isArray(data.rules) && data.rules.length > 1 ? data.rules.length : 1
-  const presetField = PRESET_FIELDS.find(f => f.value === data.conditionField)
-  const glossaryField = (FIELD_LABELS as Record<string, string>)[data.conditionField === 'kayitli' ? 'caller.isKnownPatient' : data.conditionField]
+  const legacyLabel = LEGACY_FIELD_LABELS[data.conditionField]?.label
+  const glossaryField = (FIELD_LABELS as Record<string, string>)[data.conditionField]
+  const isTableExists = isDynamicTableExistsField(data.conditionField, data.sourceColumnId)
+  const dynamicTitle =
+    isTableExists && data.sourceTableName
+      ? formatDynamicTableExistsLabel(String(data.sourceTableName))
+      : data.sourceTableName && data.sourceColumnName
+      ? formatDynamicColumnDisplayLabel(String(data.sourceTableName), String(data.sourceColumnName))
+      : ''
   const humanLabel = ruleCount > 1
     ? `${ruleCount} koşul birlikte`
     : data.conditionField === 'user_intent'
-    ? 'Hastanın isteği'
-    : glossaryField || presetField?.label || data.conditionField || 'Koşul seçilmedi'
+    ? 'Arayan kişinin isteği'
+    : dynamicTitle || data.conditionFieldLabel || data._fieldLabels?.[data.conditionField] || glossaryField || legacyLabel || data.conditionField || 'Koşul seçilmedi'
   const summaryText = useMemo(() => {
     if (!data.conditionField && !(Array.isArray(data.rules) && data.rules.length)) return 'Koşul seçilmedi'
-    return `Eğer ${describeCondition(data)}`
+    return `Eğer ${describeCondition(data, data._fieldLabels || {})}`
   }, [data])
 
   return (
@@ -1586,6 +2517,11 @@ function ActionNode({ id, data, selected }: { id: string; data: ActionData; sele
       />
       <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--flow-node-action-text)' }}>{displayLabel}</div>
 
+      {data.action === 'save_record' && data.targetTableName && (
+        <div style={{ marginTop: 5, fontSize: 10, color: 'var(--foreground)', background: 'var(--card-bg)', padding: '3px 8px', borderRadius: 6, border: '1px solid var(--input-border)' }}>
+          📊 Tablo: <strong>{data.targetTableName}</strong>
+        </div>
+      )}
       {data.action === 'transfer_call' && (
         <div style={{ marginTop: 5, fontSize: 10, color: 'var(--foreground)', background: 'var(--card-bg)', padding: '3px 8px', borderRadius: 6, border: '1px solid var(--input-border)' }}>
           Hedef: <strong>{data.transferNumber || 'Belirtilmedi'}</strong> ({data.requireConfirmation !== false ? 'Onaylı' : 'Doğrudan'})
@@ -1665,6 +2601,13 @@ const nodeTypes: NodeTypes = {
   endNode: EndNode,
 }
 
+const FLOW_DIRECTION_LABELS: Record<'inbound' | 'outbound' | 'web' | 'whatsapp', string> = {
+  inbound: 'Gelen Arama',
+  outbound: 'Giden Arama',
+  web: 'Web Asistanı',
+  whatsapp: 'WhatsApp',
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'inbound' | 'outbound' | 'web' | 'whatsapp' }) {
   const [nodes, setNodes, onNodesChange] = useNodesState([] as any)
@@ -1672,12 +2615,18 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
   const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null)
 
   const [saving, setSaving] = useState(false)
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [isDirty, setIsDirty] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
 
   const [phonebook, setPhonebook] = useState<Array<{ label: string; number: string }>>([])
+  const [dynamicTables, setDynamicTables] = useState<DynamicTableDef[]>([])
+  const [appointmentConfigs, setAppointmentConfigs] = useState<DynamicAppointmentConfigDef[]>([])
+  const [moduleConfigs, setModuleConfigs] = useState<FlowModuleConfigHint[]>([])
+  const [relationTitlesByTableId, setRelationTitlesByTableId] = useState<Record<string, string[]>>({})
+  const [dynamicTablesLoading, setDynamicTablesLoading] = useState(true)
   const [serverIssues, setServerIssues] = useState<FlowIssue[]>([])
   const [runtimeMode, setRuntimeMode] = useState<'legacy' | 'observe' | 'active'>('legacy')
 
@@ -1685,7 +2634,9 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
   const [rightTab, setRightTab] = useState<'props' | 'simulator' | 'prompt'>('props')
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
-  const [customFieldMode, setCustomFieldMode] = useState(false)
+  const [fieldSourceModeOverride, setFieldSourceModeOverride] = useState<Record<string, 'table' | 'custom'>>({})
+  const [fieldTableDraftByNode, setFieldTableDraftByNode] = useState<Record<string, string>>({})
+  const lastReboundSignatureRef = useRef<string>('')
 
   // Undo / Redo History
   const historyRef = useRef<Array<{ nodes: Node[]; edges: Edge[] }>>([])
@@ -1713,7 +2664,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
   const pushHistory = useCallback((nextNodes: Node[], nextEdges: Edge[], markDirty = true) => {
     if (skipHistoryRef.current) return
     const cleanNodes = nextNodes.map(n => {
-      const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, ...restData } = (n.data || {}) as any
+      const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, _fieldLabels, ...restData } = (n.data || {}) as any
       return { ...n, data: restData }
     })
     const snapshot = { nodes: structuredClone(cleanNodes), edges: structuredClone(nextEdges) }
@@ -1747,41 +2698,102 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     setTimeout(() => { skipHistoryRef.current = false }, 50)
   }, [historyIndex, setNodes, setEdges])
 
-  // Load phonebook & runtime mode
+  const loadDynamicTables = useCallback(() => {
+    setDynamicTablesLoading(true)
+    fetch('/api/dynamic-tables/schema', { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(async data => {
+        if (!Array.isArray(data?.tables)) return
+        const fetchedTables: DynamicTableDef[] = data.tables
+        setAppointmentConfigs(Array.isArray(data.appointmentConfigs) ? data.appointmentConfigs : [])
+        setModuleConfigs(Array.isArray(data.moduleConfigs) ? data.moduleConfigs : [])
+
+        const targetTableIds = Array.from(
+          new Set(
+            fetchedTables
+              .flatMap(t => t.columns || [])
+              .filter(c => c.fieldType === 'relation' && c.config?.targetTableId)
+              .map(c => String(c.config!.targetTableId)),
+          ),
+        )
+        if (targetTableIds.length === 0) {
+          setRelationTitlesByTableId({})
+          setDynamicTables(fetchedTables)
+          return
+        }
+
+        const entries = await Promise.all(
+          targetTableIds.map(async tblId => {
+            try {
+              const r = await fetch(`/api/dynamic-tables/tables/${encodeURIComponent(tblId)}/rows`, {
+                credentials: 'include',
+              })
+              if (!r.ok) return [tblId, [] as string[]] as const
+              const rows = await r.json()
+              const titles = Array.isArray(rows)
+                ? Array.from(
+                    new Set(
+                      rows
+                        .map((row: any) => String(row?.displayTitle || '').trim())
+                        .filter((title: string) => Boolean(title) && title !== 'İsimsiz Kayıt'),
+                    ),
+                  )
+                : []
+              return [tblId, titles] as const
+            } catch {
+              return [tblId, [] as string[]] as const
+            }
+          }),
+        )
+        setRelationTitlesByTableId(Object.fromEntries(entries))
+        setDynamicTables(fetchedTables)
+      })
+      .catch(() => {})
+      .finally(() => setDynamicTablesLoading(false))
+  }, [])
+
+  // Load phonebook & clinic dynamic tables
   useEffect(() => {
+    loadDynamicTables()
+
     fetch('/api/admin/settings/transfer-phonebook')
       .then(r => r.json())
       .then(data => { if (Array.isArray(data)) setPhonebook(data) })
       .catch(() => {})
+  }, [loadDynamicTables])
 
-    fetch('/api/admin/flow/runtime')
-      .then(r => r.json())
+  // Load scenario execution mode for current direction & listen for live updates from VoiceAiSettings
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/admin/flow/runtime?direction=${encodeURIComponent(direction)}`)
+      .then(r => (r.ok ? r.json() : null))
       .then(data => {
-        if (data.mode === 'observe' || data.mode === 'active' || data.mode === 'legacy') setRuntimeMode(data.mode)
+        if (cancelled || !data) return
+        const resolved = data?.modes?.[direction] ?? data?.mode
+        if (resolved === 'observe' || resolved === 'active' || resolved === 'legacy') {
+          setRuntimeMode(resolved)
+        }
       })
       .catch(() => {})
-  }, [])
 
-  const updateRuntimeMode = async (mode: 'legacy' | 'observe' | 'active') => {
-    const prev = runtimeMode
-    setRuntimeMode(mode)
-    try {
-      const response = await fetch('/api/admin/flow/runtime', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      })
-      if (!response.ok) throw new Error()
-      showToast('✅ Görüşme çalışma biçimi güncellendi')
-    } catch {
-      setRuntimeMode(prev)
-      showToast('Çalışma biçimi güncellenemedi', 'error')
+    const onAssistantSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent)?.detail
+      const nextMode = detail?.[direction]?.flowRuntimeMode
+      if (nextMode === 'legacy' || nextMode === 'observe' || nextMode === 'active') {
+        setRuntimeMode(nextMode)
+      }
     }
-  }
+    window.addEventListener('clinic:assistant-settings-updated', onAssistantSettingsUpdated)
+    return () => {
+      cancelled = true
+      window.removeEventListener('clinic:assistant-settings-updated', onAssistantSettingsUpdated)
+    }
+  }, [direction])
 
   // Load flow for current direction
   useEffect(() => {
     setLoaded(false)
+    lastReboundSignatureRef.current = ''
     fetch(`/api/admin/flow?direction=${direction}`)
       .then(r => r.json())
       .then(data => {
@@ -1851,7 +2863,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     setNodes(nds => {
       const orig = nds.find(n => n.id === nodeId)
       if (!orig || orig.type === 'startNode') return nds
-      const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, ...cleanData } = (orig.data || {}) as any
+      const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, _fieldLabels, ...cleanData } = (orig.data || {}) as any
       const newId = `node_${Date.now()}`
       const copy: Node = {
         id: newId,
@@ -1872,9 +2884,53 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
   const simVisitedNodeSet = useMemo(() => new Set(simVisitedNodeIds), [simVisitedNodeIds])
   const simVisitedEdgeSet = useMemo(() => new Set(simVisitedEdgeIds), [simVisitedEdgeIds])
 
-  // Yol özetleri: yalnızca akışın yapısı değişince yeniden hesaplanır.
+  const clinicProfile = useMemo(
+    () => inferClinicDynamicProfile(dynamicTables, appointmentConfigs, moduleConfigs),
+    [dynamicTables, appointmentConfigs, moduleConfigs],
+  )
+  const templateOptions = useMemo(
+    () => getDynamicTemplateOptions(clinicProfile, dynamicTables, direction),
+    [clinicProfile, dynamicTables, direction],
+  )
+
+  useEffect(() => {
+    if (!loaded || dynamicTablesLoading || dynamicTables.length === 0 || nodes.length === 0) return
+    const sig = `${direction}:${dynamicTables.map(t => `${t.id}:${t.columns?.length || 0}`).join(',')}`
+    if (lastReboundSignatureRef.current === sig) return
+    lastReboundSignatureRef.current = sig
+    const rebound = rebindLegacyNodesToDynamicTables(nodes, dynamicTables, clinicProfile, relationTitlesByTableId)
+    if (!rebound.changed) return
+    skipHistoryRef.current = true
+    const reboundEdges = decorateEdges(edges, rebound.nodes)
+    setNodes(rebound.nodes)
+    setEdges(reboundEdges)
+    if (!isDirty) {
+      historyRef.current = [{ nodes: structuredClone(rebound.nodes), edges: structuredClone(reboundEdges) }]
+      setHistoryIndex(0)
+      setIsDirty(false)
+    }
+    setTimeout(() => { skipHistoryRef.current = false }, 50)
+  }, [loaded, dynamicTablesLoading, dynamicTables, direction, nodes, edges, clinicProfile, relationTitlesByTableId, isDirty, setNodes, setEdges])
+
+  const fieldLabelMap = useMemo(
+    () => buildFieldLabelMap(
+      nodes,
+      dynamicTables,
+      Object.entries(LEGACY_FIELD_LABELS).map(([value, info]) => ({ value, label: info.label })),
+    ),
+    [nodes, dynamicTables],
+  )
+  const booleanFieldSet = useMemo(
+    () => buildBooleanFieldSet(nodes, dynamicTables),
+    [nodes, dynamicTables],
+  )
+
+  // Yol özetleri: yalnızca akışın yapısı veya tablo etiketleri değişince yeniden hesaplanır.
   const graphHash = useMemo(() => flowGraphHash(nodes, edges), [nodes, edges])
-  const nodeSummaries = useMemo(() => summarizeFlow(nodes, edges), [graphHash]) // eslint-disable-line react-hooks/exhaustive-deps
+  const nodeSummaries = useMemo(
+    () => summarizeFlow(nodes, edges, fieldLabelMap),
+    [graphHash, fieldLabelMap], // eslint-disable-line react-hooks/exhaustive-deps
+  )
   const explainCacheRef = useRef<Map<string, string | null>>(new Map())
   const explainNode = useCallback(async (nodeId: string): Promise<string | null> => {
     const key = `${direction}:${graphHash}:${nodeId}`
@@ -1926,10 +2982,11 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
           _canDelete: n.type !== 'startNode' && (n.type !== 'endNode' || endNodeCount > 1),
           _summary: nodeSummaries[n.id],
           _explain: explainNode,
+          _fieldLabels: fieldLabelMap,
         },
       }
     })
-  }, [nodes, liveIssues, simActive, simCurrentNodeId, simVisitedNodeSet, selectedNodeId, duplicateNode, deleteNode, endNodeCount, nodeSummaries, explainNode])
+  }, [nodes, liveIssues, simActive, simCurrentNodeId, simVisitedNodeSet, selectedNodeId, duplicateNode, deleteNode, endNodeCount, nodeSummaries, explainNode, fieldLabelMap])
 
   const displayEdges = useMemo(() => {
     return decorateEdges(edges, nodes, simActive ? simVisitedEdgeSet : undefined)
@@ -1986,198 +3043,23 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     }, 60)
   }, [edges, setNodes, rfInstance, pushHistory])
 
-  // Sample flows with non-crossing condition branches (Evet on left, Hayır on right)
+  // Sample flows dynamically generated from clinic tables, appointments & modules
   const loadSampleFlow = (presetKey?: string) => {
-    const selectedPreset = presetKey || (
-      direction === 'outbound'
-        ? 'fast_survey'
-        : direction === 'whatsapp'
-        ? 'fast_wa'
-        : direction === 'web'
-        ? 'fast_web'
-        : 'fast_phone'
-    )
+    const selectedPreset = presetKey || direction
+    const matchingOpt = templateOptions.find(o => o.id === selectedPreset)
+    const labelText = matchingOpt?.label || `${clinicProfile.primaryTable?.name || clinicProfile.entitySingular} Dinamik Akış Şablonu`
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(`${labelText} şablonunu yüklemek mevcut akışınızı değiştirecektir. Onaylıyor musunuz?`)) return
 
-    if (selectedPreset === 'fast_survey') {
-      if (!window.confirm('⚡ 2 soruluk hızlı hasta memnuniyet anket akışını yüklemek mevcut akışınızı değiştirecektir. Onaylıyor musunuz?')) return
-
-      const surveyNodes: Node[] = [
-        { id: 'start', type: 'startNode', position: { x: 250, y: 20 }, data: { label: 'Giden Arama Başladı' } },
-        { id: 'field_memnuniyet', type: 'fieldNode', position: { x: 250, y: 150 }, data: { label: 'Memnuniyet Durumu (Anket)', fieldName: 'memnuniyet', fieldType: 'text', description: 'Son kliniğimize ziyaretinizden memnun kaldınız mı, 1 ile 10 arasında kaç puan verirsiniz?', required: true } },
-        { id: 'field_oneri', type: 'fieldNode', position: { x: 250, y: 290 }, data: { label: 'Hasta Notu / Önerisi', fieldName: 'hastaNotu', fieldType: 'text', description: 'Ekibimize iletmek istediğiniz kısa bir notunuz var mı?', required: false } },
-        { id: 'action_not', type: 'actionNode', position: { x: 250, y: 430 }, data: { action: 'save_patient_note', label: '🗒️ Hastadan Not Al (Bankoya İlet)' } },
-        { id: 'end', type: 'endNode', position: { x: 250, y: 570 }, data: { label: 'Teşekkür Et ve Bitir', message: 'Değerli geri bildiriminiz için teşekkür eder, sağlıklı günler dileriz.' } },
-      ]
-      const surveyEdges = decorateEdges([
-        { id: 'e1', source: 'start', target: 'field_memnuniyet' },
-        { id: 'e2', source: 'field_memnuniyet', target: 'field_oneri' },
-        { id: 'e4', source: 'field_oneri', target: 'action_not' },
-        { id: 'e5', source: 'action_not', target: 'end' },
-      ], surveyNodes)
-
-      const layouted = layoutNodes(surveyNodes, surveyEdges)
-      setNodes(layouted)
-      setEdges(surveyEdges)
-      pushHistory(layouted, surveyEdges)
-      setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
-      showToast('⚡ Hızlı giden arama anket akışı (2 soru) yüklendi')
-      return
-    }
-
-    if (selectedPreset === 'fast_wa') {
-      if (!window.confirm('⚡ Hızlı WhatsApp randevu akışını yüklemek mevcut akışınızı değiştirecektir. Onaylıyor musunuz?')) return
-
-      const waNodes: Node[] = [
-        { id: 'start', type: 'startNode', position: { x: 260, y: 20 }, data: { label: 'WhatsApp Mesajı Geldi' } },
-        { id: 'cond_kayitli', type: 'conditionNode', position: { x: 260, y: 130 }, data: { conditionField: 'kayitli', operator: 'equals', conditionValue: 'true', label: 'Hasta Kayıtlı mı?' } },
-        // Hayır (Sağ)
-        { id: 'field_musteri_adi', type: 'fieldNode', position: { x: 440, y: 280 }, data: { label: 'Hasta Adı ve Soyadı', fieldName: 'musteri_adi', fieldType: 'text', description: 'Adınızı ve soyadınızı öğrenebilir miyim?', required: true } },
-        // Ortak: Şikâyet + Gün ve Saat
-        { id: 'field_sikayet', type: 'fieldNode', position: { x: 260, y: 400 }, data: { label: 'Hasta Şikâyeti / Talebi', fieldName: 'sikayet', fieldType: 'text', description: 'Şikâyetiniz veya randevu talebiniz nedir?', required: false } },
-        { id: 'field_tarih', type: 'fieldNode', position: { x: 260, y: 530 }, data: { label: 'Randevu Tarihi', fieldName: 'tarih', fieldType: 'date', description: 'Hangi gün ve saat için randevu oluşturmamı istersiniz?', required: true } },
-        { id: 'field_saat', type: 'fieldNode', position: { x: 260, y: 660 }, data: { label: 'Randevu Saati', fieldName: 'saat', fieldType: 'time', description: 'Saat kaç sizin için uygundur?', required: true } },
-        { id: 'action_randevu', type: 'actionNode', position: { x: 260, y: 790 }, data: { action: 'save_appointment_pending', label: '📝 Randevu Talebi Oluştur (Onay Bekler)' } },
-        { id: 'end', type: 'endNode', position: { x: 260, y: 920 }, data: { label: 'Talebi Onayla ve Bitir', message: 'Randevu talebiniz alınmıştır, sağlıklı günler dileriz.' } },
-      ]
-      const waEdges = decorateEdges([
-        { id: 'e_s_c', source: 'start', target: 'cond_kayitli' },
-        { id: 'e_c_true', source: 'cond_kayitli', sourceHandle: 'true', target: 'field_sikayet' },
-        { id: 'e_c_false', source: 'cond_kayitli', sourceHandle: 'false', target: 'field_musteri_adi' },
-        { id: 'e_ad_sik', source: 'field_musteri_adi', target: 'field_sikayet' },
-        { id: 'e_sik_tar', source: 'field_sikayet', target: 'field_tarih' },
-        { id: 'e_tar_saat', source: 'field_tarih', target: 'field_saat' },
-        { id: 'e_saat_act', source: 'field_saat', target: 'action_randevu' },
-        { id: 'e_act_end', source: 'action_randevu', target: 'end' },
-      ], waNodes)
-
-      const layouted = layoutNodes(waNodes, waEdges)
-      setNodes(layouted)
-      setEdges(waEdges)
-      pushHistory(layouted, waEdges)
-      setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
-      showToast('⚡ Hızlı WhatsApp randevu akışı yüklendi')
-      return
-    }
-
-    if (selectedPreset === 'fast_web') {
-      if (!window.confirm('⚡ Sunum Dostu Hızlı Web Randevu Akışını (Maks. 2 Soru) yüklemek mevcut akışınızı değiştirecektir. Onaylıyor musunuz?')) return
-
-      const webNodes: Node[] = [
-        { id: 'start', type: 'startNode', position: { x: 260, y: 20 }, data: { label: 'Web Karşılama Mesajı' } },
-        { id: 'field_musteri_adi', type: 'fieldNode', position: { x: 260, y: 140 }, data: { label: 'Hasta Adı ve Soyadı', fieldName: 'musteri_adi', fieldType: 'text', description: 'Randevunuz için adınızı, soyadınızı ve telefon numaranızı alabilir miyim?', required: true } },
-        { id: 'field_tel', type: 'fieldNode', position: { x: 260, y: 270 }, data: { label: 'Telefon Numarası', fieldName: 'telefon', fieldType: 'text', description: 'Size ulaşabileceğimiz telefon numaranızı alabilir miyim?', required: true } },
-        { id: 'field_sikayet', type: 'fieldNode', position: { x: 260, y: 400 }, data: { label: 'Hasta Şikâyeti / Talebi', fieldName: 'sikayet', fieldType: 'text', description: 'Şikâyetiniz veya randevu talebiniz nedir?', required: false } },
-        { id: 'field_tarih', type: 'fieldNode', position: { x: 260, y: 530 }, data: { label: 'Randevu Tarihi', fieldName: 'tarih', fieldType: 'date', description: 'Hangi gün ve saat için randevu oluşturmamı istersiniz?', required: true } },
-        { id: 'field_saat', type: 'fieldNode', position: { x: 260, y: 660 }, data: { label: 'Randevu Saati', fieldName: 'saat', fieldType: 'time', description: 'Saat kaç sizin için uygundur?', required: true } },
-        { id: 'action_randevu', type: 'actionNode', position: { x: 260, y: 790 }, data: { action: 'save_appointment_pending', label: '📝 Randevu Talebi Oluştur (Onay Bekler)' } },
-        { id: 'end', type: 'endNode', position: { x: 260, y: 920 }, data: { label: 'Görüşmeyi Bitir', message: 'Randevu talebiniz alındı, sağlıklı günler dileriz.' } },
-      ]
-      const webEdges = decorateEdges([
-        { id: 'e_s_ad', source: 'start', target: 'field_musteri_adi' },
-        { id: 'e_ad_tel', source: 'field_musteri_adi', target: 'field_tel' },
-        { id: 'e_tel_sik', source: 'field_tel', target: 'field_sikayet' },
-        { id: 'e_sik_tar', source: 'field_sikayet', target: 'field_tarih' },
-        { id: 'e_tar_saat', source: 'field_tarih', target: 'field_saat' },
-        { id: 'e_saat_act', source: 'field_saat', target: 'action_randevu' },
-        { id: 'e_act_end', source: 'action_randevu', target: 'end' },
-      ], webNodes)
-
-      const layouted = layoutNodes(webNodes, webEdges)
-      setNodes(layouted)
-      setEdges(webEdges)
-      pushHistory(layouted, webEdges)
-      setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
-      showToast('⚡ Hızlı Web Randevu Akışı (Maks. 2 Soru) yüklendi')
-      return
-    }
-
-    if (selectedPreset === 'quick_note') {
-      if (!window.confirm('🗒️ Hızlı Geri Arama / Bankoya Not Bırakma şablonunu yüklemek mevcut akışınızı değiştirecektir. Onaylıyor musunuz?')) return
-
-      const noteNodes: Node[] = [
-        { id: 'start', type: 'startNode', position: { x: 260, y: 20 }, data: { label: 'Karşılama Mesajı' } },
-        { id: 'field_musteri_adi', type: 'fieldNode', position: { x: 260, y: 150 }, data: { label: 'Hasta Adı ve Soyadı', fieldName: 'musteri_adi', fieldType: 'text', description: 'Adınızı, soyadınızı ve iletmek istediğiniz notu alabilir miyim?', required: true } },
-        { id: 'field_oneri', type: 'fieldNode', position: { x: 260, y: 280 }, data: { label: 'Hasta Notu / Önerisi', fieldName: 'hastaNotu', fieldType: 'text', description: 'Bankomuza iletmek istediğiniz mesajınız nedir?', required: true } },
-        { id: 'action_not', type: 'actionNode', position: { x: 260, y: 410 }, data: { action: 'save_patient_note', label: '🗒️ Hastadan Not Al (Bankoya İlet)' } },
-        { id: 'end', type: 'endNode', position: { x: 260, y: 540 }, data: { label: 'Görüşmeyi Bitir', message: 'Notunuz bankomuza iletildi, en kısa sürede size dönüş yapılacaktır. Sağlıklı günler dileriz.' } },
-      ]
-      const noteEdges = decorateEdges([
-        { id: 'e_s_ad', source: 'start', target: 'field_musteri_adi' },
-        { id: 'e_ad_not', source: 'field_musteri_adi', target: 'field_oneri' },
-        { id: 'e_not_act', source: 'field_oneri', target: 'action_not' },
-        { id: 'e_act_end', source: 'action_not', target: 'end' },
-      ], noteNodes)
-
-      const layouted = layoutNodes(noteNodes, noteEdges)
-      setNodes(layouted)
-      setEdges(noteEdges)
-      pushHistory(layouted, noteEdges)
-      setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
-      showToast('🗒️ Hızlı Not Bırakma şablonu yüklendi')
-      return
-    }
-
-    if (!window.confirm('⚡ Sunum Dostu Hızlı Telefon Randevu Akışını (CallerID otomatik, Maks. 1-2 Soru) yüklemek mevcut akışınızı değiştirecektir. Onaylıyor musunuz?')) return
-
-    // fast_phone veya full_asterisk:
-    // Asterisk Gelen Aramada telefon numarası (CallerID) zaten bilindiği için tekrar telefon sorulmaz!
-    // Kayıtlı hasta ise doğrudan şikâyet ve gün/saat sorulur; yeni hasta ise Ad Soyad + Şikâyet + Gün/Saat sorulur.
-    const sampleNodes: Node[] = [
-      { id: 'start', type: 'startNode', position: { x: 260, y: 20 }, data: { label: 'Karşılama Mesajı' } },
-      { id: 'cond_kayitli', type: 'conditionNode', position: { x: 260, y: 130 }, data: { conditionField: 'kayitli', operator: 'equals', conditionValue: 'true', label: 'Arayan Numara (CallerID) Kayıtlı mı?' } },
-      // Hayır dalı (Yeni Hasta — yalnızca Ad Soyad sorulur, numara CallerID'den otomatik alınır!)
-      { id: 'field_musteri_adi', type: 'fieldNode', position: { x: 440, y: 270 }, data: { label: 'Hasta Adı ve Soyadı', fieldName: 'musteri_adi', fieldType: 'text', description: 'Adınızı ve soyadınızı alabilir miyim?', required: true } },
-      // Ortak devam (Şikâyet/Talep + Gün ve Saat)
-      { id: 'field_sikayet', type: 'fieldNode', position: { x: 260, y: 400 }, data: { label: 'Hasta Şikâyeti / Talebi', fieldName: 'sikayet', fieldType: 'text', description: 'Şikâyetiniz veya randevu talebiniz nedir?', required: false } },
-      { id: 'field_tarih', type: 'fieldNode', position: { x: 260, y: 530 }, data: { label: 'Randevu Tarihi', fieldName: 'tarih', fieldType: 'date', description: 'Hangi gün ve saat için randevu oluşturmamı istersiniz?', required: true } },
-      { id: 'field_saat', type: 'fieldNode', position: { x: 260, y: 660 }, data: { label: 'Randevu Saati', fieldName: 'saat', fieldType: 'time', description: 'Saat kaç için randevu istersiniz?', required: true } },
-      { id: 'action_randevu', type: 'actionNode', position: { x: 260, y: 790 }, data: { action: 'save_appointment_pending', label: '📝 Randevu Talebi Oluştur (Onay Bekler)' } },
-      { id: 'end', type: 'endNode', position: { x: 260, y: 920 }, data: { label: 'Görüşmeyi Bitir', message: 'Randevu talebiniz alındı, sağlıklı günler dileriz.' } },
-      ...(selectedPreset === 'full_asterisk'
-        ? [
-            {
-              id: 'action_transfer_global',
-              type: 'actionNode',
-              position: { x: 640, y: 80 },
-              data: {
-                action: 'transfer_call',
-                label: '📞 Santrale / Resepsiyona Aktar',
-                transferNumber: 'resepsiyon',
-                triggerKeywords: 'resepsiyon, operatör, sekreter, yetkili, canlı destek',
-                requireConfirmation: true,
-              },
-            },
-            {
-              id: 'action_wa_loc_global',
-              type: 'actionNode',
-              position: { x: 640, y: 220 },
-              data: {
-                action: 'send_wa_location',
-                label: '📍 WhatsApp’tan Konum Gönder',
-                triggerKeywords: 'konum, adres, yol tarifi, nerede',
-              },
-            },
-          ]
-        : []),
-    ]
-
-    const sampleEdges = decorateEdges([
-      { id: 'e_s_c', source: 'start', target: 'cond_kayitli' },
-      { id: 'e_c_true', source: 'cond_kayitli', sourceHandle: 'true', target: 'field_sikayet' },
-      { id: 'e_c_false', source: 'cond_kayitli', sourceHandle: 'false', target: 'field_musteri_adi' },
-      { id: 'e_ad_sik', source: 'field_musteri_adi', target: 'field_sikayet' },
-      { id: 'e_sik_tar', source: 'field_sikayet', target: 'field_tarih' },
-      { id: 'e_tar_sa', source: 'field_tarih', target: 'field_saat' },
-      { id: 'e_sa_act', source: 'field_saat', target: 'action_randevu' },
-      { id: 'e_act_end', source: 'action_randevu', target: 'end' },
-    ], sampleNodes)
+    const built = buildDynamicSampleFlow(selectedPreset, dynamicTables, clinicProfile, relationTitlesByTableId)
+    const sampleNodes = built.nodes as Node[]
+    const sampleEdges = decorateEdges(built.edges as Edge[], sampleNodes)
 
     const layouted = layoutNodes(sampleNodes, sampleEdges)
     setNodes(layouted)
     setEdges(sampleEdges)
     pushHistory(layouted, sampleEdges)
     setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
-    showToast(selectedPreset === 'full_asterisk' ? '🏥 Klinik Randevu + Asterisk Santral şablonu yüklendi' : '⚡ Hızlı Telefon Randevu Akışı (1-2 Soru) yüklendi')
+    showToast(`✅ ${labelText} yüklendi`)
   }
 
   const saveFlow = async () => {
@@ -2185,7 +3067,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     setSaving(true)
     try {
       const serverNodes = nodes.map(n => {
-        const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, ...cleanData } = (n.data || {}) as any
+        const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, _fieldLabels, ...cleanData } = (n.data || {}) as any
         return {
           id: n.id,
           type: n.type === 'startNode' ? 'START' : n.type === 'fieldNode' ? 'FIELD' : n.type === 'conditionNode' ? 'CONDITION' : n.type === 'actionNode' ? 'ACTION' : 'END',
@@ -2222,6 +3104,119 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     setSaving(false)
   }
 
+  const handleClearFlow = async () => {
+    if (saving) return
+    const freshNodes: Node[] = [
+      { id: 'start', type: 'startNode', position: { x: 240, y: 30 }, data: { label: 'Karşılama Mesajı' } },
+      { id: 'end', type: 'endNode', position: { x: 260, y: 200 }, data: { label: 'Görüşmeyi Bitir' } },
+    ]
+    const freshEdges: Edge[] = decorateEdges(
+      [{ id: 'start-end', source: 'start', target: 'end' }],
+      freshNodes,
+    )
+    setNodes(freshNodes)
+    setEdges(freshEdges)
+    setSelectedNodeId(null)
+    setSelectedEdgeId(null)
+    setServerIssues([])
+    setSimActive(false)
+    setSimCurrentNodeId(null)
+    setSimVisitedNodeIds([])
+    setSimVisitedEdgeIds([])
+    setSimLog([])
+
+    setSaving(true)
+    try {
+      const serverNodes = [
+        { id: 'start', type: 'START', position: { x: 240, y: 30 }, data: { label: 'Karşılama Mesajı' } },
+        { id: 'end', type: 'END', position: { x: 260, y: 200 }, data: { label: 'Görüşmeyi Bitir' } },
+      ]
+      const cleanEdges = [{ id: 'start-end', source: 'start', target: 'end' }]
+      const response = await fetch(`/api/admin/flow?direction=${direction}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes: serverNodes, edges: cleanEdges }),
+      })
+      if (!response.ok) throw new Error('Temizleme kaydedilemedi')
+      const result = await response.json().catch(() => ({}))
+      setServerIssues(Array.isArray(result.issues) ? result.issues : [])
+      pushHistory(freshNodes, freshEdges, false)
+      setIsDirty(false)
+      setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
+      showToast('✅ Konuşma akışı temizlendi ve kaydedildi')
+    } catch {
+      pushHistory(freshNodes, freshEdges, true)
+      showToast('⚠️ Akış tuvalde temizlendi ancak sunucuya kaydedilemedi', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const getCurrentGraphForAi = useCallback(() => {
+    const serverNodes = nodes.map(n => {
+      const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, _fieldLabels, ...cleanData } = (n.data || {}) as any
+      return {
+        id: n.id,
+        type:
+          n.type === 'startNode'
+            ? 'START'
+            : n.type === 'fieldNode'
+              ? 'FIELD'
+              : n.type === 'conditionNode'
+                ? 'CONDITION'
+                : n.type === 'actionNode'
+                  ? 'ACTION'
+                  : 'END',
+        position: n.position,
+        data: cleanData,
+      }
+    })
+    const cleanEdges = edges.map(e => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
+      ...(typeof e.label === 'string' ? { label: e.label } : {}),
+    }))
+    return { nodes: serverNodes, edges: cleanEdges }
+  }, [nodes, edges])
+
+  const applyAiGeneratedFlow = useCallback(
+    (
+      flowData: { nodes: any[]; edges: any[] },
+      meta: { summary: string | null; issues?: FlowIssue[]; direction: 'inbound' | 'outbound' | 'web' | 'whatsapp' },
+    ) => {
+      if (meta.direction !== direction) return
+      const TYPE_MAP: Record<string, string> = {
+        START: 'startNode',
+        FIELD: 'fieldNode',
+        CONDITION: 'conditionNode',
+        ACTION: 'actionNode',
+        END: 'endNode',
+      }
+      const mappedNodes: Node[] = (flowData.nodes || []).map((n: any) => ({
+        ...n,
+        type: TYPE_MAP[n.type] || n.type,
+        data: {
+          ...n.data,
+          label: n.data?.label || n.data?.fieldName || n.data?.action || n.type,
+        },
+      }))
+      const mappedEdges: Edge[] = Array.isArray(flowData.edges) ? flowData.edges : []
+      const layouted = layoutNodes(mappedNodes, mappedEdges)
+      const decorated = decorateEdges(mappedEdges, layouted)
+      setNodes(layouted)
+      setEdges(decorated)
+      setServerIssues(Array.isArray(meta.issues) ? meta.issues : [])
+      setSelectedNodeId(null)
+      setSelectedEdgeId(null)
+      pushHistory(layouted, decorated, false)
+      setIsDirty(false)
+      setTimeout(() => rfInstance?.fitView({ padding: 0.18, duration: 350 }), 60)
+    },
+    [direction, setNodes, setEdges, pushHistory, rfInstance],
+  )
+
   const addNode = (type: 'field' | 'condition' | 'action' | 'end') => {
     const id = `node_${Date.now()}`
     const anchorNode = nodes.find(n => n.id === selectedNodeId) || nodes[nodes.length - 1]
@@ -2231,31 +3226,132 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     let newNode: Node
     if (type === 'field') {
       const usedFields = new Set(nodes.filter(n => n.type === 'fieldNode').map(n => (n.data as FieldData).fieldName))
-      const defaultGroup = direction === 'outbound' ? 'outbound' : 'inbound'
-      const candidate = PRESET_FIELDS.find(f => f.group === defaultGroup && !usedFields.has(f.value)) || PRESET_FIELDS[0]
-      newNode = {
-        id,
-        type: 'fieldNode',
-        position: { x: baseX, y: baseY },
-        data: {
-          label: candidate.label,
-          fieldName: candidate.value,
-          description: candidate.desc,
-          required: true,
-          fieldType: candidate.type,
-        } as FieldData,
+      const tablesWithCols = getSelectableFlowTables(dynamicTables, true).filter(t => (t.columns?.length || 0) > 0)
+      const orderedTables = clinicProfile.primaryTable
+        ? [
+            clinicProfile.primaryTable,
+            ...tablesWithCols.filter(t => t.id !== clinicProfile.primaryTable?.id),
+          ]
+        : tablesWithCols
+      let dynamicPatch: ReturnType<typeof mapDynamicColumnToFlowField> | null = null
+      for (const tbl of orderedTables) {
+        for (const col of tbl.columns || []) {
+          const candidatePatch = mapDynamicColumnToFlowField(tbl, col, relationTitlesByTableId)
+          if (!usedFields.has(candidatePatch.fieldName)) {
+            dynamicPatch = candidatePatch
+            break
+          }
+        }
+        if (dynamicPatch) break
+      }
+      if (!dynamicPatch && orderedTables.length > 0 && orderedTables[0].columns?.[0]) {
+        dynamicPatch = mapDynamicColumnToFlowField(orderedTables[0], orderedTables[0].columns[0], relationTitlesByTableId)
+      }
+
+      if (dynamicPatch) {
+        newNode = {
+          id,
+          type: 'fieldNode',
+          position: { x: baseX, y: baseY },
+          data: {
+            ...dynamicPatch,
+            description: '',
+            required: true,
+          } as FieldData,
+        }
+      } else {
+        newNode = {
+          id,
+          type: 'fieldNode',
+          position: { x: baseX, y: baseY },
+          data: {
+            label: 'Yeni Bilgi Alanı',
+            fieldName: '',
+            description: '',
+            required: true,
+            fieldType: 'text',
+          } as FieldData,
+        }
       }
     } else if (type === 'condition') {
-      newNode = {
-        id,
-        type: 'conditionNode',
-        position: { x: baseX, y: baseY },
-        data: {
-          label: 'Hasta Kayıtlı mı?',
-          conditionField: 'kayitli',
-          operator: 'equals',
-          conditionValue: 'true',
-        } as ConditionData,
+      const anchorFieldData = anchorNode?.type === 'fieldNode' ? (anchorNode.data as FieldData) : null
+      if (anchorFieldData?.fieldName) {
+        const anchorMeta = resolveDynamicColumnMeta(anchorFieldData.fieldName, dynamicTables, anchorFieldData, relationTitlesByTableId)
+        const isBool = anchorFieldData.fieldType === 'boolean' || anchorFieldData.sourceColumnType === 'boolean'
+        const isMulti =
+          anchorFieldData.sourceColumnType === 'multiselect' ||
+          (anchorFieldData.sourceColumnType === 'relation' && Boolean(anchorMeta?.column.config?.allowMultiple))
+        const isEnum =
+          anchorFieldData.fieldType === 'enum' ||
+          anchorFieldData.sourceColumnType === 'select' ||
+          anchorFieldData.sourceColumnType === 'relation'
+        const isNum =
+          anchorFieldData.fieldType === 'number' ||
+          anchorFieldData.sourceColumnType === 'number' ||
+          anchorFieldData.sourceColumnType === 'currency'
+        const defaultOp = isBool
+          ? 'equals'
+          : isMulti
+          ? 'contains'
+          : isEnum
+          ? 'equals'
+          : isNum
+          ? 'gte'
+          : 'notEmpty'
+        const candidateOpts = anchorMeta?.options?.length ? anchorMeta.options : (anchorFieldData.enumValues || [])
+        const defaultVal = isBool
+          ? 'true'
+          : (isMulti || isEnum) && candidateOpts.length
+          ? candidateOpts[0]
+          : ''
+
+        newNode = {
+          id,
+          type: 'conditionNode',
+          position: { x: baseX, y: baseY },
+          data: {
+            label: anchorFieldData.label || 'Koşul',
+            conditionField: anchorFieldData.fieldName,
+            conditionFieldLabel: anchorFieldData.label,
+            operator: defaultOp,
+            conditionValue: defaultVal,
+            sourceTableId: anchorFieldData.sourceTableId,
+            sourceTableSlug: anchorFieldData.sourceTableSlug,
+            sourceTableName: anchorFieldData.sourceTableName,
+            sourceColumnId: anchorFieldData.sourceColumnId,
+            sourceColumnSlug: anchorFieldData.sourceColumnSlug,
+            sourceColumnName: anchorFieldData.sourceColumnName,
+            sourceColumnType: anchorFieldData.sourceColumnType,
+          } as ConditionData,
+        }
+      } else {
+        const defaultTable = clinicProfile.primaryTable || dynamicTables[0] || VIRTUAL_APPOINTMENT_TABLE
+        const condField = buildDynamicTableExistsKey(defaultTable.slug || defaultTable.name)
+        const condFieldLabel = formatDynamicTableExistsLabel(defaultTable.name)
+        const condColName = isVirtualAppointmentTable(defaultTable.id)
+          ? 'Yaklaşan randevusu var mı?'
+          : 'Bu tabloda kayıtlı mı?'
+        newNode = {
+          id,
+          type: 'conditionNode',
+          position: { x: baseX, y: baseY },
+          data: {
+            label: isVirtualAppointmentTable(defaultTable.id)
+              ? 'Yaklaşan Randevusu Var mı?'
+              : `${clinicProfile.entitySingular} Kayıtlı mı?`,
+            conditionField: condField,
+            conditionFieldLabel: condFieldLabel,
+            operator: 'equals',
+            conditionValue: 'true',
+            sourceTableId: defaultTable.id,
+            sourceTableSlug: defaultTable.slug,
+            sourceTableName: defaultTable.name,
+            sourceColumnId: DYNAMIC_TABLE_ROW_EXISTS_COL_ID,
+            sourceColumnSlug: '__row_exists__',
+            sourceColumnName: condColName,
+            sourceColumnType: 'boolean',
+          } as ConditionData,
+        }
       }
     } else if (type === 'action') {
       const defaultAction = direction === 'outbound' ? 'save_patient_note' : direction === 'whatsapp' ? 'send_wa_message' : 'save_appointment_pending'
@@ -2310,10 +3406,21 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
         if (n.id !== selectedNodeId) return n
         const newData = { ...n.data, ...updates }
         if (n.type === 'fieldNode' && updates.fieldName !== undefined) {
-          const safeName = String(updates.fieldName).replace(/[^a-zA-Z0-9_]/g, '_')
+          const safeName = String(updates.fieldName)
+            .replace(/[ğĞ]/g, 'g')
+            .replace(/[üÜ]/g, 'u')
+            .replace(/[şŞ]/g, 's')
+            .replace(/[ıİ]/g, 'i')
+            .replace(/[öÖ]/g, 'o')
+            .replace(/[çÇ]/g, 'c')
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_]/g, '_')
           newData.fieldName = safeName
-          const preset = PRESET_FIELDS.find(p => p.value === safeName)
-          newData.label = preset ? preset.label : safeName
+          if (updates.label === undefined) {
+            newData.label = LEGACY_FIELD_LABELS[safeName]?.label || safeName || 'Bilgi Al'
+          }
         }
         return { ...n, data: newData }
       })
@@ -2322,15 +3429,47 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     })
   }
 
-  // Dynamic field names present in the canvas for ConditionNode selector
+  // Canvas FieldNodes for ConditionNode selector (includes dynamic table metadata & options)
+  const canvasFieldNodes = useMemo<CanvasFieldNodeRef[]>(() => {
+    const seen = new Set<string>()
+    const result: CanvasFieldNodeRef[] = []
+    for (const n of nodes) {
+      if (n.type !== 'fieldNode') continue
+      const fd = (n.data || {}) as FieldData
+      const fn = String(fd.fieldName || '').trim()
+      if (!fn || seen.has(fn)) continue
+      seen.add(fn)
+      result.push({
+        fieldName: fn,
+        label: fd.label || fieldLabelMap[fn] || fn,
+        fieldType: fd.fieldType,
+        enumValues: fd.enumValues,
+        sourceTableId: fd.sourceTableId,
+        sourceTableSlug: fd.sourceTableSlug,
+        sourceTableName: fd.sourceTableName,
+        sourceColumnId: fd.sourceColumnId,
+        sourceColumnSlug: fd.sourceColumnSlug,
+        sourceColumnName: fd.sourceColumnName,
+        sourceColumnType: fd.sourceColumnType,
+      })
+    }
+    return result
+  }, [nodes, fieldLabelMap])
+
+  // Custom field names present in the canvas (excluding dynamic table columns)
   const customCanvasFieldNames = useMemo(() => {
-    const presetSet = new Set(PRESET_FIELDS.map(p => p.value))
     const names = nodes
       .filter(n => n.type === 'fieldNode')
-      .map(n => String((n.data as FieldData).fieldName || '').trim())
-      .filter(name => name && !presetSet.has(name))
+      .map(n => (n.data || {}) as FieldData)
+      .filter(fd => {
+        const name = String(fd.fieldName || '').trim()
+        if (!name) return false
+        if (fd.sourceTableId || resolveDynamicColumnMeta(name, getSelectableFlowTables(dynamicTables, true), fd)) return false
+        return true
+      })
+      .map(fd => String(fd.fieldName).trim())
     return [...new Set(names)]
-  }, [nodes])
+  }, [nodes, dynamicTables])
 
   // ── Interactive Flow Simulator Logic ────────────────────────────────────────
   const stepSimulationFrom = useCallback((nodeId: string, currentFields: Record<string, string>, visitedNodes: string[], visitedEdges: string[]) => {
@@ -2348,7 +3487,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
       const d = (node.data || {}) as Record<string, any>
 
       if (node.type === 'startNode') {
-        newLogs.push({ role: 'ai', text: `▶ [${d.label || 'Karşılama'}]: Merhaba, kliniğimize hoş geldiniz. Size nasıl yardımcı olabilirim?` })
+        newLogs.push({ role: 'ai', text: `▶ [${d.label || 'Karşılama'}]: Merhaba, hoş geldiniz. Size nasıl yardımcı olabilirim?` })
         const outEdge = edges.find(e => e.source === node.id)
         if (!outEdge) {
           newLogs.push({ role: 'system', text: '⚠️ Karşılama adımından sonra bağlı bir adım yok.' })
@@ -2361,9 +3500,10 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
 
       if (node.type === 'fieldNode') {
         const fieldName = String(d.fieldName || '')
+        const readableLabel = fieldLabelMap[fieldName] || String(d.label || fieldName || 'Bilgi')
         const existingVal = currentFields[fieldName]
         if (!existingVal) {
-          newLogs.push({ role: 'ai', text: `🤖 AI Sorusu (${fieldName}): "${d.description || `${fieldName} bilgisini paylaşır mısınız?`}"` })
+          newLogs.push({ role: 'ai', text: `🤖 AI Sorusu (${readableLabel}): "${d.description || `${readableLabel} bilgisini paylaşır mısınız?`}"` })
           setSimCurrentNodeId(node.id)
           setSimVisitedNodeIds(nextVisitedNodes)
           setSimVisitedEdgeIds(nextVisitedEdges)
@@ -2382,7 +3522,6 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
 
       if (node.type === 'conditionNode') {
         const field = String(d.conditionField || '')
-        const actual = String(currentFields[field] ?? '').trim()
         const expected = String(d.conditionValue || '').trim()
 
         // If user_intent and not yet answered, pause at condition node so user can pick Evet/Hayır or type phrase
@@ -2395,21 +3534,12 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
           return
         }
 
-        let matched = false
-        if (d.operator === 'notEmpty') matched = actual.length > 0
-        else if (d.operator === 'contains') matched = actual.toLocaleLowerCase('tr-TR').includes(expected.toLocaleLowerCase('tr-TR'))
-        else {
-          const aLow = actual.toLocaleLowerCase('tr-TR')
-          const eLow = expected.toLocaleLowerCase('tr-TR')
-          if (eLow === 'true') matched = ['true', 'evet', '1'].includes(aLow)
-          else if (eLow === 'false') matched = ['false', 'hayır', 'hayir', '0'].includes(aLow)
-          else matched = aLow === eLow
-        }
-
+        const matched = evaluateLocalConditionNode(d, currentFields)
+        const condSummary = describeCondition(d, fieldLabelMap)
         const branchHandle = matched ? 'true' : 'false'
         newLogs.push({
           role: 'system',
-          text: `🔀 Koşul (${field} = "${actual || 'boş'}") → ${matched ? '✅ EVET (Yeşil Yol)' : '❌ HAYIR (Kırmızı Yol)'} seçildi.`,
+          text: `🔀 Koşul (${condSummary}) → ${matched ? '✅ EVET (Yeşil Yol)' : '❌ HAYIR (Kırmızı Yol)'} seçildi.`,
         })
         const outEdge = edges.find(e => e.source === node.id && e.sourceHandle === branchHandle)
         if (!outEdge) {
@@ -2426,7 +3556,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
         const actionTitle = ACTION_LABELS[d.action] || d.label || d.action
         newLogs.push({
           role: 'action',
-          text: `⚡ İŞLEM ÇALIŞTIRILDI: ${actionTitle}\nVeriler: ${JSON.stringify(currentFields)}`,
+          text: `⚡ İŞLEM ÇALIŞTIRILDI: ${actionTitle}`,
         })
         const outEdge = edges.find(e => e.source === node.id)
         if (!outEdge) {
@@ -2451,7 +3581,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     setSimVisitedNodeIds(nextVisitedNodes)
     setSimVisitedEdgeIds(nextVisitedEdges)
     setSimLog(prev => [...prev, ...newLogs])
-  }, [nodes, edges])
+  }, [nodes, edges, fieldLabelMap])
 
   const callBackendAiSimulation = useCallback(async (params: {
     targetNodeId: string | null
@@ -2465,7 +3595,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     setSimLoading(true)
     try {
       const serverNodes = nodes.map(n => {
-        const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, ...cleanData } = (n.data || {}) as any
+        const { _issue, _simStatus, _onDuplicate, _onDelete, _canDelete, _summary, _explain, _fieldLabels, ...cleanData } = (n.data || {}) as any
         return {
           id: n.id,
           type: n.type === 'startNode' ? 'START' : n.type === 'fieldNode' ? 'FIELD' : n.type === 'conditionNode' ? 'CONDITION' : n.type === 'actionNode' ? 'ACTION' : 'END',
@@ -2513,8 +3643,13 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
 
       const extraLogs: Array<{ role: 'system' | 'ai' | 'user' | 'action'; text: string }> = []
       if (data.extractedFields && Object.keys(data.extractedFields).length > 0) {
-        const pairs = Object.entries(data.extractedFields).map(([k, v]) => `${k}="${v}"`).join(', ')
-        extraLogs.push({ role: 'system', text: `🧠 AI Alan Çıkarımı: ${pairs}` })
+        const pairs = Object.entries(data.extractedFields)
+          .filter(([k]) => !k.startsWith('_'))
+          .map(([k, v]) => `${fieldLabelMap[k] || k}="${v}"`)
+          .join(', ')
+        if (pairs) {
+          extraLogs.push({ role: 'system', text: `🧠 AI Alan Çıkarımı: ${pairs}` })
+        }
       }
       if (Array.isArray(data.usedKnowledgeTitles) && data.usedKnowledgeTitles.length > 0) {
         extraLogs.push({ role: 'system', text: `📚 Bilgi Bankası (RAG) Kullanıldı: ${data.usedKnowledgeTitles.join(', ')}` })
@@ -2531,7 +3666,11 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
     } finally {
       setSimLoading(false)
     }
-  }, [nodes, edges, direction, simLog, stepSimulationFrom])
+  }, [nodes, edges, direction, simLog, stepSimulationFrom, fieldLabelMap])
+
+  const primaryExistsKey = clinicProfile.primaryTable
+    ? buildDynamicTableExistsKey(clinicProfile.primaryTable.slug || clinicProfile.primaryTable.name)
+    : ''
 
   const startSimulation = useCallback((initialRegistered?: string) => {
     const start = nodes.find(n => n.type === 'startNode')
@@ -2540,8 +3679,11 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
       return
     }
     const regVal = initialRegistered ?? simFields.kayitli ?? 'false'
-    const initFields: Record<string, string> = { kayitli: regVal }
-    const initLog = [{ role: 'system' as const, text: `🧪 Test başlatıldı (Kayıtlı hasta mı: ${regVal === 'true' ? 'Evet' : 'Hayır'})` }]
+    const initFields: Record<string, string> = {
+      kayitli: regVal,
+      ...(primaryExistsKey ? { [primaryExistsKey]: regVal } : {}),
+    }
+    const initLog = [{ role: 'system' as const, text: `🧪 Test başlatıldı (Kayıtlı ${clinicProfile.entityLower} mı: ${regVal === 'true' ? 'Evet' : 'Hayır'})` }]
     setSimActive(true)
     setSimFields(initFields)
     setSimInput('')
@@ -2556,13 +3698,13 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
       visitedEdges: [],
       priorLogs: initLog,
     })
-  }, [nodes, simFields.kayitli, showToast, callBackendAiSimulation])
+  }, [nodes, simFields.kayitli, primaryExistsKey, clinicProfile.entityLower, showToast, callBackendAiSimulation])
 
   const submitSimulationField = (valueToSubmit?: string) => {
     const val = (valueToSubmit ?? simInput).trim()
     if (!val || simLoading) return
     setSimInput('')
-    const userLogItem = { role: 'user' as const, text: `👤 Hasta: "${val}"` }
+    const userLogItem = { role: 'user' as const, text: `👤 ${clinicProfile.entitySingular}: "${val}"` }
     const nextLogs = [...simLog, userLogItem]
     setSimLog(nextLogs)
     void callBackendAiSimulation({
@@ -2678,6 +3820,8 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
       {/* Top Toolbar */}
       <div
         style={{
+          position: 'relative',
+          zIndex: 25,
           background: 'var(--card-inner)',
           border: '1px solid var(--input-border)',
           borderRadius: 12,
@@ -2704,9 +3848,9 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
             }}
           >
             {direction === 'inbound'
-              ? '📞 Santral (Asterisk Gelen)'
+              ? '📞 Santral (Gelen Arama)'
               : direction === 'outbound'
-              ? '📤 Santral (Asterisk Giden)'
+              ? '📤 Santral (Giden Arama)'
               : direction === 'web'
               ? '🌐 Web Tarayıcı (Paralel)'
               : '💬 WhatsApp Kanalı'}
@@ -2742,18 +3886,30 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
           )}
         </div>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color: 'var(--foreground-2)' }}>
-          Çalışma Modu:
-          <select
-            value={runtimeMode}
-            onChange={e => updateRuntimeMode(e.target.value as 'legacy' | 'observe' | 'active')}
-            style={{ ...inputStyle, width: 'auto', padding: '5px 9px', fontSize: 11, fontWeight: 600 }}
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              padding: '4px 10px',
+              borderRadius: 999,
+              background: 'var(--pc-tint, #e0f2fe)',
+              border: '1px solid var(--input-border)',
+              color: 'var(--pc-tint-fg, #0369a1)',
+              boxShadow: 'var(--pc-clay-pale)',
+            }}
           >
-            <option value="legacy">Talimat Tabanlı (Esnek Yapay Zeka)</option>
-            <option value="observe">Gözlem Modu (Deneme / Kayıt)</option>
-            <option value="active">Sıkı Akış Motoru (Adım Adım)</option>
-          </select>
-        </label>
+            Senaryo Modu:{' '}
+            {runtimeMode === 'active'
+              ? 'Adım Adım Sıralı İlerleme'
+              : runtimeMode === 'observe'
+              ? 'Deneme ve Gözlem Modu'
+              : 'Serbest ve Doğal Sohbet'}
+          </span>
+          <InfoTooltip title="Senaryo uygulama biçimi">
+            Bu kanalın senaryo uygulama biçimini Gelişmiş Sesli Yapay Zeka ve Kanal Asistanları Ayarları panelinden değiştirebilirsiniz.
+          </InfoTooltip>
+        </div>
 
         <div style={{ flex: 1 }} />
 
@@ -2855,26 +4011,34 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
           }}
         >
           <option value="">🌟 Hazır Şablon Yükle…</option>
-          {direction === 'inbound' && (
-            <>
-              <option value="fast_phone">⚡ Hızlı Telefon Randevusu (Sunum Dostu · 1-2 Soru)</option>
-              <option value="full_asterisk">🏥 Klinik Randevu + Santral Aktarımı &amp; Konum</option>
-              <option value="quick_note">🗒️ Hızlı Not Bırakma (1 Soru)</option>
-            </>
-          )}
-          {direction === 'web' && (
-            <>
-              <option value="fast_web">⚡ Hızlı Web Randevusu (Sunum Dostu · 2 Soru)</option>
-              <option value="quick_note">🗒️ Web Geri Arama / Mesaj Notu</option>
-            </>
-          )}
-          {direction === 'outbound' && (
-            <option value="fast_survey">⚡ Hızlı Memnuniyet Anketi (2 Soru)</option>
-          )}
-          {direction === 'whatsapp' && (
-            <option value="fast_wa">⚡ Hızlı WhatsApp Randevu (1-2 Soru)</option>
-          )}
+          {templateOptions.map(opt => (
+            <option key={opt.id} value={opt.id}>
+              {opt.label}
+            </option>
+          ))}
         </select>
+
+        <button
+          type="button"
+          onClick={() => setClearConfirmOpen(true)}
+          disabled={saving}
+          title="Bu kanaldaki akışı başlangıç durumuna temizle"
+          className="keep-danger"
+          style={{
+            padding: '6px 11px',
+            borderRadius: 8,
+            background: 'var(--flow-danger-bg)',
+            border: '1px solid var(--danger)',
+            color: 'var(--danger)',
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: saving ? 'wait' : 'pointer',
+            boxShadow: 'var(--pc-clay-btn)',
+            opacity: saving ? 0.65 : 1,
+          }}
+        >
+          🗑️ Temizle
+        </button>
 
         <button
           type="button"
@@ -2913,6 +4077,14 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
         >
           <span style={{ color: '#ffffff' }}>{saving ? '⏳ Kaydediliyor...' : '💾 Değişiklikleri Kaydet'}</span>
         </button>
+
+        <FlowAiChatBox
+          direction={direction}
+          getCurrentGraph={getCurrentGraphForAi}
+          dynamicTables={dynamicTables}
+          onApplyGeneratedFlow={applyAiGeneratedFlow}
+          onToast={showToast}
+        />
       </div>
 
       {/* Clickable Validation Issues Bar */}
@@ -3086,7 +4258,6 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
             onNodeClick={(_e, node) => {
               setSelectedNodeId(node.id)
               setSelectedEdgeId(null)
-              setCustomFieldMode(false)
               if (rightTab === 'prompt') setRightTab('props')
             }}
             onNodeDoubleClick={(_e, node) => {
@@ -3376,88 +4547,308 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                 {/* FieldNode Inspector */}
                 {selectedNode?.type === 'fieldNode' && (() => {
                   const d = selectedNode.data as FieldData
-                  const isCustom = customFieldMode || (Boolean(d.fieldName) && !PRESET_FIELDS.some(f => f.value === d.fieldName))
+                  const selectableFieldTables = getSelectableFlowTables(dynamicTables, true)
+                  const resolvedDyn = resolveDynamicColumnMeta(d.fieldName, selectableFieldTables, d, relationTitlesByTableId)
+                  const inferredMode: 'table' | 'custom' =
+                    d.sourceTableId || resolvedDyn || !d.fieldName
+                      ? 'table'
+                      : 'custom'
+                  const sourceMode = fieldSourceModeOverride[selectedNode.id] || inferredMode
+
+                  const activeTableId =
+                    fieldTableDraftByNode[selectedNode.id] ||
+                    resolvedDyn?.table.id ||
+                    d.sourceTableId ||
+                    selectableFieldTables[0]?.id ||
+                    ''
+                  const activeTable = findSelectableFlowTable(activeTableId, dynamicTables) || selectableFieldTables[0]
+                  const activeColumnId =
+                    resolvedDyn?.table.id === activeTable?.id
+                      ? resolvedDyn?.column.id || ''
+                      : d.sourceTableId === activeTable?.id
+                      ? d.sourceColumnId || ''
+                      : ''
+                  const selectedColumn = activeTable?.columns?.find(c => c.id === activeColumnId)
+
+                  const switchFieldSourceMode = (targetMode: 'table' | 'custom') => {
+                    setFieldSourceModeOverride(prev => ({ ...prev, [selectedNode.id]: targetMode }))
+                    if (targetMode === 'table' && !resolvedDyn) {
+                      const preferredTable =
+                        selectableFieldTables.find(t => (t.columns?.length || 0) > 0) || selectableFieldTables[0]
+                      if (preferredTable) {
+                        setFieldTableDraftByNode(prev => ({ ...prev, [selectedNode.id]: preferredTable.id }))
+                        const firstCol = preferredTable.columns?.[0]
+                        if (firstCol) {
+                          // AI Sorusu (d.description) KESİNLİKLE değiştirilmez
+                          const patch = mapDynamicColumnToFlowField(preferredTable, firstCol, relationTitlesByTableId)
+                          updateSelectedNode({ ...patch })
+                        }
+                      }
+                    }
+                  }
 
                   return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                      <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                          <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>İstenecek Bilgi (Alan Adı)</label>
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 10,
+                          padding: 12,
+                          borderRadius: 12,
+                          background: 'var(--card-inner)',
+                          border: '1px solid var(--input-border)',
+                          boxShadow: 'var(--pc-neo-subcard)',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                          <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>
+                            İstenecek Bilgi (Alan Adı)
+                          </label>
                           <button
                             type="button"
-                            onClick={() => setCustomFieldMode(!isCustom)}
+                            onClick={loadDynamicTables}
+                            disabled={dynamicTablesLoading}
                             style={{
-                              background: 'none',
-                              border: 'none',
-                              color: '#2563eb',
-                              fontSize: 11,
+                              padding: '3px 8px',
+                              borderRadius: 7,
+                              border: '1px solid var(--input-border)',
+                              background: 'var(--pc-surface)',
+                              boxShadow: 'var(--pc-clay-btn)',
+                              color: 'var(--pc-tint-fg)',
+                              fontSize: 10,
                               fontWeight: 700,
-                              cursor: 'pointer',
-                              padding: 0,
+                              cursor: dynamicTablesLoading ? 'wait' : 'pointer',
                             }}
                           >
-                            {isCustom ? '📋 Hazır Listeden Seç' : '+ Özel Alan Yaz'}
+                            {dynamicTablesLoading ? 'Yenileniyor…' : '↻ Tabloları Yenile'}
                           </button>
                         </div>
 
-                        {isCustom ? (
-                          <input
-                            value={d.fieldName || ''}
-                            onChange={e => updateSelectedNode({ fieldName: e.target.value })}
-                            placeholder="Örn: tc_kimlik, dogum_tarihi, sigorta"
-                            style={inputStyle}
-                          />
-                        ) : (
-                          <select
-                            value={d.fieldName || ''}
-                            onChange={e => {
-                              const val = e.target.value
-                              const sel = PRESET_FIELDS.find(p => p.value === val)
-                              if (sel) {
-                                // Replace description automatically if empty or if it matches any preset's default question
-                                const isDefaultDesc = !d.description || PRESET_FIELDS.some(p => p.desc === d.description)
+                        {/* Kaynak Seçici: Veri Tablosu | Özel Alan */}
+                        <div
+                          role="tablist"
+                          aria-label="İstenecek bilgi kaynağı"
+                          style={{
+                            display: 'flex',
+                            gap: 4,
+                            padding: 3,
+                            borderRadius: 9,
+                            background: 'var(--input-bg)',
+                            border: '1px solid var(--input-border)',
+                            boxShadow: 'var(--pc-neo-inset)',
+                          }}
+                        >
+                          {([
+                            ['table', '📊 Veri Tablosu'],
+                            ['custom', '✍️ Özel Alan'],
+                          ] as const).map(([tabKey, tabLabel]) => {
+                            const active = sourceMode === tabKey
+                            return (
+                              <button
+                                key={tabKey}
+                                type="button"
+                                role="tab"
+                                aria-selected={active}
+                                onClick={() => switchFieldSourceMode(tabKey)}
+                                style={{
+                                  flex: 1,
+                                  padding: '6px 6px',
+                                  borderRadius: 7,
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  border: active ? '1.5px solid #1d4ed8' : '1px solid var(--input-border)',
+                                  background: active ? 'linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)' : 'var(--pc-surface)',
+                                  boxShadow: active ? 'var(--pc-clay-primary)' : 'var(--pc-clay-btn)',
+                                }}
+                              >
+                                <span style={{ color: active ? '#ffffff' : 'var(--foreground)' }}>{tabLabel}</span>
+                              </button>
+                            )
+                          })}
+                        </div>
+
+                        {sourceMode === 'table' && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {dynamicTables.length === 0 && (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: 8,
+                                  padding: '8px 10px',
+                                  borderRadius: 9,
+                                  background: 'var(--card-bg)',
+                                  border: '1px solid var(--input-border)',
+                                  fontSize: 11,
+                                  color: 'var(--foreground-2)',
+                                }}
+                              >
+                                <span>Henüz oluşturulmuş özel veri tablosu yok.</span>
+                                <InfoTooltip title="Veri Tablosu Sütunu Seçimi">
+                                  <strong>Veri Tabloları</strong> sekmesinden tablo ve sütun oluşturup <strong>↻ Tabloları Yenile</strong> düğmesine tıklayarak sütun seçebilir veya alttan Randevu Takvimi tarih/saat alanlarını kullanabilirsiniz.
+                                </InfoTooltip>
+                              </div>
+                            )}
+                            <div>
+                              <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>
+                                Veri Tablosu
+                              </label>
+                              <select
+                                aria-label="Veri Tablosu"
+                                value={activeTable?.id || ''}
+                                onChange={e => {
+                                  const nextTableId = e.target.value
+                                  setFieldTableDraftByNode(prev => ({ ...prev, [selectedNode.id]: nextTableId }))
+                                  const nextTable = findSelectableFlowTable(nextTableId, dynamicTables)
+                                  if (!nextTable) return
+                                  const firstCol = nextTable.columns?.[0]
+                                  if (firstCol) {
+                                    // AI Sorusu (d.description) KESİNLİKLE dokunulmadan korunur
+                                    const patch = mapDynamicColumnToFlowField(nextTable, firstCol, relationTitlesByTableId)
+                                    updateSelectedNode({ ...patch })
+                                  } else {
+                                    updateSelectedNode({
+                                      fieldName: '',
+                                      label: `${nextTable.name} · Sütun Seçin`,
+                                      sourceTableId: nextTable.id,
+                                      sourceTableSlug: nextTable.slug,
+                                      sourceTableName: nextTable.name,
+                                      sourceColumnId: undefined,
+                                      sourceColumnSlug: undefined,
+                                      sourceColumnName: undefined,
+                                      sourceColumnType: undefined,
+                                    })
+                                  }
+                                }}
+                                style={inputStyle}
+                              >
+                                {dynamicTables.length > 0 && (
+                                  <optgroup label="Veri Tabloları">
+                                    {dynamicTables.map(t => (
+                                      <option key={t.id} value={t.id}>
+                                        {formatDynamicTableIcon(t.icon)} {t.name}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                <optgroup label="Randevu Takvimi">
+                                  <option value={VIRTUAL_APPOINTMENT_TABLE_ID}>📅 Randevu Takvimi</option>
+                                </optgroup>
+                              </select>
+                            </div>
+
+                            <div>
+                              <label style={{ fontSize: 10, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 4 }}>
+                                Tablo Sütunu (Alan Adı)
+                              </label>
+                              {(activeTable?.columns?.length || 0) === 0 ? (
+                                <div
+                                  style={{
+                                    padding: '8px 10px',
+                                    borderRadius: 8,
+                                    background: 'var(--card-bg)',
+                                    border: '1px solid var(--input-border)',
+                                    fontSize: 11,
+                                    color: 'var(--foreground-3)',
+                                  }}
+                                >
+                                  Bu tabloda henüz sütun tanımlanmamış.
+                                </div>
+                              ) : (
+                                <select
+                                  aria-label="Tablo Sütunu"
+                                  value={activeColumnId}
+                                  onChange={e => {
+                                    if (!activeTable) return
+                                    const col = activeTable.columns?.find(c => c.id === e.target.value)
+                                    if (!col) return
+                                    // AI Sorusu (d.description) KESİNLİKLE dokunulmadan korunur
+                                    const patch = mapDynamicColumnToFlowField(activeTable, col, relationTitlesByTableId)
+                                    updateSelectedNode({ ...patch })
+                                  }}
+                                  style={inputStyle}
+                                >
+                                  <option value="">Sütun seçin…</option>
+                                  {(activeTable?.columns || []).map(col => (
+                                    <option key={col.id} value={col.id}>
+                                      {col.name} ({FIELD_TYPE_META[col.fieldType]?.label || 'Alan'})
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+
+                            {activeTable && selectedColumn && (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: 6,
+                                  flexWrap: 'wrap',
+                                  padding: '6px 10px',
+                                  borderRadius: 8,
+                                  background: 'var(--pc-tint)',
+                                  color: 'var(--pc-tint-fg)',
+                                  border: '1px solid #93c5fd',
+                                  boxShadow: 'var(--pc-clay-pale)',
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                <span>
+                                  📊 {formatDynamicColumnDisplayLabel(activeTable.name, selectedColumn.name)}
+                                </span>
+                                <span>
+                                  {FIELD_TYPE_META[selectedColumn.fieldType]?.label || 'Metin'}
+                                  {selectedColumn.fieldType === 'relation' && resolvedDyn?.options?.length
+                                    ? ` (${resolvedDyn.options.length} kayıt)`
+                                    : ''}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {sourceMode === 'custom' && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <input
+                              value={d.sourceTableId ? '' : (d.fieldName || '')}
+                              onChange={e =>
                                 updateSelectedNode({
-                                  fieldName: sel.value,
-                                  label: sel.label,
-                                  fieldType: sel.type,
-                                  description: isDefaultDesc ? sel.desc : d.description,
+                                  fieldName: e.target.value,
+                                  label: undefined,
+                                  ...clearDynamicSourceMeta(),
                                 })
-                              } else {
-                                updateSelectedNode({ fieldName: val })
                               }
-                            }}
-                            style={inputStyle}
-                          >
-                            <option value="">Bir alan seçin...</option>
-                            {PRESET_FIELDS
-                              .filter(f => f.group === (direction === 'outbound' ? 'outbound' : 'inbound') || f.value === d.fieldName)
-                              .map(f => (
-                                <option key={f.value} value={f.value}>{f.label}</option>
-                              ))}
-                          </select>
+                              placeholder="Örn: tc_kimlik, dogum_tarihi, ozel_not"
+                              style={inputStyle}
+                            />
+                            <input
+                              value={d.sourceTableId ? '' : (d.label && d.label !== d.fieldName ? d.label : '')}
+                              onChange={e =>
+                                updateSelectedNode({
+                                  label: e.target.value || d.fieldName || 'Bilgi Al',
+                                })
+                              }
+                              placeholder="Görünür Başlık (Opsiyonel, örn: T.C. Kimlik Numarası)"
+                              style={inputStyle}
+                            />
+                          </div>
                         )}
                       </div>
 
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                          <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>AI Sorusu (Hastaya Sorulacak Cümle)</label>
-                          {PRESET_FIELDS.some(p => p.value === d.fieldName) && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const preset = PRESET_FIELDS.find(p => p.value === d.fieldName)
-                                if (preset) updateSelectedNode({ description: preset.desc })
-                              }}
-                              style={{ background: 'none', border: 'none', color: '#2563eb', fontSize: 10, fontWeight: 700, cursor: 'pointer', padding: 0 }}
-                            >
-                              Varsayılan Soruyu Yükle
-                            </button>
-                          )}
+                          <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>AI Sorusu (Sorulacak Cümle)</label>
                         </div>
                         <textarea
                           value={d.description || ''}
                           onChange={e => updateSelectedNode({ description: e.target.value })}
-                          placeholder="Adınızı ve soyadınızı öğrenebilir miyim?"
+                          placeholder="Sorulacak cümleyi kendi ifadenizle yazın..."
                           rows={3}
                           style={{ ...inputStyle, resize: 'vertical' }}
                         />
@@ -3465,8 +4856,12 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
 
                       <div>
                         <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 6 }}>Veri Tipi ve Doğrulama</label>
-                        <select value={d.fieldType || 'text'} onChange={e => updateSelectedNode({ fieldType: e.target.value as any })} style={inputStyle}>
+                        <select value={d.fieldType || 'text'} onChange={e => updateSelectedNode({ fieldType: e.target.value as FlowFieldType })} style={inputStyle}>
                           <option value="text">Metin (Serbest Yanıt)</option>
+                          <option value="number">Sayı / Puan / Tutar</option>
+                          <option value="boolean">Evet / Hayır (Onay)</option>
+                          <option value="phone">Telefon Numarası</option>
+                          <option value="email">E-Posta Adresi</option>
                           <option value="date">Tarih (GG.AA.YYYY)</option>
                           <option value="time">Saat (SS:DD)</option>
                           <option value="enum">Seçenekli Liste</option>
@@ -3480,7 +4875,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                           <input
                             value={d.enumValues ? d.enumValues.join(', ') : ''}
                             onChange={e => updateSelectedNode({ enumValues: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
-                            placeholder="Örn: muayene, kanal tedavisi, temizlik"
+                            placeholder="Örn: danışmanlık, bilgi talebi, randevu"
                             style={inputStyle}
                           />
                         </div>
@@ -3518,7 +4913,19 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                   const d = selectedNode.data as ConditionData
                   return (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                      <ConditionRulesEditor data={d} update={updateSelectedNode} inputStyle={inputStyle} customFieldNames={customCanvasFieldNames} direction={direction} />
+                      <ConditionRulesEditor
+                        key={selectedNode.id}
+                        data={d}
+                        update={updateSelectedNode}
+                        inputStyle={inputStyle}
+                        customFieldNames={customCanvasFieldNames}
+                        canvasFieldNodes={canvasFieldNodes}
+                        dynamicTables={dynamicTables}
+                        relationTitlesByTableId={relationTitlesByTableId}
+                        fieldLabelMap={fieldLabelMap}
+                        booleanFieldSet={booleanFieldSet}
+                        direction={direction}
+                      />
                     </div>
                   )
                 })()}
@@ -3546,6 +4953,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                           <option value="">Bir işlem seçin...</option>
                           <option value="save_appointment_pending">📝 Randevu Talebi Oluştur (Onay Bekler)</option>
                           <option value="save_patient_note">🗒️ Hastadan Not Al (Bankoya İlet)</option>
+                          <option value="save_record">💾 Veri Tablosuna Kaydet</option>
                           <option value="set_variable">{ACTION_LABELS.set_variable}</option>
                           <option value="send_sms">{ACTION_LABELS.send_sms}</option>
                           <option value="wait_reprompt">{ACTION_LABELS.wait_reprompt}</option>
@@ -3557,7 +4965,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                           ) : (
                             <>
                               <option value="end_call">📴 Bilgi Ver ve Telefon Hattını Kapat (Santral)</option>
-                              <option value="transfer_call">📞 Santrale / Dahiliye Aktar (Asterisk)</option>
+                              <option value="transfer_call">📞 Santrale / Dahiliye Aktar</option>
                               <option value="send_wa_location">📍 Arayan Numaraya WhatsApp Konum Gönder (Santral)</option>
                             </>
                           )}
@@ -3565,6 +4973,51 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                           {d.action === 'notBirak' && <option value="notBirak">🗒️ Anket / Hasta Notu Kaydet</option>}
                         </select>
                       </div>
+
+                      {d.action === 'save_record' && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 6,
+                            padding: 12,
+                            borderRadius: 12,
+                            background: 'var(--card-inner)',
+                            border: '1px solid var(--input-border)',
+                            boxShadow: 'var(--pc-neo-subcard)',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                            <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)' }}>
+                              Hedef Veri Tablosu
+                            </label>
+                            <InfoTooltip title="Veri Tablosuna Kayıt">
+                              Görüşme boyunca toplanan tablo sütunları seçilen (veya sorulan sütunların ait olduğu) veri tablosuna kaydedilir; benzersiz telefon sütunu eşleşirse mevcut kayıt güncellenir.
+                            </InfoTooltip>
+                          </div>
+                          <select
+                            value={d.targetTableId || ''}
+                            onChange={e => {
+                              const tblId = e.target.value
+                              const tbl = dynamicTables.find(t => t.id === tblId)
+                              updateSelectedNode({
+                                targetTableId: tblId || undefined,
+                                targetTableSlug: tbl?.slug || undefined,
+                                targetTableName: tbl?.name || undefined,
+                                label: tbl ? `💾 ${tbl.name} Tablosuna Kaydet` : ACTION_LABELS.save_record,
+                              })
+                            }}
+                            style={inputStyle}
+                          >
+                            <option value="">Otomatik (Sorulan Sütunların Tablosuna Kaydet)</option>
+                            {dynamicTables.map(t => (
+                              <option key={t.id} value={t.id}>
+                                {formatDynamicTableIcon(t.icon)} {t.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
 
                       <div>
                         <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-2)', display: 'block', marginBottom: 6 }}>
@@ -3610,7 +5063,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                             <input
                               value={(d.variableValue as string) || ''}
                               onChange={e => updateSelectedNode({ variableValue: e.target.value })}
-                              placeholder="Örn: acil_hasta"
+                              placeholder="Örn: acil_talep"
                               style={inputStyle}
                             />
                           </div>
@@ -3817,7 +5270,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 11 }}>
-                    <span style={{ color: 'var(--foreground-2)', fontWeight: 600 }}>Arayan Hasta Durumu:</span>
+                    <span style={{ color: 'var(--foreground-2)', fontWeight: 600 }}>Arayan {clinicProfile.entitySingular} Durumu:</span>
                     <div style={{ display: 'flex', gap: 4 }}>
                       <button
                         type="button"
@@ -3834,7 +5287,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                           color: simFields.kayitli === 'true' ? '#ffffff' : 'var(--foreground)',
                         }}
                       >
-                        <span style={{ color: simFields.kayitli === 'true' ? '#ffffff' : 'inherit' }}>✓ Kayıtlı Hasta</span>
+                        <span style={{ color: simFields.kayitli === 'true' ? '#ffffff' : 'inherit' }}>✓ Kayıtlı {clinicProfile.entitySingular}</span>
                       </button>
                       <button
                         type="button"
@@ -3851,7 +5304,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                           color: simFields.kayitli === 'false' ? '#ffffff' : 'var(--foreground)',
                         }}
                       >
-                        <span style={{ color: simFields.kayitli === 'false' ? '#ffffff' : 'inherit' }}>👤 Yeni Hasta</span>
+                        <span style={{ color: simFields.kayitli === 'false' ? '#ffffff' : 'inherit' }}>👤 Yeni {clinicProfile.entitySingular}</span>
                       </button>
                     </div>
                   </div>
@@ -3883,10 +5336,15 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
 
                 {simMode === 'voice' && (
                   <SimulatorVoicePanel
-                    direction={direction === 'outbound' ? 'outbound' : 'inbound'}
+                    direction={direction}
                     nodes={nodes}
                     edges={edges}
-                    callerProfile={{ kayitli: simFields.kayitli === 'true' ? 'true' : 'false' }}
+                    callerProfile={{
+                      kayitli: simFields.kayitli === 'true' ? 'true' : 'false',
+                      ...(primaryExistsKey
+                        ? { [primaryExistsKey]: simFields.kayitli === 'true' ? 'true' : 'false' }
+                        : {}),
+                    }}
                     onTranscript={e => setSimLog(prev => [...prev, { role: e.role === 'assistant' ? 'ai' : 'user', text: e.text }])}
                     onNodeVisited={id => {
                       setSimActive(true)
@@ -3950,13 +5408,20 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
                 {/* Yazılı mod: seçili adım için mesaj girişi */}
                 {simMode === 'text' && (() => {
                   const d = (selectedSimNode?.data || {}) as FieldData
-                  const preset = PRESET_FIELDS.find(p => p.value === d.fieldName)
+                  const legacySamples = LEGACY_FIELD_LABELS[d.fieldName]?.samples
+                  const dynSamples = resolveDynamicColumnMeta(d.fieldName, getSelectableFlowTables(dynamicTables, true), d, relationTitlesByTableId)?.samples
                   const samples =
                     selectedSimNode?.type === 'fieldNode'
                       ? d.fieldType === 'enum' && d.enumValues?.length
                         ? d.enumValues
-                        : preset?.samples || ['Örnek Yanıt']
-                      : ['Yarın saat 14:30 için diş ağrısı randevusu almak istiyorum', 'Muayene ücretiniz ne kadar?', 'Konum gönderebilir misiniz?']
+                        : dynSamples?.length
+                        ? dynSamples
+                        : d.fieldType === 'boolean'
+                        ? ['Evet', 'Hayır']
+                        : d.fieldType === 'number'
+                        ? ['10', '8', '5']
+                        : legacySamples || ['Örnek Yanıt']
+                      : [clinicProfile.sampleCallerPhrase, 'Ücret ve koşullar hakkında bilgi alabilir miyim?', 'Konum gönderebilir misiniz?']
 
                   return (
                     <div style={{ padding: 12, background: 'var(--card-inner)', border: '1.5px solid #2563eb', borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -4080,7 +5545,7 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
 
             {/* ── TAB 3: AI SYSTEM PROMPT PREVIEW ── */}
             {rightTab === 'prompt' && (() => {
-              const previewText = buildPromptPreview(nodes, edges)
+              const previewText = buildPromptPreview(nodes, edges, fieldLabelMap)
               return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10, flex: 1 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -4178,6 +5643,17 @@ export default function FlowBuilder({ direction = 'inbound' }: { direction?: 'in
           </button>
         )}
       </div>
+
+      <ConfirmModal
+        isOpen={clearConfirmOpen}
+        title="Akışı Temizle"
+        message={`${FLOW_DIRECTION_LABELS[direction]} kanalındaki tüm soru, koşul ve işlem adımları temizlenerek yalnızca başlangıç ve bitiş adımı bırakılacaktır. İsterseniz işlem sonrasında 'Geri' butonuyla önceki akışı geri getirebilirsiniz.`}
+        confirmText="Akışı Temizle"
+        cancelText="Vazgeç"
+        variant="danger"
+        onConfirm={() => void handleClearFlow()}
+        onClose={() => setClearConfirmOpen(false)}
+      />
     </div>
   )
 }

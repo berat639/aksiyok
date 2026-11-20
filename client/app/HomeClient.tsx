@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ThemeToggle } from './theme-provider'
-import { AiLiveSession, type LiveChatCallbacks, type SessionConfig } from '@/lib/ai-live'
+import { AiLiveSession, hasSpokenFarewell, type LiveChatCallbacks, type SessionConfig } from '@/lib/ai-live'
 import { AudioStreamPlayer, MicrophoneCapture } from '@/lib/audio'
 
 type VoiceStatus = 'idle' | 'connecting' | 'listening' | 'speaking' | 'thinking' | 'error'
@@ -36,37 +36,6 @@ const STATUS_ICON: Record<VoiceStatus, string> = {
 
 type TranscriptEntry = { id: string; role: 'user' | 'model'; text: string }
 
-function isWebConversationFarewell(text: string, customCloseMessage?: string): boolean {
-  const normalize = (value: string) =>
-    value
-      .toLocaleLowerCase('tr-TR')
-      .replace(/[.,!?;:()[\]{}"']/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-
-  const normalized = normalize(text)
-  if (!normalized) return false
-
-  if (customCloseMessage) {
-    const customNorm = normalize(customCloseMessage)
-    if (customNorm.length >= 10 && normalized.includes(customNorm)) {
-      return true
-    }
-  }
-
-  return [
-    /\bhoşça\s*kalın\b/,
-    /\bhoşçakalın\b/,
-    /\bgüle\s*güle\b/,
-    /\biyi\s+(?:günler|akşamlar|geceler)\b/,
-    /\bsağlıklı\s+günler\b/,
-    /\bkendinize\s+iyi\s+bakın\b/,
-    /\bgörüş(?:meyi|memizi)\s+sonlandır/,
-    /\bbaşka\s+bir\s+zaman\s+(?:tekrar\s+)?görüş/,
-    /\bgörüşmek\s+dileğiyle\b/,
-  ].some(pattern => pattern.test(normalized))
-}
-
 export default function Home() {
   const [status, setStatus] = useState<VoiceStatus>('idle')
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
@@ -89,6 +58,7 @@ export default function Home() {
   const webCloseFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const webWarningPendingRef = useRef(false)
   const webClosingRef = useRef(false)
+  const userInteractedRef = useRef(false)
   const lastWebSpeechAtRef = useRef(0)
   const isActive = status !== 'idle' && status !== 'error'
   const isTextAssistantOpen = mode === 'text' && isActive
@@ -126,6 +96,7 @@ export default function Home() {
       farewellTimerRef.current = null
     }
     clearWebTimers()
+    userInteractedRef.current = false
     micRef.current?.stop()
     micRef.current = null
     sessionRef.current?.disconnect()
@@ -137,6 +108,11 @@ export default function Home() {
 
   const stopAfterPlayback = useCallback(() => {
     webClosingRef.current = true
+    clearWebSilenceTimers()
+    if (webCloseFallbackTimerRef.current) {
+      clearTimeout(webCloseFallbackTimerRef.current)
+      webCloseFallbackTimerRef.current = null
+    }
     micRef.current?.stop()
     micRef.current = null
     if (farewellTimerRef.current) {
@@ -151,7 +127,7 @@ export default function Home() {
     void player.waitForDrain(15000).then(() => {
       if (webClosingRef.current) stop()
     })
-  }, [stop])
+  }, [clearWebSilenceTimers, stop])
 
   const scheduleWebSilenceTimer = useCallback((warningSeconds: number, closeSeconds: number) => {
     if (mode !== 'audio' || !sessionRef.current || webClosingRef.current) return
@@ -219,6 +195,7 @@ export default function Home() {
     const now = Date.now()
     if (now - lastWebSpeechAtRef.current < 250) return
     lastWebSpeechAtRef.current = now
+    userInteractedRef.current = true
     if (webSilenceCloseTimerRef.current) {
       clearTimeout(webSilenceCloseTimerRef.current)
       webSilenceCloseTimerRef.current = null
@@ -248,28 +225,40 @@ export default function Home() {
     setStatus('connecting')
     setErrorMsg('')
     setTranscript([])
+    userInteractedRef.current = false
 
     // Create and resume the actual playback context while this click still has
     // browser user-activation. Network setup below contains awaits.
     const player = new AudioStreamPlayer(24000)
     playerRef.current = player
 
-    let currentApiKey = apiKey
-    if (!currentApiKey) {
+    let currentApiKey = mode === 'text' ? '__server__' : ''
+    if (mode === 'audio') {
       try {
-        const r = await fetch('/api/direct-session')
-        const d = await r.json()
-        if (d.apiKey) {
-          currentApiKey = d.apiKey
-          setApiKey(d.apiKey)
+        const r = await fetch('/api/direct-session', { method: 'POST', cache: 'no-store' })
+        const d = await r.json().catch(() => ({}))
+        if (!r.ok) {
+          throw new Error(
+            typeof d?.error === 'string' && d.error.trim()
+              ? d.error
+              : r.status === 403
+                ? 'Deneme süreniz veya paket yetkiniz sona erdi. Devam etmek için yönetici panelinden Pro pakete geçebilirsiniz.'
+                : r.status === 429
+                  ? 'Günlük yapay zeka görüşme kotanız doldu. Lütfen daha sonra tekrar deneyin veya paketinizi yükseltin.'
+                  : 'Sesli oturum başlatılamadı.',
+          )
+        }
+        if (d.apiKey || d.token) {
+          currentApiKey = d.apiKey || d.token
+          setApiKey(currentApiKey)
         } else {
-          throw new Error('API Key alınamadı')
+          throw new Error('Geçici sesli oturum anahtarı alınamadı.')
         }
       } catch (err) {
         player.stop()
         if (playerRef.current === player) playerRef.current = null
         setStatus('error')
-        setErrorMsg('Bağlantı kurulamadı (API Key hatası).')
+        setErrorMsg(err instanceof Error ? err.message : 'Bağlantı kurulamadı.')
         return
       }
     }
@@ -288,7 +277,7 @@ export default function Home() {
       player.stop()
       playerRef.current = null
       setStatus('error')
-      setErrorMsg('API key veya oturum ayarları bulunamadı. Server ayarlarını kontrol edin.')
+      setErrorMsg('Asistan oturum ayarları bulunamadı. Lütfen sayfayı yenileyip tekrar deneyin.')
       return
     }
 
@@ -327,20 +316,52 @@ export default function Home() {
         textBufferRef.current += text
         // console.log('[AI Text]', text)
       },
+      onUserText: (text) => {
+        if (text.trim()) {
+          userInteractedRef.current = true
+        }
+      },
+      onHangup: ({ alreadySpokeFarewell }) => {
+        webClosingRef.current = true
+        clearWebSilenceTimers()
+        // Görüşme sonlandığı an mikrofonu kapat: tarayıcı mikrofon izni/ışığı söner ve boşa ses token'ı gitmez
+        micRef.current?.stop()
+        micRef.current = null
+        if (webCloseFallbackTimerRef.current) {
+          clearTimeout(webCloseFallbackTimerRef.current)
+          webCloseFallbackTimerRef.current = null
+        }
+        if (alreadySpokeFarewell) {
+          // Asistan veda cümlesini zaten söyledi; yoldaki son ses paketleri tamamlanınca oturumu kapat
+          webCloseFallbackTimerRef.current = setTimeout(() => {
+            if (webClosingRef.current) stopAfterPlayback()
+          }, 350)
+        } else {
+          // Asistan son veda cümlesini söylediğinde onTurnComplete -> stopAfterPlayback çalışacak; sessiz kalırsa emniyet süresi
+          webCloseFallbackTimerRef.current = setTimeout(() => {
+            if (webClosingRef.current) stopAfterPlayback()
+          }, 8000)
+        }
+      },
       onTurnComplete: () => {
         const modelText = textBufferRef.current.trim()
         if (modelText.length > 0) {
           addTranscript('model', modelText)
           textBufferRef.current = ''
-          if (webClosingRef.current || (!session.interactionInProgress && isWebConversationFarewell(modelText, liveConfig.offTopicCloseMessage))) {
+          if (
+            webClosingRef.current ||
+            (userInteractedRef.current &&
+              !session.hasPendingToolCalls &&
+              hasSpokenFarewell(modelText, liveConfig.offTopicCloseMessage))
+          ) {
             stopAfterPlayback()
             return
           }
-        } else if (webClosingRef.current) {
+        } else if (webClosingRef.current && !session.hasPendingToolCalls) {
           stopAfterPlayback()
           return
         }
-        if (session.interactionInProgress) {
+        if (session.hasPendingToolCalls || session.interactionInProgress) {
           setStatus('thinking')
           return
         }
@@ -377,6 +398,7 @@ export default function Home() {
         playerRef.current?.clear()
       },
       onInteractionStatus: (interactionStatus) => {
+        if (webClosingRef.current) return
         if (interactionStatus === 'IN_PROGRESS') {
           clearWebSilenceTimers()
           setStatus('thinking')
@@ -704,13 +726,17 @@ export default function Home() {
           {STATUS_LABEL[status]}
         </div>
         {status === 'error' && errorMsg && (
-          <div style={{
-            fontSize: '0.8rem',
-            color: '#f87171',
+          <div role="alert" style={{
+            fontSize: '0.84rem',
+            color: 'var(--danger)',
+            background: 'var(--flow-danger-bg)',
+            border: '1px solid var(--danger)',
+            borderRadius: 10,
             textAlign: 'center',
             maxWidth: '100%',
-            lineHeight: 1.45,
-            padding: '0 0.5rem',
+            lineHeight: 1.5,
+            padding: '10px 14px',
+            fontWeight: 600,
           }}>
             {errorMsg}
           </div>
@@ -722,6 +748,7 @@ export default function Home() {
             onSubmit={(e) => {
               e.preventDefault()
               if (!textInput.trim() || !sessionRef.current?.connected) return
+              userInteractedRef.current = true
               sessionRef.current.sendText(textInput.trim())
               addTranscript('user', textInput.trim())
               setTextInput('')

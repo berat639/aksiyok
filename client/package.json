@@ -13,14 +13,9 @@
     "@cornerstonejs/metadata": "^5.10.7",
     "@cornerstonejs/tools": "^5.10.7",
     "@dagrejs/dagre": "^3.1.1",
-    "@fullcalendar/core": "^6.1.15",
-    "@fullcalendar/daygrid": "^6.1.15",
-    "@fullcalendar/react": "^6.1.15",
-    "@fullcalendar/resource": "^6.1.15",
-    "@fullcalendar/resource-timegrid": "^6.1.15",
-    "@fullcalendar/timegrid": "^6.1.15",
     "@google/genai": "2.30.0",
     "@kitware/vtk.js": "36.4.1",
+    "@tanstack/react-table": "^9.3.1",
     "@xyflow/react": "^12.11.2",
     "daikon": "^1.2.46",
     "date-fns": "^4.4.0",
@@ -35,7 +30,6 @@
     "react-dom": "^19.0.0",
     "react-hot-toast": "^2.6.0",
     "react-imask": "^7.6.1",
-    "react-odontogram": "^0.5.6",
     "recharts": "^3.10.1",
     "three": "^0.185.1",
     "xlsx": "^0.18.5"
@@ -47,6 +41,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/three": "^0.185.4",
+    "happy-dom": "^21.0.4",
     "typescript": "^5.0.0",
     "vitest": "^5.0.5"
   }

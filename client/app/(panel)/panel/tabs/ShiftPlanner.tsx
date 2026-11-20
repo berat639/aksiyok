@@ -754,7 +754,7 @@ export default function ShiftPlanner({
   const [clinicHoursSaving, setClinicHoursSaving] = useState(false)
 
   useEffect(() => {
-    fetch('/api/dental/working-hours', { credentials: 'include' })
+    fetch('/api/calendar/working-hours', { credentials: 'include' })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.startTime) setClinicStartTime(data.startTime)
@@ -786,7 +786,7 @@ export default function ShiftPlanner({
       const data = await response.json().catch(() => null)
       const resolved = data?.workingHours || data
       if (!response.ok || !resolved) {
-        setUndoError(data?.error || 'Klinik genel mesai saatleri kaydedilemedi.')
+        setUndoError(data?.error || 'İşletme genel mesai saatleri kaydedilemedi.')
         return
       }
       if (resolved.startTime) setClinicStartTime(resolved.startTime)
@@ -794,10 +794,10 @@ export default function ShiftPlanner({
       if (Array.isArray(resolved.workingDays)) setClinicWorkingDays(resolved.workingDays)
       window.dispatchEvent(new CustomEvent('clinicWorkingHoursUpdated', { detail: resolved }))
       setSuccessNotice(
-        `Klinik genel mesai saatleri ${resolved.startTime} – ${resolved.endTime}${resolved.isOvernight ? ' (Gece / Ertesi Gün)' : ''} olarak güncellendi. Takvim saat aralığı otomatik eşitlendi.`
+        `İşletme genel mesai saatleri ${resolved.startTime} – ${resolved.endTime}${resolved.isOvernight ? ' (Gece / Ertesi Gün)' : ''} olarak güncellendi. Takvim saat aralığı otomatik eşitlendi.`
       )
     } catch {
-      setUndoError('Klinik genel mesai saatleri kaydedilirken bağlantı hatası oluştu.')
+      setUndoError('İşletme genel mesai saatleri kaydedilirken bağlantı hatası oluştu.')
     } finally {
       setClinicHoursSaving(false)
     }
@@ -814,7 +814,7 @@ export default function ShiftPlanner({
     const startDate = view === 'day' ? selectedDate : view === 'week' ? monday(selectedDate) : monthStart(selectedDate)
     const endDate = view === 'day' ? selectedDate : view === 'week' ? addDays(startDate, 6) : monthEnd(selectedDate)
     const loadLeaves = () => {
-      fetch(`/api/dental/doctors/leaves?startDate=${startDate}&endDate=${endDate}`, { credentials: 'include' })
+      fetch(`/api/calendar/employees/leaves?startDate=${startDate}&endDate=${endDate}`, { credentials: 'include' })
         .then((r) => (r.ok ? r.json() : []))
         .then((data) => setLeaves(Array.isArray(data) ? data : []))
         .catch(() => {})
@@ -828,7 +828,12 @@ export default function ShiftPlanner({
     () =>
       users
         .filter((person) => person.active !== false)
-        .filter((person) => role === 'all' || person.role === role)
+        .filter((person) => {
+          if (role === 'all') return true
+          if (role === 'calisan') return person.role === 'calisan' || person.role === 'hekim'
+          if (role === 'sekreter') return person.role === 'sekreter' || person.role === 'host'
+          return person.role === role
+        })
         .filter((person) => person.name.toLocaleLowerCase('tr-TR').includes(search.toLocaleLowerCase('tr-TR'))),
     [users, role, search]
   )
@@ -891,21 +896,21 @@ export default function ShiftPlanner({
     if (!canManageLeaves || !leaveId) return
     setUndoError('')
     try {
-      const res = await fetch(`/api/dental/doctors/leaves/${leaveId}`, {
+      const res = await fetch(`/api/calendar/employees/leaves/${leaveId}`, {
         method: 'DELETE',
         credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        setUndoError(err.error || 'Hekim izni kaldırılamadı.')
+        setUndoError(err.error || 'Çalışan izni kaldırılamadı.')
         return
       }
       setLeaves((prev) => prev.filter((item) => item.id !== leaveId))
-      setSuccessNotice('Hekim izni kaldırıldı ve çalışma saatleri yeniden açıldı.')
+      setSuccessNotice('Çalışan izni kaldırıldı ve çalışma saatleri yeniden açıldı.')
       window.dispatchEvent(new CustomEvent('doctorLeavesUpdated'))
       onChanged()
     } catch {
-      setUndoError('Hekim izni kaldırılırken bağlantı hatası oluştu.')
+      setUndoError('Çalışan izni kaldırılırken bağlantı hatası oluştu.')
     }
   }
 
@@ -998,7 +1003,7 @@ export default function ShiftPlanner({
             </div>
             <div>
               <strong style={{ fontSize: 13.5, color: 'var(--foreground)', display: 'block' }}>
-                Klinik Genel Mesai (Takvim Saat Aralığı & Açık Günler)
+                İşletme Genel Mesai (Takvim Saat Aralığı & Açık Günler)
               </strong>
               <span style={{ fontSize: 11.5, color: 'var(--foreground-2)' }}>
                 İnteraktif takvim saat cetveli ve çalışma günleri bu aralığa göre otomatik ayarlanır.
@@ -1218,8 +1223,9 @@ export default function ShiftPlanner({
         </label>
         <select value={role} onChange={(event) => setRole(event.target.value)} style={{ ...neoInput, width: 'auto', minWidth: 160 }}>
           <option value="all">Tüm Roller</option>
-          <option value="hekim">Hekimler</option>
-          <option value="host">Kayıt / Resepsiyon</option>
+          <option value="calisan">Çalışanlar</option>
+          <option value="sekreter">Sekreter / Kayıt Personeli</option>
+          <option value="asistan">Asistanlar</option>
           <option value="yonetici">Yöneticiler</option>
         </select>
         <span style={{ fontSize: 11.5, color: 'var(--foreground-3)', fontWeight: 600 }}>
@@ -1502,8 +1508,8 @@ function DayView({
                 <span
                   role="button"
                   tabIndex={0}
-                  title="Hekim iznini kaldır"
-                  aria-label="Hekim iznini kaldır"
+                  title="Çalışan iznini kaldır"
+                  aria-label="Çalışan iznini kaldır"
                   onClick={(e) => {
                     e.stopPropagation()
                     onDeleteLeave(leave.id)
@@ -2286,10 +2292,10 @@ function ShiftEditorSidebar({
               <div style={{ display: 'flex', gap: 6 }}>
                 <button
                   type="button"
-                  onClick={() => setUserIds(users.filter((u) => u.role === 'hekim').map((u) => u.id))}
+                  onClick={() => setUserIds(users.filter((u) => u.role === 'calisan' || u.role === 'hekim').map((u) => u.id))}
                   style={{ ...claySecondaryButton, minHeight: 28, padding: '0 9px', fontSize: 11 }}
                 >
-                  Hekimler
+                  Çalışanlar
                 </button>
                 <button
                   type="button"

@@ -2,13 +2,20 @@ import { Elysia, t } from 'elysia'
 import { authenticateRequest } from '../middleware/auth'
 import {
   ClinicProvisioningError,
+  addPlatformClinicDomain,
   assignPlatformClinicSeedAdmin,
   createPlatformClinic,
   listPlatformClinicAdmins,
   listPlatformClinics,
+  listPlatformUpgradeRequests,
+  removePlatformClinicDomain,
   setPlatformClinicActive,
   setPlatformClinicAdminActive,
+  updatePlatformClinic,
+  updatePlatformClinicPlan,
+  updatePlatformUpgradeRequest,
 } from '../db/repositories/platform-clinics'
+import { getClinicEntitlements } from '../services/subscriptions'
 import { createStaffInvitation, revokeStaffInvitation } from '../services/staff-invitations'
 import { hasMatchingRequestOrigin, isPlatformAdminRequest } from '../platform/access'
 import { activateWhatsApp, clearWhatsAppSetup, configureWhatsAppSetup, prepareWhatsAppQr, publicWhatsAppConfig, refreshWhatsAppConnection } from '../db/repositories/whatsapp'
@@ -157,6 +164,10 @@ export const platformPlugin = new Elysia({ prefix: '/api/platform' })
     }
     return listPlatformClinics()
   })
+  .get('/tenants', async ({ cookie, request, set }) => {
+    if (!(await requirePlatformAdmin(cookie, request, set))) return { error: 'Bu işlem yalnızca platform yöneticisine açıktır.' }
+    return listPlatformClinics()
+  })
   .post('/clinics', async ({ body, cookie, request, set }) => {
     if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
       set.status = 404
@@ -179,16 +190,133 @@ export const platformPlugin = new Elysia({ prefix: '/api/platform' })
         set.status = error.status
         return { error: error.message }
       }
-      console.error('[Platform] Klinik oluşturulamadı:', error)
+      console.error('[Platform] İşletme oluşturulamadı:', error)
       set.status = 500
-      return { error: 'Klinik oluşturulamadı.' }
+      return { error: 'İşletme oluşturulamadı.' }
     }
   }, {
     body: t.Object({
       name: t.String({ minLength: 2, maxLength: 120 }),
       hostname: t.String({ minLength: 3, maxLength: 253 }),
       timezone: t.Optional(t.String({ minLength: 3, maxLength: 80 })),
+      businessTemplate: t.Optional(t.Union([t.Literal('general'), t.Literal('dental_clinic')])),
+      sourceClinicId: t.Optional(t.String({ format: 'uuid' })),
     }),
+  })
+  .post('/tenants', async ({ body, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca platform yöneticisine açıktır.' }
+    try {
+      return await createPlatformClinic(body, user.id)
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 500
+      return { error: 'İşletme oluşturulamadı.' }
+    }
+  }, {
+    body: t.Object({
+      name: t.String({ minLength: 2, maxLength: 120 }),
+      hostname: t.String({ minLength: 3, maxLength: 253 }),
+      timezone: t.Optional(t.String({ minLength: 3, maxLength: 80 })),
+      businessTemplate: t.Optional(t.Union([t.Literal('general'), t.Literal('dental_clinic')])),
+      sourceClinicId: t.Optional(t.String({ format: 'uuid' })),
+    }),
+  })
+  .patch('/clinics/:clinicId', async ({ params, body, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+    try {
+      return await updatePlatformClinic(params.clinicId, body, user.id)
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'İşletme güncellenemedi.' }
+    }
+  }, {
+    params: clinicParams,
+    body: t.Object({
+      name: t.Optional(t.String({ minLength: 2, maxLength: 120 })),
+      businessTemplate: t.Optional(t.Union([t.Literal('general'), t.Literal('dental_clinic')])),
+    }),
+  })
+  .patch('/clinics/:clinicId/template', async ({ params, body, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+    try {
+      return await updatePlatformClinic(params.clinicId, { businessTemplate: body.businessTemplate }, user.id)
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Şablon güncellenemedi.' }
+    }
+  }, {
+    params: clinicParams,
+    body: t.Object({ businessTemplate: t.Union([t.Literal('general'), t.Literal('dental_clinic')]) }),
+  })
+  .post('/clinics/:clinicId/domains', async ({ params, body, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+    try {
+      return await addPlatformClinicDomain(params.clinicId, body, user.id)
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Alan adı eklenemedi.' }
+    }
+  }, {
+    params: clinicParams,
+    body: t.Object({
+      hostname: t.String({ minLength: 3, maxLength: 253 }),
+      isPrimary: t.Optional(t.Boolean()),
+    }),
+  })
+  .delete('/clinics/:clinicId/domains/:hostname', async ({ params, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+    try {
+      return await removePlatformClinicDomain(params.clinicId, decodeURIComponent(params.hostname), user.id)
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Alan adı silinemedi.' }
+    }
+  }, {
+    params: t.Object({ clinicId: t.String({ format: 'uuid' }), hostname: t.String({ minLength: 3, maxLength: 253 }) }),
   })
   .put('/clinics/:clinicId/status', async ({ params, body, cookie, request, set }) => {
     if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
@@ -211,6 +339,77 @@ export const platformPlugin = new Elysia({ prefix: '/api/platform' })
   }, {
     params: clinicParams,
     body: t.Object({ isActive: t.Boolean() }),
+  })
+  .patch('/clinics/:clinicId/plan', async ({ params, body, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+
+    try {
+      const clinic = await updatePlatformClinicPlan(params.clinicId, body, user.id)
+      const entitlements = await getClinicEntitlements(params.clinicId)
+      return { ok: true, clinic, entitlements }
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Paket bilgisi güncellenemedi.' }
+    }
+  }, {
+    params: clinicParams,
+    body: t.Object({
+      planId: t.Union([t.Literal('demo'), t.Literal('pro'), t.Literal('kurumsal')]),
+      planStatus: t.Optional(t.Union([
+        t.Literal('trial'),
+        t.Literal('active'),
+        t.Literal('past_due'),
+        t.Literal('canceled'),
+        t.Literal('expired'),
+      ])),
+      maxUsers: t.Optional(t.Number({ minimum: 1, maximum: 9999 })),
+      extendTrialDays: t.Optional(t.Number({ minimum: 1, maximum: 365 })),
+    }),
+  })
+  .get('/upgrade-requests', async ({ cookie, request, set }) => {
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+    return listPlatformUpgradeRequests()
+  })
+  .patch('/upgrade-requests/:requestId', async ({ params, body, cookie, request, set }) => {
+    if (!isPlatformAdminRequest(request) || !hasMatchingRequestOrigin(request)) {
+      set.status = 404
+      return { error: 'Sayfa bulunamadı.' }
+    }
+    const user = await requirePlatformAdmin(cookie, request, set)
+    if (!user) return { error: 'Bu işlem yalnızca satış / platform yöneticisine açıktır.' }
+
+    try {
+      const updated = await updatePlatformUpgradeRequest(params.requestId, body, user.id)
+      return { ok: true, request: updated }
+    } catch (error) {
+      if (error instanceof ClinicProvisioningError) {
+        set.status = error.status
+        return { error: error.message }
+      }
+      set.status = 400
+      return { error: error instanceof Error ? error.message : 'Başvuru güncellenemedi.' }
+    }
+  }, {
+    params: t.Object({ requestId: t.String({ format: 'uuid' }) }),
+    body: t.Object({
+      status: t.Union([
+        t.Literal('pending'),
+        t.Literal('contacted'),
+        t.Literal('approved'),
+        t.Literal('rejected'),
+      ]),
+      applyPlan: t.Optional(t.Union([t.Literal('demo'), t.Literal('pro'), t.Literal('kurumsal')])),
+    }),
   })
   .get('/clinics/:clinicId/admins', async ({ params, cookie, request, set }) => {
     const user = await requirePlatformAdmin(cookie, request, set)

@@ -1,18 +1,21 @@
 import { randomBytes } from 'node:crypto'
-import { and, desc, eq, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { db } from '../client'
-import { clinics, patients, whatsappConversations, whatsappMessages } from '../schema'
+import { clinics, dynamicColumns, dynamicRows, dynamicTables, patients, whatsappContacts, whatsappConversations, whatsappMessages } from '../schema'
 import { openSecret, sealSecret } from '../../services/integration-secrets'
 import {
   detectOptOut,
   evolutionRequest,
   EvolutionError,
   EvolutionTransport,
+  fetchEvolutionContacts,
+  last10Digits,
   N8nMetaTransport,
   normalizePhone,
   phonesMatch,
   validateEvolutionUrl,
   validateN8nWebhookUrl,
+  type EvolutionContactEntry,
   type IncomingWhatsAppMessage,
   type WhatsAppCredentials,
   type WhatsAppProviderType,
@@ -25,7 +28,7 @@ export type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
 
 export async function getWhatsAppClinic(id: string): Promise<Clinic> {
   const [clinic] = await db.select().from(clinics).where(eq(clinics.id, id))
-  if (!clinic) throw new Error('Klinik bulunamadı.')
+  if (!clinic) throw new Error('İşletme bulunamadı.')
   return clinic
 }
 function automaticEvolutionConfig(clinic: Clinic): WhatsAppCredentials | null {
@@ -315,7 +318,7 @@ export async function ensureAutomaticEvolutionConfig(id: string): Promise<Clinic
   return db.transaction(async tx => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`evolution:${id}`}, 0))`)
     const [clinic] = await tx.select().from(clinics).where(eq(clinics.id, id))
-    if (!clinic) throw new Error('Klinik bulunamadı.')
+    if (!clinic) throw new Error('İşletme bulunamadı.')
     if (clinic.evolutionBaseUrl && clinic.evolutionApiKey && clinic.evolutionInstanceName && clinic.evolutionWebhookSecret) return clinic
 
     const automatic = automaticEvolutionConfig(clinic)
@@ -368,7 +371,7 @@ export async function configureWhatsAppSetup(id: string, input: { expectedPhone:
     whatsappActivatedAt: null,
     whatsappActivatedBy: null,
   }).where(eq(clinics.id, id)).returning()
-  if (!clinic) throw new Error('Klinik bulunamadı.')
+  if (!clinic) throw new Error('İşletme bulunamadı.')
   return publicWhatsAppConfig(clinic)
 }
 
@@ -489,7 +492,7 @@ export async function activateWhatsApp(id: string, userId: string) {
   const clinic = await getWhatsAppClinic(id)
   if (clinic.evolutionConnectionState !== 'open') throw new Error('WhatsApp bağlantısı açık değil.')
   if (clinic.whatsappExpectedPhone && clinic.whatsappLinkedPhone && !phonesMatch(clinic.whatsappLinkedPhone, clinic.whatsappExpectedPhone)) {
-    throw new Error('Gönderimleri açmak için QR ile bağlanan klinik telefonunu doğrulayın.')
+    throw new Error('Gönderimleri açmak için QR ile bağlanan işletme telefonunu doğrulayın.')
   }
   const verifiedPhone = clinic.whatsappLinkedPhone || clinic.whatsappExpectedPhone
   const [updated] = await db.update(clinics).set({
@@ -518,7 +521,7 @@ export async function updateWhatsAppPreferences(id: string, input: { enabled: bo
     clinic.whatsappLinkedPhone &&
     !phonesMatch(clinic.whatsappLinkedPhone, clinic.whatsappExpectedPhone)
   ) {
-    throw new Error('Bağlı WhatsApp numarası klinik için tanımlanan numarayla eşleşmiyor.')
+    throw new Error('Bağlı WhatsApp numarası işletme için tanımlanan numarayla eşleşmiyor.')
   }
   const nextEnabled = Boolean(input.enabled || input.aiEnabled)
   const nextAiEnabled = Boolean(nextEnabled && input.aiEnabled)
@@ -582,7 +585,7 @@ export async function clearWhatsAppSetup(id: string) {
     whatsappActivatedAt: null,
     whatsappActivatedBy: null,
   }).where(eq(clinics.id, id)).returning()
-  if (!updated) throw new Error('Klinik bulunamadı.')
+  if (!updated) throw new Error('İşletme bulunamadı.')
   return publicWhatsAppConfig(updated)
 }
 
@@ -607,6 +610,21 @@ export async function ensureWhatsAppSetupSchema() {
   await db.execute(sql`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS meta_verify_token text`)
   await db.execute(sql`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS whatsapp_templates jsonb NOT NULL DEFAULT '[]'::jsonb`)
   await db.execute(sql`ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS last_inbound_at timestamptz`)
+  await db.execute(sql`ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS sender_push_name text`)
+  await db.execute(sql`ALTER TABLE whatsapp_conversations ADD COLUMN IF NOT EXISTS active_dynamic_context jsonb`)
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+      id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      clinic_id    uuid NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+      phone        text NOT NULL,
+      phone_last10 text NOT NULL,
+      remote_jid   text,
+      contact_name text NOT NULL,
+      updated_at   timestamptz NOT NULL DEFAULT now()
+    )
+  `)
+  await db.execute(sql`CREATE UNIQUE INDEX IF NOT EXISTS wa_contacts_clinic_phone10_idx ON whatsapp_contacts (clinic_id, phone_last10)`)
+  await db.execute(sql`CREATE INDEX IF NOT EXISTS wa_contacts_clinic_jid_idx ON whatsapp_contacts (clinic_id, remote_jid)`)
 }
 
 /** An explicit QR retry replaces a previously mismatched linked device first. */
@@ -667,7 +685,7 @@ export async function ensureEvolutionInstance(id: string): Promise<Clinic> {
     enabled: true, url: `${base.replace(/\/$/, '')}/api/whatsapp/evolution/${clinic.id}`,
     byEvents: false, base64: false,
     headers: { 'x-voiceai-webhook-secret': openSecret(secretCipher) },
-    events: ['MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'CONNECTION_UPDATE'],
+    events: ['MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'CONNECTION_UPDATE', 'CONTACTS_SET', 'CONTACTS_UPSERT'],
   }
 
   let exists = false
@@ -795,22 +813,223 @@ export async function recordIncomingMessage(
     const msgDate = new Date(message.timestamp)
     await tx.update(whatsappConversations).set({
       lastMessageAt: msgDate,
-      ...(message.fromMe ? {} : { lastInboundAt: msgDate }),
+      ...(message.fromMe ? {} : {
+        lastInboundAt: msgDate,
+        ...(message.pushName ? { senderPushName: message.pushName } : {}),
+      }),
       updatedAt: new Date(),
     }).where(eq(whatsappConversations.id, conversation.id))
     return conversation.id
   })
 }
 
-export async function enqueueWhatsAppNotification(clinic: Clinic, phone: string, text: string, deduplicationKey: string, patientId: string): Promise<void> {
+const autoContactSyncCooldown = new Map<string, number>()
+
+export async function upsertEvolutionContacts(
+  clinicId: string,
+  entries: EvolutionContactEntry[],
+  options?: { filterInboundStrangers?: boolean },
+): Promise<number> {
+  if (!entries.length) return 0
+  await ensureWhatsAppSetupSchema()
+
+  let filtered = entries
+  if (options?.filterInboundStrangers) {
+    const [existingContacts, existingConvs] = await Promise.all([
+      db.select({ phoneLast10: whatsappContacts.phoneLast10 }).from(whatsappContacts).where(eq(whatsappContacts.clinicId, clinicId)),
+      db.select({
+        patientPhone: whatsappConversations.patientPhone,
+        senderPushName: whatsappConversations.senderPushName,
+      }).from(whatsappConversations).where(eq(whatsappConversations.clinicId, clinicId)),
+    ])
+    const knownContactPhone10 = new Set(existingContacts.map(c => c.phoneLast10))
+    const inboundPushByPhone10 = new Map<string, string>()
+    for (const conv of existingConvs) {
+      const p10 = last10Digits(conv.patientPhone)
+      if (p10 && conv.senderPushName && !knownContactPhone10.has(p10)) {
+        inboundPushByPhone10.set(p10, conv.senderPushName.trim())
+      }
+    }
+    filtered = entries.filter(entry => {
+      if (entry.explicitAddressBook || knownContactPhone10.has(entry.phoneLast10)) return true
+      const strangerPush = inboundPushByPhone10.get(entry.phoneLast10)
+      if (strangerPush && strangerPush.toLocaleLowerCase('tr-TR') === entry.contactName.toLocaleLowerCase('tr-TR')) {
+        return false
+      }
+      return true
+    })
+  }
+
+  let saved = 0
+  for (const entry of filtered) {
+    await db.insert(whatsappContacts).values({
+      clinicId,
+      phone: entry.phone,
+      phoneLast10: entry.phoneLast10,
+      remoteJid: entry.remoteJid,
+      contactName: entry.contactName,
+      updatedAt: new Date(),
+    }).onConflictDoUpdate({
+      target: [whatsappContacts.clinicId, whatsappContacts.phoneLast10],
+      set: {
+        phone: entry.phone,
+        remoteJid: entry.remoteJid,
+        contactName: entry.contactName,
+        updatedAt: new Date(),
+      },
+    })
+    saved++
+  }
+  return saved
+}
+
+export async function syncEvolutionContacts(clinicId: string): Promise<{ syncedCount: number }> {
+  await ensureWhatsAppSetupSchema()
+  const clinic = await ensureAutomaticEvolutionConfig(clinicId)
+  if (clinic.whatsappProvider === 'n8n_meta') {
+    throw new Error('Telefon rehberi eşitleme yalnızca Evolution bağlantısında kullanılabilir.')
+  }
+  const creds = credentialsFor(clinic)
+  const excludedPhone = clinic.whatsappLinkedPhone || clinic.whatsappExpectedPhone || null
+  const contacts = await fetchEvolutionContacts(creds, excludedPhone)
+  const syncedCount = await upsertEvolutionContacts(clinic.id, contacts, { filterInboundStrangers: true })
+  autoContactSyncCooldown.set(clinic.id, Date.now())
+  return { syncedCount }
+}
+
+export async function maybeAutoSyncEvolutionContacts(clinicId: string): Promise<void> {
+  const lastAttempt = autoContactSyncCooldown.get(clinicId) || 0
+  if (Date.now() - lastAttempt < 5 * 60_000) return
+  autoContactSyncCooldown.set(clinicId, Date.now())
+  try {
+    await ensureWhatsAppSetupSchema()
+    const [clinic] = await db.select().from(clinics).where(eq(clinics.id, clinicId)).limit(1)
+    if (!clinic || clinic.whatsappProvider === 'n8n_meta' || clinic.evolutionConnectionState !== 'open') return
+    const [existing] = await db.select({ id: whatsappContacts.id }).from(whatsappContacts).where(eq(whatsappContacts.clinicId, clinicId)).limit(1)
+    if (existing) return
+    await syncEvolutionContacts(clinicId)
+  } catch {
+    // Sessizce geç; sohbet listesi hiçbir zaman rehber eşitleme hatası yüzünden bloklanmamalı.
+  }
+}
+
+export async function listWhatsAppConversationsWithContacts(clinicId: string) {
+  await ensureWhatsAppSetupSchema()
+  await maybeAutoSyncEvolutionContacts(clinicId)
+
+  const [convs, clinicPatients, clinicContacts, phoneDynamicCols] = await Promise.all([
+    db.select({
+      id: whatsappConversations.id,
+      phone: whatsappConversations.patientPhone,
+      patientId: whatsappConversations.patientId,
+      remoteJid: whatsappConversations.remoteJid,
+      aiPaused: whatsappConversations.aiPaused,
+      lastMessageAt: whatsappConversations.lastMessageAt,
+    })
+      .from(whatsappConversations)
+      .where(eq(whatsappConversations.clinicId, clinicId))
+      .orderBy(desc(whatsappConversations.lastMessageAt))
+      .limit(100),
+    db.select({
+      id: patients.id,
+      phone: patients.phone,
+    })
+      .from(patients)
+      .where(and(eq(patients.clinicId, clinicId), eq(patients.isArchived, false))),
+    db.select({
+      phoneLast10: whatsappContacts.phoneLast10,
+      remoteJid: whatsappContacts.remoteJid,
+      contactName: whatsappContacts.contactName,
+    })
+      .from(whatsappContacts)
+      .where(eq(whatsappContacts.clinicId, clinicId)),
+    db.select({
+      id: dynamicColumns.id,
+      tableId: dynamicColumns.tableId,
+      fieldType: dynamicColumns.fieldType,
+      slug: dynamicColumns.slug,
+    })
+      .from(dynamicColumns)
+      .innerJoin(dynamicTables, eq(dynamicColumns.tableId, dynamicTables.id))
+      .where(eq(dynamicTables.clinicId, clinicId)),
+  ])
+
+  const patientIds = new Set<string>()
+  const patientPhone10s = new Set<string>()
+  for (const p of clinicPatients) {
+    patientIds.add(p.id)
+    const p10 = last10Digits(p.phone)
+    if (p10) patientPhone10s.add(p10)
+  }
+
+  const phoneColIdsByTable = new Map<string, string[]>()
+  for (const col of phoneDynamicCols) {
+    if (col.fieldType === 'phone' || /telefon|phone|gsm|cep|tel_no/i.test(col.slug)) {
+      const list = phoneColIdsByTable.get(col.tableId) || []
+      list.push(col.id)
+      phoneColIdsByTable.set(col.tableId, list)
+    }
+  }
+  const activeDynamicTableIds = Array.from(phoneColIdsByTable.keys())
+  if (activeDynamicTableIds.length > 0) {
+    const dynRows = await db
+      .select({ tableId: dynamicRows.tableId, values: dynamicRows.values })
+      .from(dynamicRows)
+      .where(and(
+        eq(dynamicRows.clinicId, clinicId),
+        eq(dynamicRows.isArchived, false),
+        inArray(dynamicRows.tableId, activeDynamicTableIds),
+      ))
+      .limit(1000)
+    for (const r of dynRows) {
+      const vals = (r.values || {}) as Record<string, unknown>
+      for (const colId of phoneColIdsByTable.get(r.tableId) || []) {
+        const p10 = last10Digits(String(vals[colId] ?? ''))
+        if (p10) patientPhone10s.add(p10)
+      }
+    }
+  }
+
+  const contactByPhone10 = new Map<string, string>()
+  const contactByJid = new Map<string, string>()
+  for (const c of clinicContacts) {
+    if (c.phoneLast10 && c.contactName) contactByPhone10.set(c.phoneLast10, c.contactName)
+    if (c.remoteJid && c.contactName) contactByJid.set(c.remoteJid, c.contactName)
+  }
+
+  return convs.map(conv => {
+    const p10 = last10Digits(conv.phone)
+    const isRegisteredPatient = Boolean(
+      (conv.patientId && patientIds.has(conv.patientId)) ||
+      (p10 && patientPhone10s.has(p10)),
+    )
+    const matchedContactName = !isRegisteredPatient
+      ? ((p10 && contactByPhone10.get(p10)) || (conv.remoteJid && contactByJid.get(conv.remoteJid)) || null)
+      : null
+
+    return {
+      id: conv.id,
+      phone: conv.phone,
+      remoteJid: conv.remoteJid,
+      aiPaused: conv.aiPaused,
+      lastMessageAt: conv.lastMessageAt,
+      contactName: matchedContactName,
+      isPhonebookContact: Boolean(matchedContactName),
+    }
+  })
+}
+
+export async function enqueueWhatsAppNotification(clinic: Clinic, phone: string, text: string, deduplicationKey: string, patientId?: string | null): Promise<void> {
   const normalized = normalizePhone(phone)
   await db.transaction(async tx => {
-    const matchingPatients = await tx.select({ id: patients.id }).from(patients)
-      .where(and(eq(patients.clinicId, clinic.id), patientPhoneMatches(normalized))).limit(2)
-    if (matchingPatients.length !== 1 || matchingPatients[0].id !== patientId) throw new Error('Telefon hastaya tekil olarak eşleşmiyor.')
+    if (patientId) {
+      const matchingPatients = await tx.select({ id: patients.id }).from(patients)
+        .where(and(eq(patients.clinicId, clinic.id), patientPhoneMatches(normalized))).limit(2)
+      if (matchingPatients.length !== 1 || matchingPatients[0].id !== patientId) throw new Error('Telefon kişiye tekil olarak eşleşmiyor.')
+    }
     const conversation = await ensureConversation(tx, clinic, `${normalized.slice(1)}@s.whatsapp.net`, normalized)
-    if (conversation.patientId && conversation.patientId !== patientId) throw new Error('Konuşma farklı bir hastaya bağlı.')
-    if (!conversation.patientId) await tx.update(whatsappConversations).set({ patientId }).where(eq(whatsappConversations.id, conversation.id))
+    if (patientId && conversation.patientId && conversation.patientId !== patientId) throw new Error('Konuşma farklı bir kişiye bağlı.')
+    if (patientId && !conversation.patientId) await tx.update(whatsappConversations).set({ patientId }).where(eq(whatsappConversations.id, conversation.id))
     await tx.insert(whatsappMessages).values({ conversationId: conversation.id, externalId: deduplicationKey,
       direction: 'notification', text, replyText: text, status: 'reply_ready' }).onConflictDoUpdate({
       target: [whatsappMessages.conversationId, whatsappMessages.externalId],

@@ -11,7 +11,6 @@ import {
   appointmentTreatments,
   patientPayments,
   completedWorks,
-  businessSettings,
   notificationTemplates,
   consultations,
   patientNotes,
@@ -30,7 +29,9 @@ import {
   planAttachments,
   planAttachmentFiles,
 } from '../schema'
-import { currentClinicId, requireClinicId } from '../../tenancy/context'
+import { currentBusinessTemplate, currentClinicId, requireClinicId } from '../../tenancy/context'
+import { isCalendarColumnRole } from '../../platform/roles'
+import { getClinicStaffPermissions, getClinicUserPermissionsMap } from '../../services/staff-invitations'
 
 let aiReviewSchemaPromise: Promise<void> | null = null
 let patientArchiveSchemaPromise: Promise<void> | null = null
@@ -196,34 +197,78 @@ export function ensureAiAppointmentReviewSchema(): Promise<void> {
   return aiReviewSchemaPromise
 }
 
-// ── Doctors (hekim users) ────────────────────────────────────────────────────
+// ── Calendar Employees (calisan + legacy hekim + showOnCalendar) ───────────
+
+function normalizePermissionRoleKey(role: string | null | undefined): string {
+  const cleaned = (role ?? '').trim().toLowerCase()
+  if (!cleaned || cleaned === 'uzman') return 'calisan'
+  if (cleaned === 'host') return 'sekreter'
+  return cleaned
+}
+
+async function resolveCalendarColumnMemberIds(
+  clinicId: string,
+  members: Array<{ id: string; role: string }>,
+): Promise<Set<string>> {
+  if (members.length === 0) return new Set()
+  const [rolePerms, userMap] = await Promise.all([
+    getClinicStaffPermissions(clinicId),
+    getClinicUserPermissionsMap(clinicId),
+  ])
+  const allowed = new Set<string>()
+  for (const m of members) {
+    const userOverride = userMap.byUserId[m.id]?.staffPermissions?.showOnCalendar
+    const roleKey = normalizePermissionRoleKey(m.role)
+    const roleShowOnCalendar = rolePerms[roleKey]?.showOnCalendar ?? rolePerms[m.role]?.showOnCalendar
+    const showOnCalendar = typeof userOverride === 'boolean' ? userOverride : roleShowOnCalendar
+    if (isCalendarColumnRole(m.role, showOnCalendar)) {
+      allowed.add(m.id)
+    }
+  }
+  return allowed
+}
 
 export async function listDoctors() {
   const clinicId = requireClinicId()
-  return db.select({ id: users.id, name: users.name, specialty: users.specialty, color: users.color, active: users.active })
-    .from(users).innerJoin(clinicMemberships, eq(clinicMemberships.userId, users.id))
+  const members = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      specialty: users.specialty,
+      color: users.color,
+      active: users.active,
+      role: clinicMemberships.role,
+    })
+    .from(users)
+    .innerJoin(clinicMemberships, eq(clinicMemberships.userId, users.id))
     .where(and(
       eq(clinicMemberships.clinicId, clinicId),
-      eq(clinicMemberships.role, 'hekim'),
       eq(clinicMemberships.active, true),
       eq(users.active, true),
     ))
+  const allowedIds = await resolveCalendarColumnMemberIds(
+    clinicId,
+    members.map((m) => ({ id: m.id, role: m.role })),
+  )
+  return members.filter((m) => allowedIds.has(m.id))
 }
+
+export const listCalendarEmployees = listDoctors
 
 export async function createDoctor(data: { name: string; specialty: string; color?: string }) {
   const clinicId = requireClinicId()
-  // Legacy compat — creates a hekim user with a generated email
-  const hash = await Bun.password.hash('Hekim123!')
+  // Legacy compat — creates a calisan user with a generated email
+  const hash = await Bun.password.hash('Calisan123!')
   const [row] = await db.insert(users).values({
-    email: `hekim.${Date.now()}@klinik.com`,
+    email: `calisan.${Date.now()}@axamaz.com`,
     passwordHash: hash,
     name: data.name,
-    role: 'hekim',
+    role: 'calisan',
     specialty: data.specialty,
     color: data.color ?? '#60a5fa',
   }).returning()
-  await db.insert(clinicMemberships).values({ clinicId, userId: row!.id, role: 'hekim', active: true })
-  return { id: row!.id, name: row!.name, specialty: row!.specialty, color: row!.color, active: row!.active }
+  await db.insert(clinicMemberships).values({ clinicId, userId: row!.id, role: 'calisan', active: true })
+  return { id: row!.id, name: row!.name, specialty: row!.specialty, color: row!.color, active: row!.active, role: 'calisan' }
 }
 
 // ── Doctor Leaves (Hekim İzinleri / Çalışma Dışı Saatler) ───────────────────
@@ -719,6 +764,7 @@ async function ensureAppointmentPatient(
   appt: {
     id: string
     patientId?: string | null
+    intakeSource?: string | null
     intakePatientName?: string | null
     intakePatientPhone?: string | null
     title?: string | null
@@ -727,6 +773,9 @@ async function ensureAppointmentPatient(
 ): Promise<string | null> {
   if (isValidUuid(appt.patientId)) return appt.patientId
   if (!isValidUuid(appt.id) || appt.status === 'cancelled') return null
+  // Do not force legacy patient creation for standalone or dynamic-table appointments
+  if (currentBusinessTemplate() !== 'dental_clinic') return null
+  if (appt.intakeSource === 'standalone' || appt.intakeSource === 'dynamic_table') return null
   try {
     const rawName = (appt.intakePatientName || (typeof appt.title === 'string' ? appt.title.split(' - ')[0] : '') || '').trim()
     const rawPhone = (appt.intakePatientPhone || '').trim()
@@ -793,35 +842,46 @@ export async function listDentalAppointments(dateStr?: string) {
   
   if (appts.length === 0) return appts;
 
-  // Self-healing: patientId eksik olan aktif randevulara otomatik hasta kaydı bağla (paralel)
-  const unlinkedAppts = appts.filter(a => !isValidUuid(a.patientId) && a.status !== 'cancelled' && a.reviewStatus !== 'rejected')
+  // Self-healing: yalnızca dental_clinic şablonunda patientId eksik olan aktif randevulara otomatik hasta kaydı bağla (paralel)
+  const isDentalMode = currentBusinessTemplate() === 'dental_clinic'
+  const unlinkedAppts = isDentalMode
+    ? appts.filter(
+        a =>
+          !isValidUuid(a.patientId) &&
+          a.status !== 'cancelled' &&
+          a.reviewStatus !== 'rejected' &&
+          a.intakeSource !== 'standalone' &&
+          a.intakeSource !== 'dynamic_table'
+      )
+    : []
   if (unlinkedAppts.length > 0) {
     await Promise.all(unlinkedAppts.map(a => ensureAppointmentPatient(clinicId, a)))
   }
 
   const apptIds = appts.map((a: any) => a.id)
 
-  const [, links] = await Promise.all([
-    // Self-healing: Eğer aktif bir randevunun hekimi dondurulmuş/ayrılmış ise veya durum pending_assignment ise doktor seçimini boşa çıkar
+  const [, links, dynamicLinksMap] = await Promise.all([
+    // Self-healing: Eğer aktif bir randevunun çalışanı dondurulmuş/ayrılmış ise veya durum pending_assignment ise atamayı boşa çıkar
     (async () => {
       try {
         const assignedDocIds = Array.from(
           new Set(appts.map((a: any) => a.doctorId).filter((id): id is string => Boolean(id)))
         )
         if (assignedDocIds.length > 0) {
-          const activeDocRows = await db
-            .select({ id: users.id })
+          const candidateDocRows = await db
+            .select({ id: users.id, role: clinicMemberships.role })
             .from(users)
             .innerJoin(clinicMemberships, eq(clinicMemberships.userId, users.id))
             .where(
               and(
                 eq(clinicMemberships.clinicId, clinicId),
-                eq(clinicMemberships.role, 'hekim'),
                 eq(clinicMemberships.active, true),
                 eq(users.active, true),
                 inArray(users.id, assignedDocIds)
               )
             )
+          const allowedDocIds = await resolveCalendarColumnMemberIds(clinicId, candidateDocRows)
+          const activeDocRows = candidateDocRows.filter((row) => allowedDocIds.has(row.id))
           const activeDocIdSet = new Set(activeDocRows.map((d) => d.id))
           const inactiveDocIds = assignedDocIds.filter((id) => !activeDocIdSet.has(id))
           const toUnassignIds: string[] = []
@@ -868,15 +928,22 @@ export async function listDentalAppointments(dateStr?: string) {
     db.select({ appointmentId: appointmentTreatments.appointmentId })
       .from(appointmentTreatments)
       .where(inArray(appointmentTreatments.appointmentId, apptIds)),
+    import('./dynamic-tables').then(({ getAppointmentDynamicLinksMap }) =>
+      getAppointmentDynamicLinksMap(apptIds)
+    ),
   ])
     
   const linkedApptIds = new Set(links.map(l => l.appointmentId));
-  return appts.map(a => ({ ...a, hasTreatment: linkedApptIds.has(a.id) }));
+  return appts.map(a => ({
+    ...a,
+    hasTreatment: linkedApptIds.has(a.id),
+    dynamicLinks: dynamicLinksMap.get(a.id) ?? [],
+  }));
 }
 
 export async function createDentalAppointment(
   data: {
-    patientId: string
+    patientId?: string | null
     doctorId: string | null
     title: string
     startTime: Date
@@ -884,20 +951,31 @@ export async function createDentalAppointment(
     status?: string
     type?: string
     notes?: string
+    intakeSource?: string | null
+    intakePatientName?: string | null
+    intakePatientPhone?: string | null
+    dynamicLinks?: Array<{ tableId: string; rowId: string }>
   },
   actor?: { actorType?: string; actorName?: string }
 ) {
+  await ensureAiAppointmentReviewSchema()
   const clinicId = requireClinicId()
   if (data.doctorId) {
     const { conflict, leave } = await checkDoctorLeaveConflict(data.doctorId, data.startTime, data.endTime)
     if (conflict) {
       const reasonText = leave?.reason ? ` (${leave.reason})` : ''
-      throw new Error(`Hekim belirtilen saatlerde izinlidir: ${leave.startTime}-${leave.endTime}${reasonText}. Randevu oluşturulamaz.`)
+      throw new Error(`Çalışan belirtilen saatlerde izinlidir: ${leave.startTime}-${leave.endTime}${reasonText}. Randevu oluşturulamaz.`)
     }
   }
+  const hasValidPatientId = isValidUuid(data.patientId)
+  const resolvedSource =
+    data.dynamicLinks && data.dynamicLinks.length > 0
+      ? 'dynamic_table'
+      : data.intakeSource ?? (hasValidPatientId ? null : 'standalone')
+
   const [row] = await db.insert(dentalAppointments).values({
     clinicId,
-    patientId: data.patientId,
+    patientId: hasValidPatientId ? data.patientId! : null,
     doctorId: data.doctorId,
     title: data.title,
     startTime: data.startTime,
@@ -905,8 +983,15 @@ export async function createDentalAppointment(
     status: data.status ?? 'scheduled',
     type: data.type ?? 'general',
     notes: data.notes ?? null,
+    intakeSource: resolvedSource,
+    intakePatientName: data.intakePatientName ?? null,
+    intakePatientPhone: data.intakePatientPhone ?? null,
   }).returning()
   if (row) {
+    if (Array.isArray(data.dynamicLinks) && data.dynamicLinks.length > 0) {
+      const { syncAppointmentDynamicLinks } = await import('./dynamic-tables')
+      await syncAppointmentDynamicLinks(row.id, data.dynamicLinks)
+    }
     if (row.patientId) {
       void logPatientActivity({
         clinicId,
@@ -2049,6 +2134,7 @@ export async function updateDentalAppointment(
     type?: string
     complaint?: string
     title?: string
+    dynamicLinks?: Array<{ tableId: string; rowId: string }>
   },
   actor?: { actorType?: string; actorName?: string }
 ) {
@@ -2056,6 +2142,7 @@ export async function updateDentalAppointment(
   const clinicId = requireClinicId()
   const [existing] = await db.select({
     patientId: dentalAppointments.patientId,
+    intakeSource: dentalAppointments.intakeSource,
     intakePatientName: dentalAppointments.intakePatientName,
     intakePatientPhone: dentalAppointments.intakePatientPhone,
     status: dentalAppointments.status,
@@ -2078,16 +2165,24 @@ export async function updateDentalAppointment(
     const { conflict, leave } = await checkDoctorLeaveConflict(targetDoctorId, targetStartTime, targetEndTime)
     if (conflict) {
       const reasonText = leave?.reason ? ` (${leave.reason})` : ''
-      throw new Error(`Hekim belirtilen saatlerde izinlidir: ${leave.startTime}-${leave.endTime}${reasonText}. Randevu taşınamaz.`)
+      throw new Error(`Çalışan belirtilen saatlerde izinlidir: ${leave.startTime}-${leave.endTime}${reasonText}. Randevu taşınamaz.`)
     }
   }
   const values: Record<string, unknown> = {}
   if (data.patientId !== undefined && isValidUuid(data.patientId)) {
     values.patientId = data.patientId
-  } else if (!isValidUuid(existing.patientId) && data.status !== 'cancelled') {
+  } else if (
+    currentBusinessTemplate() === 'dental_clinic' &&
+    !isValidUuid(existing.patientId) &&
+    data.status !== 'cancelled' &&
+    existing.intakeSource !== 'standalone' &&
+    existing.intakeSource !== 'dynamic_table' &&
+    (!Array.isArray(data.dynamicLinks) || data.dynamicLinks.length === 0)
+  ) {
     const healedPatientId = await ensureAppointmentPatient(clinicId, {
       id,
       patientId: existing.patientId,
+      intakeSource: existing.intakeSource,
       intakePatientName: existing.intakePatientName,
       intakePatientPhone: existing.intakePatientPhone,
       title: existing.title,
@@ -2128,6 +2223,11 @@ export async function updateDentalAppointment(
   if (data.startTime !== undefined && existing.status === 'postponed' && data.status === undefined) {
     values.status = 'scheduled'
     values.patientResponseStatus = null
+  }
+  if (Array.isArray(data.dynamicLinks)) {
+    const { syncAppointmentDynamicLinks } = await import('./dynamic-tables')
+    await syncAppointmentDynamicLinks(id, data.dynamicLinks)
+    values.intakeSource = data.dynamicLinks.length > 0 ? 'dynamic_table' : (existing.patientId ? null : 'standalone')
   }
   if (Object.keys(values).length === 0) return null
   const [row] = await db.update(dentalAppointments)
@@ -2315,10 +2415,12 @@ export async function approveAiAppointment(id: string, data: {
     }
 
     if (data.doctorId) {
-      const [doctor] = await tx.select({ id: users.id }).from(users)
+      const [doctor] = await tx.select({ id: users.id, role: clinicMemberships.role }).from(users)
         .innerJoin(clinicMemberships, eq(clinicMemberships.userId, users.id))
-        .where(and(eq(users.id, data.doctorId), eq(clinicMemberships.clinicId, clinicId), eq(clinicMemberships.role, 'hekim'), eq(clinicMemberships.active, true))).limit(1)
-      if (!doctor) throw new Error('Seçilen hekim bu klinikte aktif değil.')
+        .where(and(eq(users.id, data.doctorId), eq(clinicMemberships.clinicId, clinicId), eq(clinicMemberships.active, true), eq(users.active, true))).limit(1)
+      if (!doctor) throw new Error('Seçilen çalışan bu işletmede aktif değil.')
+      const allowedIds = await resolveCalendarColumnMemberIds(clinicId, [{ id: doctor.id, role: doctor.role }])
+      if (!allowedIds.has(doctor.id)) throw new Error('Seçilen çalışan takvim sütunu yetkisine sahip değil.')
     }
 
     const conflicts = await tx.select({ id: dentalAppointments.id }).from(dentalAppointments).where(and(

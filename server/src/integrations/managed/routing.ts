@@ -26,7 +26,7 @@ export async function resolveCall(query: Record<string,unknown>) {
       WHERE d.clinic_id = c.id AND d.is_active = true
       ORDER BY (d.hostname NOT IN ('localhost', '127.0.0.1')) DESC, d.is_primary DESC, d.created_at ASC
       LIMIT 1
-    ), ${(process.env.TELEPHONY_CLINIC_HOSTNAME || (process.env.DEFAULT_CLINIC_HOSTS || 'pineclinic.thinpine.com').split(',')[0] || 'pineclinic.thinpine.com').trim()}) AS hostname
+    ), ${(process.env.TELEPHONY_CLINIC_HOSTNAME || (process.env.DEFAULT_CLINIC_HOSTS || 'axamaz.com').split(',')[0] || 'axamaz.com').trim()}) AS hostname
     FROM managed_integrations m
     JOIN clinics c ON c.id = m.clinic_id AND c.is_active = true
     WHERE m.service = 'phone'

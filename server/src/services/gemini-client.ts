@@ -242,7 +242,7 @@ export async function setClinicGeminiKey(clinicId: string, rawKey: string, userI
     throw err
   }
 
-  if (!updated) throw new Error('Klinik bulunamadı.')
+  if (!updated) throw new Error('İşletme bulunamadı.')
   invalidateGeminiClientCache(clinicId)
 
   await db.insert(auditLog).values({
@@ -272,7 +272,7 @@ export async function deleteClinicGeminiKey(clinicId: string, userId: string, ip
     .returning({ id: clinics.id })
   await db.execute(sql`UPDATE clinics SET gemini_key_fingerprint = NULL WHERE id = ${clinicId}::uuid`)
 
-  if (!updated) throw new Error('Klinik bulunamadı.')
+  if (!updated) throw new Error('İşletme bulunamadı.')
   invalidateGeminiClientCache(clinicId)
 
   await db.insert(auditLog).values({
@@ -313,7 +313,7 @@ export async function testClinicGeminiKey(clinicId: string, candidateKey?: strin
     ok: true,
     latencyMs,
     source,
-    message: `API anahtarı doğrulandı (${latencyMs} ms, kaynak: ${source === 'clinic' ? 'Kliniğe Özel' : 'Ortak Sunucu'}).`,
+    message: `API anahtarı doğrulandı (${latencyMs} ms, kaynak: ${source === 'clinic' ? 'İşletmeye Özel' : 'Ortak Sunucu'}).`,
   }
 }
 

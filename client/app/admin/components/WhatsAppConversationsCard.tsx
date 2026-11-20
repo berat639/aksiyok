@@ -3,8 +3,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import styles from './EvolutionWhatsAppCard.module.css'
 
-type Config = { clinicId: string; clinicName: string }
-type Conversation = { id: string; phone: string | null; remoteJid: string | null; aiPaused: boolean; lastMessageAt: string }
+type Config = { clinicId: string; clinicName: string; provider?: 'evolution' | 'n8n_meta' }
+type Conversation = {
+  id: string
+  phone: string | null
+  remoteJid: string | null
+  aiPaused: boolean
+  lastMessageAt: string
+  contactName?: string | null
+  isPhonebookContact?: boolean
+}
 type Message = { id: string; direction: string; text: string; replyText: string | null; status: string; deliveryStatus: string | null; error: string | null; createdAt: string }
 
 const API = '/api/admin/whatsapp'
@@ -60,6 +68,19 @@ export default function WhatsAppConversationsCard() {
     try { await operation() } catch (e) { setError(e instanceof Error ? e.message : 'İşlem tamamlanamadı.') } finally { setBusy(false) }
   }
   const selectedConversation = conversations.find(c => c.id === selected)
+  const activeConfig = configs.find(c => c.clinicId === clinicId)
+  const isEvolutionProvider = !activeConfig?.provider || activeConfig.provider === 'evolution'
+
+  const syncContacts = async () => {
+    if (!clinicId) return
+    const res = await api<{ ok: boolean; syncedCount: number }>(`/${clinicId}/sync-contacts`, 'POST')
+    await refreshConversations()
+    setNotice(
+      res.syncedCount > 0
+        ? `Telefon rehberinden ${res.syncedCount} kişi eşitlendi.`
+        : 'Telefon rehberi kontrol edildi (yeni kayıtlı kişi bulunamadı).',
+    )
+  }
 
   return <section className={styles.card} aria-labelledby="whatsapp-conversations-heading">
     <div className={styles.inboxHeader}>
@@ -67,21 +88,49 @@ export default function WhatsAppConversationsCard() {
         <h3 id="whatsapp-conversations-heading">WhatsApp Sohbetleri</h3>
         <p className={styles.description}>Hasta mesajlarını görüntüleyin ve yapay zekâ yanıtlarını yönetin.</p>
       </div>
-      <button className={styles.secondary} disabled={busy || !clinicId} onClick={() => run(refreshConversations)}>Sohbetleri yenile</button>
+      <div className={styles.headerActions}>
+        {isEvolutionProvider && (
+          <button className={styles.secondary} disabled={busy || !clinicId} onClick={() => run(syncContacts)}>
+            Rehberi eşitle
+          </button>
+        )}
+        <button className={styles.secondary} disabled={busy || !clinicId} onClick={() => run(refreshConversations)}>
+          Sohbetleri yenile
+        </button>
+      </div>
     </div>
     {error && <p className={styles.error} role="alert">{error}</p>}
     {notice && <p className={styles.notice} role="status">{notice}</p>}
-    {loading ? <p>WhatsApp sohbetleri yükleniyor…</p> : !clinicId ? <p>WhatsApp sohbetlerini görmek için önce bir klinik kaydı oluşturun.</p> : <>
-      {configs.length > 1 && <label className={styles.field}>Klinik<select value={clinicId} disabled={busy} onChange={e => {
+    {loading ? <p>WhatsApp sohbetleri yükleniyor…</p> : !clinicId ? <p>WhatsApp sohbetlerini görmek için önce bir işletme kaydı oluşturun.</p> : <>
+      {configs.length > 1 && <label className={styles.field}>İşletme<select value={clinicId} disabled={busy} onChange={e => {
         setClinicId(e.target.value); setSelected(''); setConversations([]); setMessages([])
       }}>{configs.map(config => <option key={config.clinicId} value={config.clinicId}>{config.clinicName}</option>)}</select></label>}
       <p className={styles.help}>Personel WhatsApp üzerinden yanıt verdiğinde AI o sohbette duraklatılır. Yeniden açma, sonraki mesajlar için geçerlidir.</p>
       <div className={styles.inbox}>
         <div className={styles.conversations}>
           {!conversations.length && <p>Henüz mesaj yok.</p>}
-          {conversations.map(conversation => <button key={conversation.id} className={selected === conversation.id ? styles.selected : styles.conversation} onClick={() => setSelected(conversation.id)}>
-            <strong>{conversation.phone || 'Numarası doğrulanmamış sohbet'}</strong><span>{conversation.aiPaused ? 'Personel desteğinde' : 'AI açık'}</span>
-          </button>)}
+          {conversations.map(conversation => {
+            const showPhonebook = Boolean(conversation.isPhonebookContact && conversation.contactName)
+            const primaryTitle = showPhonebook
+              ? conversation.contactName!
+              : (conversation.phone || 'Numarası doğrulanmamış sohbet')
+            return (
+              <button
+                key={conversation.id}
+                className={selected === conversation.id ? styles.selected : styles.conversation}
+                onClick={() => setSelected(conversation.id)}
+              >
+                <div className={styles.conversationTopRow}>
+                  <strong>{primaryTitle}</strong>
+                  {showPhonebook && <span className={styles.contactBadge}>Rehber Kişisi</span>}
+                </div>
+                <div className={styles.conversationSubRow}>
+                  {showPhonebook && conversation.phone && <span>{conversation.phone}</span>}
+                  <span>{conversation.aiPaused ? 'Personel desteğinde' : 'AI açık'}</span>
+                </div>
+              </button>
+            )
+          })}
         </div>
         <div className={styles.messages}>
           {selectedConversation ? <>

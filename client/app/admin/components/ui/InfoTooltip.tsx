@@ -97,7 +97,7 @@ export default function InfoTooltip({ title, children, placement = 'auto', maxWi
       >
         <span aria-hidden="true">ⓘ</span>
       </span>
-      {open && typeof document !== 'undefined' && createPortal(
+      {open && typeof document !== 'undefined' && Boolean(document.body) && createPortal(
         <div
           ref={popupRef}
           id={id}

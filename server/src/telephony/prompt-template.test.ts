@@ -64,10 +64,13 @@ describe('Platform system prompt templates (P2 keys)', () => {
       'AKIŞ YÖNETİMİ: Müşteri yeni veya düzeltilmiş bilgi verdiğinde önce akisBilgisiGuncelle aracını çağır. Araçtan gelen sıradaki görevi aynen uygula. Araç bir bilgi istemenizi söylerse yalnızca o bilgiyi iste. Randevu işlemini ancak araç işlem adımına ulaştığında çağır.',
     )
     expect(getDefaultPromptValue('prompt.simulator_system_rules')).toBe(
+      'Sen işletmenin yapay zeka sesli/yazılı asistanısın. Yalnızca Türkçe, doğal, nazik ve kısa (1-3 cümle) yanıt ver.',
+    )
+    expect(getDefaultPromptValue('prompt.simulator_system_rules', 'dental_clinic')).toBe(
       'Sen bir diş kliniğinin yapay zeka sesli/yazılı asistanısın. Yalnızca Türkçe, doğal, nazik ve kısa (1-3 cümle) yanıt ver.',
     )
     expect(getDefaultPromptValue('prompt.simulator_voice_flow_rules')).toBe(
-      'AKIŞ YÖNETİMİ: Hasta yeni veya düzeltilmiş bilgi verdiğinde önce akisBilgisiGuncelle aracını çağır ve araçtan gelen sıradaki görevi uygula. Bilgi bankasında aranacak sorular için bilgiBankasindaAra aracını kullan.',
+      'AKIŞ YÖNETİMİ: Müşteri yeni veya düzeltilmiş bilgi verdiğinde önce akisBilgisiGuncelle aracını çağır ve araçtan gelen sıradaki görevi uygula. Bilgi bankasında aranacak sorular için bilgiBankasindaAra aracını kullan.',
     )
   })
 

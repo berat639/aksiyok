@@ -19,8 +19,8 @@ describe('flow-path-summary', () => {
     const nodes = [start, cond('c', { conditionField: 'kayitli', operator: 'equals', conditionValue: 'true' }), act('a1'), act('a2', { action: 'transfer_call' })]
     const edges = [edge('s', 'c'), edge('c', 'a1', 'true'), edge('c', 'a2', 'false')]
     const sum = summarizeFlow(nodes, edges)
-    expect(sum.a1.when[0]).toContain('Kayıtlı hasta mı? Evet')
-    expect(sum.a2.when[0]).toContain('Kayıtlı hasta mı? Hayır')
+    expect(sum.a1.when[0]).toContain('Kayıtlı kişi / müşteri mi? Evet')
+    expect(sum.a2.when[0]).toContain('Kayıtlı kişi / müşteri mi? Hayır')
     expect(sum.c.next).toHaveLength(2)
     expect(JSON.stringify(sum)).not.toMatch(/==|!=|AND|OR\b|caller\./)
   })
@@ -118,5 +118,108 @@ describe('flow-path-summary', () => {
     const n2 = [{ id: 'a', type: 'actionNode', data: { action: 'end_call' } }]
     expect(flowGraphHash(n1, [])).toBe(flowGraphHash(n2, []))
     expect(flowGraphHash(n1, [])).not.toBe(flowGraphHash([{ id: 'a', type: 'actionNode', data: { action: 'transfer_call' } }], []))
+  })
+
+  it('dinamik tablo sütunlarını ve çoklu koşulları ham değişken kodu sızdırmadan Türkçe özetler', () => {
+    const nodes: FlowNodeLike[] = [
+      start,
+      {
+        id: 'f_survey',
+        type: 'fieldNode',
+        data: {
+          label: 'Memnuniyet Anketi · Puan',
+          fieldName: 'memnuniyet_anketi__puan',
+          description: 'Hizmetimize 1 ile 10 arasında kaç puan verirsiniz?',
+          sourceTableName: 'Memnuniyet Anketi',
+          sourceColumnName: 'Puan',
+        },
+      },
+      cond('c_dyn', {
+        conditionLogic: 'AND',
+        rules: [
+          {
+            field: 'musteriler__ozel_uye_mi',
+            operator: 'equals',
+            value: 'true',
+            sourceTableName: 'Müşteriler',
+            sourceColumnName: 'Özel Üye mi?',
+          },
+          {
+            field: 'memnuniyet_anketi__puan',
+            operator: 'gte',
+            value: '8',
+            sourceTableName: 'Memnuniyet Anketi',
+            sourceColumnName: 'Puan',
+          },
+        ],
+      }),
+      act('a_save', { action: 'save_record', targetTableName: 'Memnuniyet Anketi' }),
+      act('a_transfer', { action: 'transfer_call' }),
+    ]
+    const edges = [
+      edge('s', 'f_survey'),
+      edge('f_survey', 'c_dyn'),
+      edge('c_dyn', 'a_save', 'true'),
+      edge('c_dyn', 'a_transfer', 'false'),
+    ]
+    const sum = summarizeFlow(nodes, edges, {
+      musteriler__ozel_uye_mi: 'Müşteriler · Özel Üye mi?',
+      memnuniyet_anketi__puan: 'Memnuniyet Anketi · Puan',
+    })
+
+    expect(sum.f_survey.does).toContain('Memnuniyet Anketi · Puan')
+    expect(sum.a_save.when[0]).toContain('Müşteriler · Özel Üye mi?')
+    expect(sum.a_save.when[0]).toContain('Memnuniyet Anketi · Puan')
+    expect(JSON.stringify(sum)).not.toContain('musteriler__ozel_uye_mi')
+    expect(JSON.stringify(sum)).not.toContain('memnuniyet_anketi__puan')
+    expect(JSON.stringify(sum)).not.toMatch(/==|!=|\bAND\b|\bOR\b/)
+  })
+
+  it('özel tablo kayıt durumu (__row_exists__) ve sütun varlık kontrolünü (existsInTable) temiz Türkçe özetler', () => {
+    const nodes: FlowNodeLike[] = [
+      start,
+      cond('c_exists', {
+        conditionLogic: 'AND',
+        rules: [
+          {
+            field: 'musteriler____kayitli',
+            operator: 'equals',
+            value: 'true',
+            sourceTableName: 'Müşteriler',
+            sourceColumnId: '__row_exists__',
+          },
+        ],
+      }),
+      cond('c_col', {
+        conditionLogic: 'AND',
+        rules: [
+          {
+            field: 'urun_stoku__kalem',
+            operator: 'existsInTable',
+            value: '',
+            sourceTableName: 'Ürün & Demirbaş Stoku',
+            sourceColumnName: 'Kalem / Ürün Adı',
+          },
+        ],
+      }),
+      act('a_ok', { action: 'end_call' }),
+      act('a_miss_tbl', { action: 'transfer_call' }),
+      act('a_miss_col', { action: 'transfer_call' }),
+    ]
+    const edges = [
+      edge('s', 'c_exists'),
+      edge('c_exists', 'c_col', 'true'),
+      edge('c_exists', 'a_miss_tbl', 'false'),
+      edge('c_col', 'a_ok', 'true'),
+      edge('c_col', 'a_miss_col', 'false'),
+    ]
+    const sum = summarizeFlow(nodes, edges)
+
+    expect(sum.a_ok.when[0]).toContain('Müşteriler · Bu tabloda kayıtlı mı? Evet')
+    expect(sum.a_ok.when[0]).toContain('Ürün & Demirbaş Stoku · Kalem / Ürün Adı tabloda kayıtlıysa')
+    expect(sum.a_miss_tbl.when[0]).toContain('Müşteriler · Bu tabloda kayıtlı mı? Hayır')
+    expect(sum.a_miss_col.when[0]).toContain('Ürün & Demirbaş Stoku · Kalem / Ürün Adı tabloda kayıtlı değilse')
+    expect(JSON.stringify(sum)).not.toContain('____kayitli')
+    expect(JSON.stringify(sum)).not.toContain('existsInTable')
   })
 })

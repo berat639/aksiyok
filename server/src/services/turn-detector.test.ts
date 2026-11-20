@@ -140,6 +140,10 @@ describe('Turkish Semantic Turn Detector', () => {
     const wrapped = wrapWithTurkishLanguageLock('Örnek sistem talimatı')
     expect(wrapped.startsWith('MUTLAK TÜRKÇE DİL KİLİDİ')).toBe(true)
     expect(wrapped.endsWith('lütfen tekrar eder misiniz?" de.')).toBe(true)
+    const rewrapped = wrapWithTurkishLanguageLock(`${wrapped}\n\nEk talimat`)
+    expect(rewrapped.match(/MUTLAK TÜRKÇE DİL KİLİDİ/g)?.length).toBe(2)
+    expect(rewrapped).toContain('Örnek sistem talimatı')
+    expect(rewrapped).toContain('Ek talimat')
   })
 
   test('extracts spoken Turkish time expressions and sets BLOCKING tool behavior on gemini-3.8-live', async () => {
