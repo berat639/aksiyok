@@ -5,7 +5,7 @@ COPY server/package.json ./server/
 COPY client/package.json ./client/
 RUN bun install --frozen-lockfile
 
-FROM oven/bun:1.3.13-alpine AS builder
+FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/client/node_modules ./client/node_modules
@@ -27,7 +27,7 @@ ENV SERVER_URL=$SERVER_URL
 ARG BACKEND_PROXY_URL=http://localhost:3001
 ENV BACKEND_PROXY_URL=$BACKEND_PROXY_URL
 
-RUN rm -f .env && bun run build
+RUN rm -f .env && npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
