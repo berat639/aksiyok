@@ -75,7 +75,7 @@ services:
       - server_uploads:/app/server/public/uploads
       - server_tenant_assets:/app/server/public/tenant-assets
     healthcheck:
-      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3001/');if(!r.ok)process.exit(1)"]
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3001/api/public/plans');if(!r.ok)process.exit(1)"]
       interval: 10s
       timeout: 5s
       retries: 20

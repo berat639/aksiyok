@@ -1,12 +1,17 @@
-FROM oven/bun:1-alpine AS deps
+FROM oven/bun:1.3.13-alpine AS deps
 WORKDIR /app
-COPY client/package.json ./package.json
-RUN bun install
+COPY package.json bun.lock ./
+COPY server/package.json ./server/
+COPY client/package.json ./client/
+RUN bun install --frozen-lockfile
 
-FROM oven/bun:1-alpine AS builder
+FROM oven/bun:1.3.13-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY client/ ./
+COPY --from=deps /app/client/node_modules ./client/node_modules
+COPY package.json ./
+COPY client/ ./client/
+WORKDIR /app/client
 
 ARG NEXT_PUBLIC_API_URL=""
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
@@ -34,14 +39,14 @@ ENV HOSTNAME="0.0.0.0"
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/client/.next/standalone ./
 # outputFileTracingRoot is the repository root, so Next preserves the client
 # directory inside the standalone bundle. Keep runtime assets beside that
 # generated server entrypoint.
-COPY --from=builder --chown=nextjs:nodejs /app/public ./app/public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./app/.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/client/public ./client/public
+COPY --from=builder --chown=nextjs:nodejs /app/client/.next/static ./client/.next/static
 
 USER nextjs
 EXPOSE 3002
 
-CMD ["node", "app/server.js"]
+CMD ["node", "client/server.js"]
