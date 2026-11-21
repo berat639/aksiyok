@@ -1,4 +1,5 @@
-# Isolated Axamaz panel. Only the web and WebSocket endpoints join Dokploy's proxy network.
+# One public origin: axamaz.com. Marketing owns /; panel routes use the same host.
+# Keep this service's Dokploy Domains list empty: these labels own path routing.
 # Configure secrets in Dokploy Environment; do not commit their values.
 services:
   axamaz-db:
@@ -42,13 +43,13 @@ services:
       REDIS_URL: redis://axamaz-redis:6379
       POSTGRES_HOST_OVERRIDE: axamaz-db
       REDIS_HOST_OVERRIDE: axamaz-redis
-      APP_URL: https://app.axamaz.com
-      CLIENT_APP_URL: https://app.axamaz.com
-      CORS_ORIGIN: https://app.axamaz.com,https://axamaz.com,https://www.axamaz.com
-      SHARED_APP_HOSTS: app.axamaz.com
-      DEFAULT_CLINIC_HOSTS: app.axamaz.com
+      APP_URL: https://axamaz.com
+      CLIENT_APP_URL: https://axamaz.com
+      CORS_ORIGIN: https://axamaz.com,https://www.axamaz.com
+      SHARED_APP_HOSTS: axamaz.com
+      DEFAULT_CLINIC_HOSTS: axamaz.com
       DEFAULT_CLINIC_NAME: Axamaz
-      PLATFORM_ADMIN_HOSTS: app.axamaz.com
+      PLATFORM_ADMIN_HOSTS: axamaz.com
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in Dokploy}
       INTERNAL_PROXY_SECRET: ${INTERNAL_PROXY_SECRET:?Set INTERNAL_PROXY_SECRET in Dokploy}
       INTEGRATION_ENCRYPTION_KEY: ${INTEGRATION_ENCRYPTION_KEY:?Set INTEGRATION_ENCRYPTION_KEY in Dokploy}
@@ -57,8 +58,8 @@ services:
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?Set INITIAL_ADMIN_PASSWORD in Dokploy}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
-      GOOGLE_AUTH_REDIRECT_URI: https://app.axamaz.com/api/auth/google/callback
-      OAUTH_REDIRECT_URI: https://app.axamaz.com/api/admin/settings/calendar/callback
+      GOOGLE_AUTH_REDIRECT_URI: https://axamaz.com/api/auth/google/callback
+      OAUTH_REDIRECT_URI: https://axamaz.com/api/admin/settings/calendar/callback
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       TELEPHONY_ENABLED: "0"
       SMTP_HOST: ${SMTP_HOST:-}
@@ -80,6 +81,16 @@ services:
       retries: 20
       start_period: 90s
     networks: [panel, dokploy-network]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: dokploy-network
+      traefik.http.routers.axamaz-ws.rule: Host(`axamaz.com`) && PathRegexp(`^/ws(/|$)`)
+      traefik.http.routers.axamaz-ws.entrypoints: websecure
+      traefik.http.routers.axamaz-ws.priority: "200"
+      traefik.http.routers.axamaz-ws.tls: "true"
+      traefik.http.routers.axamaz-ws.tls.certresolver: letsencrypt
+      traefik.http.routers.axamaz-ws.service: axamaz-ws
+      traefik.http.services.axamaz-ws.loadbalancer.server.port: "3001"
 
   axamaz-panel:
     build:
@@ -88,7 +99,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: ""
         NEXT_PUBLIC_BACKEND_URL: ""
-        NEXT_PUBLIC_WS_URL: wss://app.axamaz.com/ws
+        NEXT_PUBLIC_WS_URL: wss://axamaz.com/ws
         SERVER_URL: http://axamaz-api:3001
         BACKEND_PROXY_URL: http://axamaz-api:3001
     restart: unless-stopped
@@ -107,6 +118,16 @@ services:
       retries: 20
       start_period: 60s
     networks: [panel, dokploy-network]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: dokploy-network
+      traefik.http.routers.axamaz-panel.rule: Host(`axamaz.com`) && PathRegexp(`^/(login|kayit|panel|api|_next|uploads|downloads|appointment|consent|invite|optout|bildirimler|profil|shift|admin|yonetici|calisan|hekim|host)(/|$)`)
+      traefik.http.routers.axamaz-panel.entrypoints: websecure
+      traefik.http.routers.axamaz-panel.priority: "100"
+      traefik.http.routers.axamaz-panel.tls: "true"
+      traefik.http.routers.axamaz-panel.tls.certresolver: letsencrypt
+      traefik.http.routers.axamaz-panel.service: axamaz-panel
+      traefik.http.services.axamaz-panel.loadbalancer.server.port: "3002"
 
 volumes:
   postgres_data:
