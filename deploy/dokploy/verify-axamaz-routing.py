@@ -45,7 +45,9 @@ cases = {"marketing": ["/", "/ozellikler", "/fiyatlama", "/bilgi-merkezi/google"
                    "/api/admin/settings/calendar/callback", "/_next/static/chunks/app.js",
                    "/uploads/logo.png", "/downloads/form.pdf", "/appointment/test",
                    "/consent/test", "/invite/test", "/optout", "/bildirimler",
-                   "/profil", "/shift", "/admin", "/yonetici", "/calisan", "/hekim", "/host"],
+                   "/models/dental/manifest.json", "/models/dental/toothfairy.bin",
+                   "/treatment-planning/photos.jpg", "/audio-processor.js",
+                   "/saglik-bakanligi-onam-formu.pdf", "/profil", "/shift", "/admin", "/yonetici", "/calisan", "/hekim", "/host"],
          "api": ["/ws", "/ws/", "/ws?session=test"]}
 
 with tempfile.TemporaryDirectory(prefix="axamaz-routing-") as folder:

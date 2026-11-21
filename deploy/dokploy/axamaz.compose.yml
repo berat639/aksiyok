@@ -121,7 +121,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: dokploy-network
-      traefik.http.routers.axamaz-panel.rule: Host(`axamaz.com`) && PathRegexp(`^/(login|kayit|panel|api|_next|uploads|downloads|appointment|consent|invite|optout|bildirimler|profil|shift|admin|yonetici|calisan|hekim|host)(/|$)`)
+      traefik.http.routers.axamaz-panel.rule: Host(`axamaz.com`) && PathRegexp(`^/(login|kayit|panel|api|_next|uploads|downloads|appointment|consent|invite|optout|bildirimler|profil|shift|admin|yonetici|calisan|hekim|host|models|treatment-planning)(/|$)|^/(audio-processor[.]js|saglik-bakanligi-onam-formu[.]pdf)$`)
       traefik.http.routers.axamaz-panel.entrypoints: websecure
       traefik.http.routers.axamaz-panel.priority: "100"
       traefik.http.routers.axamaz-panel.tls: "true"
