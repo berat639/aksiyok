@@ -1,0 +1,1387 @@
+/* İşletme ve Kayıtlar — Ana sayfa playground (ModuleShowcase) düzeni ve sadeliği. Opak, çift tema uyumlu. */
+
+.layout {
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+  width: 100%;
+}
+
+/* Sol modül sekmeleri (.module-tabs) */
+.moduleTabs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: sticky;
+  top: 12px;
+}
+
+.moduleTab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 49px;
+  padding: 10px 14px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+
+.moduleTab:hover {
+  background: var(--card-inner);
+  color: var(--foreground);
+}
+
+.moduleTab svg {
+  flex-shrink: 0;
+}
+
+.moduleTab:disabled {
+  cursor: not-allowed;
+  opacity: .65;
+}
+
+.moduleTabActive {
+  composes: moduleTab;
+  background: var(--pc-tint);
+  color: var(--pc-tint-fg);
+  font-weight: 700;
+  border-color: var(--pc-border);
+}
+
+.moduleTabActive:hover {
+  background: var(--pc-tint);
+  color: var(--pc-tint-fg);
+}
+
+.tabNo {
+  font-size: 11px;
+  font-weight: 700;
+  opacity: .75;
+}
+
+.tabLabel {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.tabMeta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Sağ sahne (.showcase-stage, .showcase-copy, .mini-window) */
+.stage {
+  min-width: 0;
+}
+
+.stageHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.stageHead h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--foreground);
+}
+
+.stageHead p {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--foreground-2);
+}
+
+.miniWindow {
+  background: var(--card-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  box-shadow: var(--pc-neo-card);
+  overflow: visible;
+}
+
+.windowBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--input-border);
+  font-size: 11.5px;
+  color: var(--foreground);
+}
+
+.windowBody {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Ortak kart ve satırlar (.staff-panel-card, .staff-compact-list) */
+.panelCard {
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--card-inner);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--foreground);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.muted {
+  font-size: 11.5px;
+  color: var(--foreground-2);
+}
+
+.error {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--danger);
+}
+
+.success {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--btn-clinic-mint-fg, #15803d);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tabNo {
+  font-size: 11px;
+  font-weight: 700;
+  opacity: .85;
+}
+
+.tabLabel {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.tabMeta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.stageHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stageHead h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--foreground);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stageHead p {
+  margin: 4px 0 0;
+  font-size: .8rem;
+  color: var(--foreground-2);
+}
+
+.card {
+  padding: 18px;
+  border: 1.5px solid var(--input-border);
+  border-radius: 14px;
+  background: var(--card-bg);
+  color: var(--foreground);
+  box-shadow: var(--pc-neo-card);
+}
+
+.subcard {
+  padding: 14px;
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  background: var(--card-inner);
+  box-shadow: var(--pc-neo-subcard);
+}
+
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: .92rem;
+  font-weight: 800;
+  color: var(--foreground);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.muted {
+  font-size: .76rem;
+  color: var(--foreground-2);
+}
+
+.error {
+  margin: 6px 0 0;
+  font-size: .74rem;
+  font-weight: 650;
+  color: var(--danger);
+}
+
+.success {
+  font-size: .78rem;
+  font-weight: 700;
+  color: var(--btn-clinic-mint-fg, #15803d);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.compactList {
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  overflow: hidden;
+}
+
+.compactRow+.compactRow {
+  border-top: 1px solid var(--input-border);
+}
+
+.compactMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+}
+
+.compactActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.compactEdit {
+  padding: 10px 12px;
+  border-top: 1px solid var(--input-border);
+  background: var(--card-inner);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Form alanları (sade ve net) */
+.field {
+  position: relative;
+}
+
+.fieldBox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  transition: border-color .15s ease;
+}
+
+.fieldBox:focus-within,
+.fieldBoxActive {
+  border-color: var(--pc-blue);
+}
+
+.fieldBoxInvalid {
+  border-color: var(--danger);
+}
+
+.fieldLabel {
+  position: absolute;
+  top: -8px;
+  left: 9px;
+  padding: 0 4px;
+  background: var(--card-bg);
+  color: var(--foreground-2);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 14px;
+  pointer-events: none;
+}
+
+.fieldBox:focus-within .fieldLabel,
+.fieldBoxActive .fieldLabel {
+  color: var(--pc-blue);
+}
+
+.fieldInput {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.fieldInput::placeholder {
+  color: var(--pc-muted, var(--foreground-3));
+}
+
+.fieldTextarea {
+  composes: fieldInput;
+  height: auto;
+  min-height: 76px;
+  padding: 12px 0 8px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.helper {
+  margin: 4px 0 0 2px;
+  font-size: 11px;
+  color: var(--foreground-2);
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground-2);
+  cursor: pointer;
+}
+
+.iconBtn:hover {
+  border-color: var(--input-border);
+  background: var(--card-inner);
+  color: var(--foreground);
+}
+
+.iconBtn:hover {
+  border-color: var(--input-border);
+  background: var(--card-bg);
+  color: var(--foreground);
+}
+
+/* Google tarzı kategori & adres açılır listesi */
+.dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-shadow: var(--pc-modal-shadow);
+}
+
+.dropdownHeading {
+  padding: 12px 14px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--foreground-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dropdownItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 14px;
+  border: none;
+  border-top: 1px solid var(--input-border);
+  background: var(--card-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dropdownItem:hover,
+.dropdownItemActive {
+  background: var(--pc-tint);
+  color: var(--pc-tint-fg);
+}
+
+.dropdownItem small {
+  display: block;
+  font-size: 11px;
+  color: var(--foreground-2);
+  margin-top: 1px;
+}
+
+.dropdownEmpty {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--foreground-2);
+  border-top: 1px solid var(--input-border);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.catChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px 3px 9px;
+  border: 1px solid var(--pc-border);
+  border-radius: 999px;
+  background: var(--pc-tint);
+  color: var(--pc-tint-fg);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.catChip button {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 1px;
+  border-radius: 50%;
+}
+
+.catChipPrimary {
+  composes: catChip;
+  border-color: #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+}
+
+.catChipPrimary *,
+.catChipPrimary svg {
+  color: #ffffff;
+}
+
+.catChip button {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 1px;
+  border-radius: 50%;
+}
+
+.catChipPrimary {
+  composes: catChip;
+  border-color: #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+  box-shadow: var(--pc-clay-primary);
+}
+
+.catChipPrimary *,
+.catChipPrimary svg {
+  color: #ffffff;
+}
+
+/* Konum & Google Harita */
+.locHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 750;
+  color: var(--foreground);
+}
+
+.infoBanner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+}
+
+.infoBanner * {
+  color: #ffffff;
+}
+
+.infoBanner p {
+  flex: 1;
+  min-width: 180px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.bannerAction {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.bannerAction:hover {
+  background: #1e40af;
+}
+
+.address {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--foreground);
+  line-height: 1.45;
+}
+
+.mapFrame {
+  position: relative;
+  height: 240px;
+  overflow: hidden;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+}
+
+.googleMapWrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.googleMapCanvas,
+.googleMapFrame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
+.mapHint {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--card-bg);
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+/* Çalışma saatleri (Mesai Planı ile birebir sade) */
+.simpleHoursBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.perDayList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+}
+
+.perDayRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.perDayName {
+  min-width: 90px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--foreground);
+}
+
+.dayGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dayBtn {
+  min-width: 40px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--foreground-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dayBtn:hover {
+  color: var(--foreground);
+  border-color: var(--pc-blue);
+}
+
+.dayBtnOn {
+  composes: dayBtn;
+  border-color: #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+}
+
+.dayBtnOn:hover {
+  color: #ffffff;
+}
+
+.perDayList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  background: var(--card-inner);
+}
+
+.perDayRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.perDayName {
+  min-width: 96px;
+  font-size: .82rem;
+  font-weight: 700;
+  color: var(--foreground);
+}
+
+/* Saat seçici */
+.timeWrap {
+  position: relative;
+}
+
+.timeBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 88px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.timeBtn:hover,
+.timeBtn[aria-expanded="true"] {
+  border-color: var(--pc-blue);
+}
+
+.timeBtn span {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--foreground-3);
+  text-transform: uppercase;
+}
+
+.timePop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 70;
+  width: 236px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  box-shadow: var(--pc-modal-shadow);
+}
+
+.timeOpt {
+  height: 28px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--card-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.timeOpt:hover {
+  border-color: var(--pc-blue);
+  color: var(--pc-tint-fg);
+}
+
+.timeOpt:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}
+
+.timeOptActive {
+  composes: timeOpt;
+  border-color: #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+}
+
+.timeOptActive:hover {
+  color: #ffffff;
+}
+
+.timeOpt {
+  height: 30px;
+  border: 1px solid var(--input-border);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: .76rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.timeOpt:hover {
+  border-color: var(--pc-blue);
+  color: var(--pc-tint-fg);
+}
+
+.timeOpt:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}
+
+.timeOptActive {
+  composes: timeOpt;
+  border-color: #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+}
+
+.timeOptActive:hover {
+  color: #ffffff;
+}
+
+/* Ürün ve Hizmetler (playground sade liste + ekleme kutusu) */
+.searchInline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  min-width: 190px;
+  padding: 0 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+}
+
+.searchInline input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.searchInline input::placeholder {
+  color: var(--foreground-3);
+}
+
+.compactInput {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.compactInput:focus,
+.compactTextarea:focus {
+  border-color: var(--pc-blue);
+}
+
+.compactTextarea {
+  width: 100%;
+  min-height: 68px;
+  padding: 8px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.offerContent {
+  font-size: 12px;
+  color: var(--foreground-2);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 2px;
+}
+
+.snippetChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--foreground-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.clayActionBtn:hover {
+  border-color: var(--pc-blue);
+  color: var(--pc-tint-fg);
+}
+
+.clayActionDanger {
+  composes: clayActionBtn;
+  color: var(--danger);
+}
+
+.clayActionDanger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 22px 14px;
+  text-align: center;
+  color: var(--foreground-2);
+  font-size: 12px;
+  border: 1px dashed var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+}
+
+.presetPillIcon svg {
+  color: #ffffff;
+}
+
+/* Personel & Mesai (ana sayfa StaffDemo ile birebir) */
+.avatar {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+
+.table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--foreground-2);
+  background: var(--card-inner);
+  border-bottom: 1px solid var(--input-border);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--input-border);
+  color: var(--foreground);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+}
+
+.clickRow {
+  cursor: pointer;
+}
+
+.clickRow:hover td {
+  background: var(--card-inner);
+}
+
+.rowOpen td {
+  background: var(--pc-tint);
+}
+
+.stickyCol {
+  position: sticky;
+  right: 0;
+  background: var(--card-bg);
+  text-align: right;
+}
+
+.clickRow:hover .stickyCol {
+  background: var(--card-inner);
+}
+
+.rowOpen .stickyCol {
+  background: var(--pc-tint);
+}
+
+.drawer {
+  padding: 10px 12px;
+  background: var(--card-inner);
+  border-bottom: 1px solid var(--input-border);
+}
+
+.permGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+  gap: 5px;
+}
+
+.permItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--foreground-2);
+  cursor: pointer;
+}
+
+.permItemOn {
+  composes: permItem;
+  border-color: var(--pc-blue);
+  background: var(--pc-tint);
+  color: var(--pc-tint-fg);
+}
+
+.permItem input {
+  width: 14px;
+  height: 14px;
+  accent-color: #2563eb;
+}
+
+.inviteGrid {
+  display: grid;
+  grid-template-columns: 1.1fr .9fr 1.2fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.stockFormGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, .9fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.stockNumGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  align-items: end;
+}
+
+.statusOk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  border: 1px solid var(--btn-clinic-mint-border, #86efac);
+  background: var(--btn-clinic-mint-bg, #f0fdf4);
+  color: var(--btn-clinic-mint-fg, #15803d);
+}
+
+.statusOff {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  border: 1px solid var(--danger);
+  background: var(--card-bg);
+  color: var(--danger);
+}
+
+.staffSub {
+  font-size: 11px;
+  color: var(--foreground-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+
+.table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--foreground-2);
+  background: var(--card-inner);
+  border-bottom: 1px solid var(--input-border);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--input-border);
+  color: var(--foreground);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+}
+
+.clickRow {
+  cursor: pointer;
+}
+
+.clickRow:hover td {
+  background: var(--card-inner);
+}
+
+.rowOpen td {
+  background: var(--pc-tint);
+}
+
+.stickyCol {
+  position: sticky;
+  right: 0;
+  background: var(--card-bg);
+  text-align: right;
+}
+
+.clickRow:hover .stickyCol {
+  background: var(--card-inner);
+}
+
+.rowOpen .stickyCol {
+  background: var(--pc-tint);
+}
+
+.drawer {
+  padding: 10px 12px;
+  background: var(--card-inner);
+  border-bottom: 1px solid var(--input-border);
+}
+
+.permGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+  gap: 5px;
+}
+
+.permItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--foreground-2);
+  cursor: pointer;
+}
+
+.permItemOn {
+  composes: permItem;
+  border-color: var(--pc-blue);
+  background: var(--pc-tint);
+  color: var(--pc-tint-fg);
+}
+
+.permItem input {
+  width: 14px;
+  height: 14px;
+  accent-color: #2563eb;
+}
+
+.inviteGrid {
+  display: grid;
+  grid-template-columns: 1.1fr .9fr 1.2fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.statusOk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  border: 1px solid var(--btn-clinic-mint-border, #86efac);
+  background: var(--btn-clinic-mint-bg, #f0fdf4);
+  color: var(--btn-clinic-mint-fg, #15803d);
+}
+
+.statusOff {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  border: 1px solid var(--danger);
+  background: var(--card-bg);
+  color: var(--danger);
+}
+
+.lockCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 18px;
+  text-align: center;
+}
+
+.lockCard h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--foreground);
+}
+
+.lockCard p {
+  margin: 0;
+  max-width: 400px;
+  font-size: 12.5px;
+  color: var(--foreground-2);
+}
+
+.saveBar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .moduleTabs {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .moduleTab {
+    min-width: 175px;
+    min-height: 44px;
+    font-size: 12px;
+  }
+
+  .inviteGrid,
+  .stockNumGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .stockFormGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+
+  .inviteGrid,
+  .stockNumGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .windowBody {
+    padding: 12px;
+  }
+}

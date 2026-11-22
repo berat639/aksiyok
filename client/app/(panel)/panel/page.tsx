@@ -8,7 +8,6 @@ import depth from '@/styles/clinic-depth.module.css'
 
 import CalendarTab from '../../admin/components/CalendarTab'
 import PatientsTab from '../../admin/components/PatientsTab'
-import PaymentsTab from '../../admin/components/PaymentsTab'
 import StatsBar from '../../admin/components/StatsBar'
 import KnowledgeTab from '../../admin/components/KnowledgeTab'
 import IntegrationsTab from '../../admin/components/IntegrationsTab'
@@ -16,22 +15,31 @@ import SubscriptionCheckoutModal, {
   type SubscriptionModalMode,
   type UpgradeRequestType,
 } from '../../admin/components/SubscriptionCheckoutModal'
-import StokTab from './tabs/StokTab'
-import KlinikPersonelTab from './tabs/KlinikPersonelTab'
 import VipAssistantTab from './tabs/VipAssistantTab'
 import PlatformClinicsTab from './tabs/PlatformClinicsTab'
+import IsletmeKayitlarTab, { type IsletmeSection, type SectionAccess } from './tabs/IsletmeKayitlarTab'
 
-type Tab = 'calendar' | 'patients' | 'payments' | 'stok' | 'knowledge' | 'klinik' | 'integrations' | 'vip' | 'platform-clinics'
+type Tab = 'isletme' | 'calendar' | 'patients' | 'payments' | 'stok' | 'knowledge' | 'klinik' | 'integrations' | 'vip' | 'platform-clinics'
 
+// Üst sekme çubuğu. "Ödemeler & Finans" (payments), "İşletme Personeli" (klinik) ve "Stok & Bakım" (stok)
+// artık "İşletme ve Kayıtlar" altında; yetki anahtarları geriye dönük uyumluluk için korunur.
 const BASE_TABS: { id: Tab; label: string }[] = [
+  { id: 'isletme', label: 'İşletme ve Kayıtlar' },
   { id: 'calendar', label: 'Takvim' },
   { id: 'patients', label: 'Veri Tabloları' },
-  { id: 'payments', label: 'Ödemeler & Finans' },
-  { id: 'stok', label: 'Stok & Bakım' },
   { id: 'knowledge', label: 'Bilgi Tabanı' },
-  { id: 'klinik', label: 'İşletme Personeli' },
   { id: 'integrations', label: 'Entegrasyonlar (Ayarlar)' },
 ]
+
+/** İşletme ve Kayıtlar içine taşınan eski sekmeler → ilgili bölüm. */
+const NESTED_TAB_SECTION: Partial<Record<Tab, IsletmeSection>> = { klinik: 'personel', payments: 'finans', stok: 'stok' }
+const YONETICI_TABS: Tab[] = [...BASE_TABS.map(t => t.id), 'klinik', 'payments', 'stok']
+const TAB_LABELS: Record<string, string> = {
+  ...Object.fromEntries(BASE_TABS.map(t => [t.id, t.label])),
+  klinik: 'Personel ve Mesai',
+  payments: 'Finans ve Raporlama',
+  stok: 'Stok ve Bakım',
+}
 
 const DEMO_LOCKED_CANDIDATES: Tab[] = ['payments', 'stok', 'klinik']
 
@@ -67,6 +75,7 @@ function resolveInitialPanelTab(allowed: Tab[], defaultTab: Tab, user: AuthUser 
 export default function YoneticiPage() {
   const { user, logout, refreshUser } = useAuth()
   const [tab, setTabState] = useState<Tab | null>(null)
+  const [isletmeSection, setIsletmeSection] = useState<IsletmeSection>('genel')
   const [allowedTabs, setAllowedTabs] = useState<Tab[] | null>(null)
   const [dynamicTabLabel, setDynamicTabLabel] = useState<string>('Veri Tabloları')
   const [paymentBanner, setPaymentBanner] = useState<'success' | 'failed' | null>(null)
@@ -129,12 +138,17 @@ export default function YoneticiPage() {
   }, [refreshUser])
 
   const setTab = useCallback((nextTab: Tab) => {
+    const nested = NESTED_TAB_SECTION[nextTab]
+    if (nested) {
+      setIsletmeSection(nested)
+      setTabState('isletme')
+      return
+    }
     if (isTabLockedByPlan(nextTab, user)) {
-      const found = BASE_TABS.find(b => b.id === nextTab)
       setSubModal({
         open: true,
         mode: 'LockedFeature',
-        featureTitle: found?.label || 'Bu Modül',
+        featureTitle: TAB_LABELS[nextTab] || 'Bu Modül',
         requestType: 'pro_upgrade',
       })
       return
@@ -142,8 +156,18 @@ export default function YoneticiPage() {
     setTabState(nextTab)
   }, [user])
 
+  // Eski bağlantılar (?tab=klinik / ?tab=payments) ve kayıtlı sekme tercihleri yeni bölüme yönlenir.
+  useEffect(() => {
+    if (!tab) return
+    const nested = NESTED_TAB_SECTION[tab]
+    if (!nested) return
+    setIsletmeSection(nested)
+    setTabState('isletme')
+  }, [tab])
+
   useEffect(() => {
     if (!tab || typeof window === 'undefined') return
+    if (NESTED_TAB_SECTION[tab]) return
     if (isTabLockedByPlan(tab, user)) {
       setTabState('calendar')
       return
@@ -179,7 +203,7 @@ export default function YoneticiPage() {
       if (normalized === 'finance') return 'payments'
       if (normalized === 'inventory') return 'stok'
       if (normalized === 'team') return 'klinik'
-      if (['calendar', 'patients', 'payments', 'stok', 'knowledge', 'klinik', 'integrations', 'vip', 'platform-clinics'].includes(normalized)) {
+      if (['isletme', 'calendar', 'patients', 'payments', 'stok', 'knowledge', 'klinik', 'integrations', 'vip', 'platform-clinics'].includes(normalized)) {
         return normalized as Tab
       }
       return null
@@ -194,10 +218,11 @@ export default function YoneticiPage() {
     } else if (user.role === 'yonetici') {
       const allowed: Tab[] = [
         ...(user.canManagePlatform ? ['platform-clinics' as Tab] : []),
-        ...BASE_TABS.map(t => t.id),
+        ...YONETICI_TABS,
       ]
       setAllowedTabs(allowed)
-      setTabState(prev => (prev && allowed.includes(prev) && !isTabLockedByPlan(prev, user) ? prev : resolveInitialPanelTab(allowed, 'calendar', user)))
+      // İlk girişte Takvim'den önce İşletme ve Kayıtlar açılır.
+      setTabState(prev => (prev && allowed.includes(prev) && !isTabLockedByPlan(prev, user) ? prev : resolveInitialPanelTab(allowed, 'isletme', user)))
     } else {
       fetch('/api/admin/settings/roles', { credentials: 'include' })
         .then(r => r.json())
@@ -208,6 +233,8 @@ export default function YoneticiPage() {
               ? perms.effectiveAllowedTabs
               : perms?.[user.role] || perms?.calisan || (user.role === 'host' ? perms?.sekreter : undefined)) || ['calendar']
           const rolePerms = Array.from(new Set(rawRolePerms.map(aliasToPanelTab).filter((t): t is Tab => Boolean(t))))
+          // Personel, finans veya stok yetkisi olan çalışan bu bölümlere İşletme ve Kayıtlar üzerinden ulaşır.
+          if (!rolePerms.includes('isletme') && (rolePerms.includes('klinik') || rolePerms.includes('payments') || rolePerms.includes('stok'))) rolePerms.push('isletme')
           const safeRolePerms: Tab[] = rolePerms.length > 0 ? rolePerms : ['calendar']
           setAllowedTabs(safeRolePerms)
           setTabState(prev => (prev && safeRolePerms.includes(prev) && !isTabLockedByPlan(prev, user) ? prev : resolveInitialPanelTab(safeRolePerms, safeRolePerms[0] || 'calendar', user)))
@@ -241,6 +268,19 @@ export default function YoneticiPage() {
     if (isDemoNonPlatform && DEMO_LOCKED_CANDIDATES.includes(t.id)) return true
     return false
   })
+
+  const canEditBusiness = Boolean(user && (user.role === 'yonetici' || user.canManagePlatform))
+  const hasTab = (t: Tab) => Boolean(allowedTabs?.includes(t))
+  const isletmeAccess: Record<IsletmeSection, SectionAccess> = {
+    genel: { visible: canEditBusiness },
+    urunler: { visible: canEditBusiness },
+    personel: { visible: hasTab('klinik') || isDemoNonPlatform, locked: isTabLockedByPlan('klinik', user) },
+    finans: { visible: hasTab('payments') || isDemoNonPlatform, locked: isTabLockedByPlan('payments', user) },
+    stok: { visible: hasTab('stok') || isDemoNonPlatform, locked: isTabLockedByPlan('stok', user) },
+  }
+  const openLockedFeature = useCallback((featureTitle: string) => {
+    setSubModal({ open: true, mode: 'LockedFeature', featureTitle, requestType: 'pro_upgrade' })
+  }, [])
 
   return (
     <div className="admin-content" style={{ minHeight: '100vh', background: 'var(--background)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px clamp(20px, 3.5vw, 56px)', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
@@ -420,12 +460,18 @@ export default function YoneticiPage() {
         </div>
 
         <div style={{ width: '100%' }}>
+          {tab === 'isletme' && (
+            <IsletmeKayitlarTab
+              section={isletmeSection}
+              onSectionChange={setIsletmeSection}
+              access={isletmeAccess}
+              onLocked={openLockedFeature}
+              scope={user?.clinicId || null}
+            />
+          )}
           {tab === 'calendar' && <CalendarTab onNavigateToClinicStaff={() => setTab('klinik')} />}
           {tab === 'patients' && <PatientsTab />}
-          {tab === 'payments' && !isTabLockedByPlan('payments', user) && <PaymentsTab />}
-          {tab === 'stok' && !isTabLockedByPlan('stok', user) && <StokTab />}
           {tab === 'knowledge' && <KnowledgeTab />}
-          {tab === 'klinik' && !isTabLockedByPlan('klinik', user) && <KlinikPersonelTab />}
           {tab === 'integrations' && <IntegrationsTab apiPrefix="/api/yonetici/integrations" />}
           {tab === 'vip' && <VipAssistantTab />}
           {tab === 'platform-clinics' && user?.canManagePlatform && <PlatformClinicsTab />}
