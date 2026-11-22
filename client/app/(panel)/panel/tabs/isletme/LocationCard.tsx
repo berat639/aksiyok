@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from 'react'
 import { Info, LocateFixed, MapPin, Pencil, Search, X } from 'lucide-react'
 import type { BusinessLocation } from '@/lib/business-profile'
 import { labelFor, searchPlaces } from '@/lib/places-tr'
-import depth from '@/styles/clinic-depth.module.css'
 import GoogleMapView from './GoogleMapView'
 import s from './isletme.module.css'
 
@@ -135,11 +134,11 @@ export default function LocationCard({
   }
 
   return (
-    <div className={s.stack} style={{ gap: 12 }}>
+    <div className={s.locWrap}>
       <div className={s.locHead}>
         İşletme konumu
         {!editing && (
-          <button type="button" className={s.iconBtn} aria-label="İşletme konumunu düzenle" onClick={() => setEditing(true)}>
+          <button type="button" className={s.genelIconToolBtn} aria-label="İşletme konumunu düzenle" onClick={() => setEditing(true)}>
             <Pencil size={15} />
           </button>
         )}
@@ -155,8 +154,8 @@ export default function LocationCard({
 
       {editing && (
         <div className={s.field}>
+          <label className={s.fieldLabel} htmlFor="isletme-konum-ara">Adres veya semt ara</label>
           <div className={`${s.fieldBox} ${invalid && !value ? s.fieldBoxInvalid : ''}`}>
-            <label className={s.fieldLabel} htmlFor="isletme-konum-ara">Adres veya semt ara</label>
             <Search size={16} color="var(--foreground-3)" />
             <input
               id="isletme-konum-ara"
@@ -174,7 +173,7 @@ export default function LocationCard({
               }}
             />
             {value && (
-              <button type="button" className={s.iconBtn} aria-label="Düzenlemeyi kapat" onClick={() => { setEditing(false); setQuery('') }}>
+              <button type="button" className={s.genelIconToolBtn} aria-label="Düzenlemeyi kapat" onClick={() => { setEditing(false); setQuery('') }}>
                 <X size={15} />
               </button>
             )}
@@ -209,7 +208,7 @@ export default function LocationCard({
 
       {editing && (
         <div className={s.row}>
-          <button type="button" className={depth.btn} onClick={useMyLocation}>
+          <button type="button" className={s.genelCtlBtn} onClick={useMyLocation}>
             <LocateFixed size={14} /> Konumumu kullan
           </button>
           {note ? <span className={s.muted}>{note}</span> : <span className={s.muted}>veya harita üzerinde nokta işaretleyin</span>}

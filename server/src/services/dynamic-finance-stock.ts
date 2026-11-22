@@ -1,10 +1,12 @@
 import { and, desc, eq } from 'drizzle-orm'
-import { db } from '../db/client'
+import { db, withPgAdvisoryLock } from '../db/client'
 import {
   deviceMaintenances,
   dynamicAppointmentLinks,
   dynamicRows,
   expenses,
+  financeAccountingConnections,
+  financeAccountingSyncRecords,
   inventoryItems,
   inventoryMovements,
   patientPayments,
@@ -12,10 +14,13 @@ import {
 } from '../db/schema'
 import { ensureDynamicTablesSchema } from '../db/dynamic-tables-schema'
 import {
+  CANONICAL_FINANCE_TABLE_DESCRIPTIONS,
+  CANONICAL_FINANCE_TABLE_NAMES,
   createDynamicColumn,
   createDynamicRelation,
   createDynamicRow,
   createDynamicTable,
+  getCanonicalFinanceColumnSpecs,
   getStudioSchema,
   inferModuleMappingForTable,
   listDynamicRows,
@@ -31,6 +36,18 @@ import {
   type DynamicModuleRole,
   type SelectOptionItem,
 } from '../db/repositories/dynamic-tables'
+import {
+  calculateAccountingAmounts,
+  normalizeAccountingPaymentStatus,
+  normalizeAccountingSyncStatus,
+  normalizeCurrencyCode,
+  normalizeDocumentType,
+  normalizeExchangeRate,
+  normalizeVatRate,
+  resolveTdhpAccountCode,
+  roundMoney,
+  type AccountingPaymentStatus,
+} from './pre-accounting-core'
 import { requireClinicId } from '../tenancy/context'
 
 export type FinanceChartPeriod = 'daily' | 'weekly' | 'monthly'
@@ -95,14 +112,8 @@ function resolveOptionLabel(
   return str
 }
 
-function normalizePaymentStatus(raw: unknown, label: string | null): 'completed' | 'pending' | 'cancelled' {
-  const hay = `${String(raw ?? '')} ${label ?? ''}`.toLocaleLowerCase('tr-TR').trim()
-  if (!hay) return 'completed'
-  if (/(iptal|cancel|red)/i.test(hay)) return 'cancelled'
-  if (/(bekliyor|pending|vadeli|planlan|ödenmedi|odenmedi|kısmi|kismi|açık|acik)/i.test(hay)) {
-    return 'pending'
-  }
-  return 'completed'
+function normalizePaymentStatus(raw: unknown, label: string | null): AccountingPaymentStatus {
+  return normalizeAccountingPaymentStatus(raw, label)
 }
 
 function normalizeMaintenanceStatus(raw: unknown, label: string | null): 'scheduled' | 'completed' | 'overdue' {
@@ -114,13 +125,18 @@ function normalizeMaintenanceStatus(raw: unknown, label: string | null): 'schedu
 
 function pickStatusSelectValue(
   col: { fieldType: string; config: unknown } | undefined,
-  desired: 'completed' | 'pending' | 'cancelled'
+  desired: AccountingPaymentStatus
 ): string {
   const opts = ((col?.config as DynamicColumnConfig | undefined)?.options ?? []) as SelectOptionItem[]
   if (opts.length > 0) {
     if (desired === 'completed') {
       const m = opts.find((o) => /(tamamlan|ödendi|odendi|tahsil|completed)/i.test(`${o.id} ${o.label}`))
       if (m) return m.id
+    } else if (desired === 'partial') {
+      const m = opts.find((o) => /(kısmi|kismi|partial)/i.test(`${o.id} ${o.label}`))
+      if (m) return m.id
+      const fallbackPending = opts.find((o) => /(bekliyor|pending|vadeli)/i.test(`${o.id} ${o.label}`))
+      if (fallbackPending) return fallbackPending.id
     } else if (desired === 'pending') {
       const m = opts.find((o) => /(bekliyor|pending|vadeli|planlan)/i.test(`${o.id} ${o.label}`))
       if (m) return m.id
@@ -130,9 +146,10 @@ function pickStatusSelectValue(
     }
     return opts[0]!.id
   }
-  if (desired === 'pending') return 'Bekliyor'
+  if (desired === 'partial') return 'Kısmi Ödendi'
+  if (desired === 'pending') return 'Bekliyor / Vadeli'
   if (desired === 'cancelled') return 'İptal'
-  return 'Tamamlandı'
+  return 'Tamamlandı / Ödendi'
 }
 
 function pickOptionValueByKeyword(
@@ -207,14 +224,9 @@ export async function resolveEffectiveModuleTables() {
       !/(hareket)/i.test(lower)
     ) {
       detectedRole = 'stock_inventory'
-    } else if (!coveredRoles.has('finance_expense') && /(gider|masraf|harcama)/i.test(lower)) {
-      detectedRole = 'finance_expense'
-    } else if (
-      !coveredRoles.has('finance_income') &&
-      /(tahsilat|gelirler|ödemeler|odemeler|kasa|prim & komisyon|komisyon & tahsilat)/i.test(lower)
-    ) {
-      detectedRole = 'finance_income'
     }
+    // Note: Finance tables (finance_income / finance_expense) are canonical & system-managed only;
+    // never auto-detect or hijack arbitrary user-created tables by name.
 
     if (detectedRole) {
       resolved.push({
@@ -239,7 +251,7 @@ function findCandidatePersonAndServiceTables(
 
   const personTable =
     nonModuleTables.find((t) =>
-      /(müşteri|musteri|hasta|danışan|danisan|alıcı|alici|kiracı|kiraci|sigortalı|sigortali|kişi|kisi|aday)/i.test(
+      /(müşteri|musteri|cari|firma|hasta|danışan|danisan|alıcı|alici|kiracı|kiraci|sigortalı|sigortali|üye|uye|öğrenci|ogrenci|misafir|kişi|kisi|aday|tedarikçi|tedarikci)/i.test(
         t.name.toLocaleLowerCase('tr-TR')
       )
     ) ??
@@ -250,7 +262,7 @@ function findCandidatePersonAndServiceTables(
     nonModuleTables.find(
       (t) =>
         t.id !== personTable?.id &&
-        /(tedavi plan|portföy|portfoy|ilan|teklif|poliçe|police|servis işlem|paket|talep|hizmet|tedaviler)/i.test(
+        /(ürün|urun|hizmet|satış|satis|sipariş|siparis|tedavi plan|portföy|portfoy|ilan|teklif|poliçe|police|servis işlem|paket|talep|proje|rezervasyon|kurs|etkinlik|tedaviler)/i.test(
           t.name.toLocaleLowerCase('tr-TR')
         )
     ) ??
@@ -262,157 +274,179 @@ function findCandidatePersonAndServiceTables(
   return { personTable, serviceTable }
 }
 
+const ensureFinanceInFlight = new Map<
+  string,
+  Promise<{
+    incomeTable: EffectiveModuleTable
+    expenseTable: EffectiveModuleTable
+    provisioned: boolean
+    upgradedColumnsCount: number
+  }>
+>()
+
+/**
+ * Her kiracı için tüm sektörlere uyumlu ve ön muhasebe entegrasyonuna hazır
+ * 2 standart finans tablosunu (Gelirler & Tahsilatlar, Giderler & Masraflar)
+ * idempotent ve eşzamanlılık-güvenli biçimde garanti eder.
+ * Mevcut finans tabloları varsa ekstra tablo oluşturmaz; eksik ön muhasebe sütunlarını
+ * mevcut verilere zarar vermeden tamamlar.
+ */
+export async function ensureCanonicalFinanceTables(): Promise<{
+  incomeTable: EffectiveModuleTable
+  expenseTable: EffectiveModuleTable
+  provisioned: boolean
+  upgradedColumnsCount: number
+}> {
+  await ensureDynamicTablesSchema()
+  const clinicId = requireClinicId()
+  const inflight = ensureFinanceInFlight.get(clinicId)
+  if (inflight) return inflight
+
+  const job = withPgAdvisoryLock('canonical_finance', clinicId, async () => {
+    let provisioned = false
+    let upgradedColumnsCount = 0
+
+    const ensureSingleRole = async (
+      role: 'finance_income' | 'finance_expense'
+    ): Promise<EffectiveModuleTable> => {
+      const { schema, resolved } = await resolveEffectiveModuleTables()
+      const existing = resolved.find((r) => r.moduleRole === role)
+      const specs = getCanonicalFinanceColumnSpecs(role)
+
+      if (existing) {
+        // Non-destructively backfill any missing pre-accounting columns onto existing finance table
+        const nextMapping: DynamicModuleMapping = { ...existing.mapping }
+        let addedAny = false
+        for (const sp of specs) {
+          if (sp.mappingKey === 'primaryTitle') continue
+          const mappedId = nextMapping[sp.mappingKey]
+          if (mappedId) continue
+          // Check if a matching column already exists by name/slug before adding
+          const existingBySlug = existing.table.columns.find(
+            (c) =>
+              c.name.toLocaleLowerCase('tr-TR') === sp.column.name.toLocaleLowerCase('tr-TR')
+          )
+          if (existingBySlug) {
+            ;(nextMapping as Record<string, string | null>)[sp.mappingKey] = existingBySlug.id
+            addedAny = true
+            continue
+          }
+          const createdCol = await createDynamicColumn(existing.table.id, {
+            name: sp.column.name,
+            fieldType: sp.column.fieldType,
+            isPrimaryTitle: false,
+            isRequired: false,
+            showInTable: sp.column.showInTable ?? false,
+            width: sp.column.width,
+            config: sp.column.config,
+          })
+          if (createdCol?.id) {
+            ;(nextMapping as Record<string, string | null>)[sp.mappingKey] = createdCol.id
+            upgradedColumnsCount += 1
+            addedAny = true
+          }
+        }
+        if (addedAny || existing.isAutoDetected) {
+          await upsertModuleConfig({
+            tableId: existing.table.id,
+            moduleRole: role,
+            enabled: true,
+            mapping: nextMapping,
+            allowSystemFinanceBinding: true,
+          })
+          const refreshed = await resolveEffectiveModuleTables()
+          return refreshed.resolved.find((r) => r.table.id === existing.table.id) ?? existing
+        }
+        return existing
+      }
+
+      provisioned = true
+      const { personTable, serviceTable } = findCandidatePersonAndServiceTables(schema, resolved)
+      const existingStock = resolved.find((r) => r.moduleRole === 'stock_inventory')
+      const maxCanvasX = schema.tables.reduce((max, t) => Math.max(max, t.canvasX || 0), 760)
+      const canvasX = role === 'finance_income' ? maxCanvasX + 380 : maxCanvasX + 810
+
+      const created = await createDynamicTable({
+        name: CANONICAL_FINANCE_TABLE_NAMES[role],
+        description: CANONICAL_FINANCE_TABLE_DESCRIPTIONS[role],
+        icon: role === 'finance_income' ? 'credit-card' : 'trending-down',
+        color: role === 'finance_income' ? '#15803d' : '#2563eb',
+        origin: 'system',
+        canvasX,
+        canvasY: 60,
+        initialColumns: specs.map((sp) => sp.column),
+      })
+
+      const mapping: DynamicModuleMapping = {}
+      specs.forEach((sp, i) => {
+        if (sp.mappingKey !== 'primaryTitle') {
+          ;(mapping as Record<string, string | null>)[sp.mappingKey] = created.columns[i]?.id ?? null
+        }
+      })
+
+      if (role === 'finance_income') {
+        if (personTable) {
+          const relP = await createDynamicRelation({
+            sourceTableId: created.id,
+            targetTableId: personTable.id,
+            sourceColumnName: personTable.name,
+            inverseColumnName: 'Gelirler & Tahsilatlar',
+            createInverseColumn: true,
+            cardinality: 'many_to_many',
+          })
+          mapping.personRelationColumnId = relP?.sourceColumnId ?? null
+        }
+        if (serviceTable) {
+          const relS = await createDynamicRelation({
+            sourceTableId: created.id,
+            targetTableId: serviceTable.id,
+            sourceColumnName: serviceTable.name,
+            inverseColumnName: 'Tahsilat Kayıtları',
+            createInverseColumn: true,
+            cardinality: 'many_to_many',
+          })
+          mapping.serviceRelationColumnId = relS?.sourceColumnId ?? null
+        }
+      } else if (existingStock) {
+        const relItem = await createDynamicRelation({
+          sourceTableId: created.id,
+          targetTableId: existingStock.table.id,
+          sourceColumnName: 'İlgili Stok / Envanter',
+          inverseColumnName: 'Gider Kayıtları',
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        mapping.itemRelationColumnId = relItem?.sourceColumnId ?? null
+      }
+
+      await upsertModuleConfig({
+        tableId: created.id,
+        moduleRole: role,
+        enabled: true,
+        mapping,
+        allowSystemFinanceBinding: true,
+      })
+
+      const refreshed = await resolveEffectiveModuleTables()
+      return refreshed.resolved.find((r) => r.table.id === created.id)!
+    }
+
+    const incomeTable = await ensureSingleRole('finance_income')
+    const expenseTable = await ensureSingleRole('finance_expense')
+    return { incomeTable, expenseTable, provisioned, upgradedColumnsCount }
+  }).finally(() => {
+    ensureFinanceInFlight.delete(clinicId)
+  })
+
+  ensureFinanceInFlight.set(clinicId, job)
+  return job
+}
+
 async function ensureFinanceTableForEntry(
   role: 'finance_income' | 'finance_expense'
 ): Promise<EffectiveModuleTable> {
-  const { schema, resolved } = await resolveEffectiveModuleTables()
-  const existing = resolved.find((r) => r.moduleRole === role)
-  if (existing) return existing
-
-  const { personTable, serviceTable } = findCandidatePersonAndServiceTables(schema, resolved)
-  const existingStock = resolved.find((r) => r.moduleRole === 'stock_inventory')
-
-  if (role === 'finance_income') {
-    const inc = await createDynamicTable({
-      name: 'Tahsilatlar & Gelirler',
-      icon: 'credit-card',
-      color: '#15803d',
-      origin: 'system',
-      canvasX: 1180,
-      canvasY: 60,
-      initialColumns: [
-        { name: 'Tahsilat / İşlem Başlığı', fieldType: 'text', isPrimaryTitle: true, isRequired: true, width: 235 },
-        { name: 'Tutar (₺)', fieldType: 'currency', width: 150, config: { currencySymbol: '₺' } },
-        { name: 'İşlem Tarihi', fieldType: 'date', width: 145 },
-        { name: 'Vade Tarihi', fieldType: 'date', width: 145 },
-        { name: 'Tahsilat Durumu', fieldType: 'select', width: 155, config: { options: STANDARD_PAYMENT_STATUS_OPTIONS } },
-        { name: 'Ödeme Yöntemi', fieldType: 'select', width: 155, config: { options: STANDARD_PAYMENT_METHOD_OPTIONS } },
-        {
-          name: 'Gelir Kalemi',
-          fieldType: 'select',
-          width: 170,
-          config: {
-            options: [
-              { id: 'hizmet_tahsilat', label: 'Hizmet / İşlem Tahsilatı', color: '#15803d' },
-              { id: 'komisyon_prim', label: 'Komisyon / Prim', color: '#2563eb' },
-              { id: 'kapora_on_odeme', label: 'Ön Ödeme / Kapora', color: '#0284c7' },
-              { id: 'diger_gelir', label: 'Diğer Gelir', color: '#0d9488' },
-            ],
-          },
-        },
-        { name: 'Açıklama / Not', fieldType: 'text', width: 220 },
-      ],
-    })
-
-    let personRelColId: string | null = null
-    let serviceRelColId: string | null = null
-    if (personTable) {
-      const relP = await createDynamicRelation({
-        sourceTableId: inc.id,
-        targetTableId: personTable.id,
-        sourceColumnName: personTable.name,
-        inverseColumnName: 'Tahsilatlar',
-        createInverseColumn: true,
-        cardinality: 'many_to_many',
-      })
-      personRelColId = relP?.sourceColumnId ?? null
-    }
-    if (serviceTable) {
-      const relS = await createDynamicRelation({
-        sourceTableId: inc.id,
-        targetTableId: serviceTable.id,
-        sourceColumnName: serviceTable.name,
-        inverseColumnName: 'Tahsilat Kayıtları',
-        createInverseColumn: true,
-        cardinality: 'many_to_many',
-      })
-      serviceRelColId = relS?.sourceColumnId ?? null
-    }
-
-    await upsertModuleConfig({
-      tableId: inc.id,
-      moduleRole: 'finance_income',
-      enabled: true,
-      mapping: {
-        amountColumnId: inc.columns[1]?.id ?? null,
-        dateColumnId: inc.columns[2]?.id ?? null,
-        dueDateColumnId: inc.columns[3]?.id ?? null,
-        statusColumnId: inc.columns[4]?.id ?? null,
-        methodColumnId: inc.columns[5]?.id ?? null,
-        categoryColumnId: inc.columns[6]?.id ?? null,
-        notesColumnId: inc.columns[7]?.id ?? null,
-        personRelationColumnId: personRelColId,
-        serviceRelationColumnId: serviceRelColId,
-      },
-    })
-
-    const refreshed = await resolveEffectiveModuleTables()
-    return refreshed.resolved.find((r) => r.table.id === inc.id)!
-  }
-
-  const exp = await createDynamicTable({
-    name: 'İşletme Giderleri',
-    icon: 'trending-down',
-    color: '#2563eb',
-    origin: 'system',
-    canvasX: 1610,
-    canvasY: 60,
-    initialColumns: [
-      { name: 'Gider Kalemi / Açıklama', fieldType: 'text', isPrimaryTitle: true, isRequired: true, width: 235 },
-      {
-        name: 'Kategori',
-        fieldType: 'select',
-        width: 175,
-        config: {
-          options: [
-            { id: 'stok_malzeme', label: 'Stok & Malzeme Alımı', color: '#0284c7' },
-            { id: 'bakim_onarim', label: 'Periyodik Bakım & Servis', color: '#0d9488' },
-            { id: 'kira_fatura', label: 'Kira, Fatura & Sabit Gider', color: '#2563eb' },
-            { id: 'iade_mahsup', label: 'Tedarikçi İade Mahsubu', color: '#15803d' },
-            { id: 'diger_gider', label: 'Diğer Gider', color: '#64748b' },
-          ],
-        },
-      },
-      { name: 'Adet', fieldType: 'number', width: 110 },
-      { name: 'Birim Tutar (₺)', fieldType: 'currency', width: 145, config: { currencySymbol: '₺' } },
-      { name: 'Toplam Tutar (₺)', fieldType: 'currency', width: 155, config: { currencySymbol: '₺' } },
-      { name: 'Tarih', fieldType: 'date', width: 145 },
-      { name: 'Ödeme Yöntemi', fieldType: 'select', width: 155, config: { options: STANDARD_PAYMENT_METHOD_OPTIONS } },
-      { name: 'Not / Belge No', fieldType: 'text', width: 220 },
-    ],
-  })
-
-  let itemRelColId: string | null = null
-  if (existingStock) {
-    const rel = await createDynamicRelation({
-      sourceTableId: exp.id,
-      targetTableId: existingStock.table.id,
-      sourceColumnName: 'İlgili Stok Kalemi',
-      inverseColumnName: 'Gider Kayıtları',
-      createInverseColumn: true,
-      cardinality: 'many_to_many',
-    })
-    itemRelColId = rel?.sourceColumnId ?? null
-  }
-
-  await upsertModuleConfig({
-    tableId: exp.id,
-    moduleRole: 'finance_expense',
-    enabled: true,
-    mapping: {
-      categoryColumnId: exp.columns[1]?.id ?? null,
-      quantityColumnId: exp.columns[2]?.id ?? null,
-      unitCostColumnId: exp.columns[3]?.id ?? null,
-      amountColumnId: exp.columns[4]?.id ?? null,
-      dateColumnId: exp.columns[5]?.id ?? null,
-      methodColumnId: exp.columns[6]?.id ?? null,
-      notesColumnId: exp.columns[7]?.id ?? null,
-      itemRelationColumnId: itemRelColId,
-    },
-  })
-
-  const refreshed = await resolveEffectiveModuleTables()
-  return refreshed.resolved.find((r) => r.table.id === exp.id)!
+  const { incomeTable, expenseTable } = await ensureCanonicalFinanceTables()
+  return role === 'finance_expense' ? expenseTable : incomeTable
 }
 
 async function ensureStockMovementTable(inventoryTableId?: string): Promise<EffectiveModuleTable> {
@@ -482,9 +516,17 @@ export async function getDynamicFinanceOverview(opts?: {
   search?: string
   status?: string
   appointmentId?: string
+  autoEnsure?: boolean
 }) {
   await ensureDynamicTablesSchema()
   const clinicId = requireClinicId()
+
+  let tablesAutoProvisioned = false
+  if (opts?.autoEnsure) {
+    const ensured = await ensureCanonicalFinanceTables()
+    tablesAutoProvisioned = ensured.provisioned || ensured.upgradedColumnsCount > 0
+  }
+
   const period: FinanceChartPeriod =
     opts?.period === 'daily' || opts?.period === 'weekly' ? opts.period : 'monthly'
   const activeMonth =
@@ -495,30 +537,74 @@ export async function getDynamicFinanceOverview(opts?: {
   const incomeTables = resolved.filter((r) => r.moduleRole === 'finance_income')
   const expenseTables = resolved.filter((r) => r.moduleRole === 'finance_expense')
 
-  const [incomeRowLists, expenseRowLists, apptLinks, legacyPayments, legacyExpenses] =
-    await Promise.all([
-      Promise.all(incomeTables.map((t) => listDynamicRows(t.table.id))),
-      Promise.all(expenseTables.map((t) => listDynamicRows(t.table.id))),
-      opts?.appointmentId
-        ? db
-            .select()
-            .from(dynamicAppointmentLinks)
-            .where(
-              and(
-                eq(dynamicAppointmentLinks.clinicId, clinicId),
-                eq(dynamicAppointmentLinks.appointmentId, opts.appointmentId)
-              )
+  const [
+    incomeRowLists,
+    expenseRowLists,
+    apptLinks,
+    legacyPayments,
+    legacyExpenses,
+    syncRecords,
+    accountingConnections,
+  ] = await Promise.all([
+    Promise.all(incomeTables.map((t) => listDynamicRows(t.table.id))),
+    Promise.all(expenseTables.map((t) => listDynamicRows(t.table.id))),
+    opts?.appointmentId
+      ? db
+          .select()
+          .from(dynamicAppointmentLinks)
+          .where(
+            and(
+              eq(dynamicAppointmentLinks.clinicId, clinicId),
+              eq(dynamicAppointmentLinks.appointmentId, opts.appointmentId)
             )
-        : Promise.resolve([]),
-      db
-        .select({ id: patientPayments.id })
-        .from(patientPayments)
-        .where(and(eq(patientPayments.clinicId, clinicId), eq(patientPayments.isActive, true))),
-      db
-        .select({ id: expenses.id })
-        .from(expenses)
-        .where(eq(expenses.clinicId, clinicId)),
-    ])
+          )
+      : Promise.resolve([]),
+    db
+      .select({ id: patientPayments.id })
+      .from(patientPayments)
+      .where(and(eq(patientPayments.clinicId, clinicId), eq(patientPayments.isActive, true))),
+    db
+      .select({ id: expenses.id })
+      .from(expenses)
+      .where(eq(expenses.clinicId, clinicId)),
+    db
+      .select({
+        rowId: financeAccountingSyncRecords.rowId,
+        provider: financeAccountingSyncRecords.provider,
+        syncStatus: financeAccountingSyncRecords.syncStatus,
+      })
+      .from(financeAccountingSyncRecords)
+      .where(eq(financeAccountingSyncRecords.clinicId, clinicId))
+      .orderBy(desc(financeAccountingSyncRecords.updatedAt)),
+    db
+      .select({
+        provider: financeAccountingConnections.provider,
+        status: financeAccountingConnections.status,
+      })
+      .from(financeAccountingConnections)
+      .where(eq(financeAccountingConnections.clinicId, clinicId)),
+  ])
+
+  const activeConnection =
+    accountingConnections.find((c) => c.status === 'connected') ??
+    accountingConnections.find((c) => c.status === 'configured') ??
+    null
+  // Priority: active connected/configured provider > most recent external provider > local
+  const syncStatusByRowId = new Map<string, string>()
+  const syncPriorityByRowId = new Map<string, number>()
+  for (const sr of syncRecords) {
+    const priority =
+      activeConnection && sr.provider === activeConnection.provider
+        ? 3
+        : sr.provider !== 'local'
+          ? 2
+          : 1
+    const prevPriority = syncPriorityByRowId.get(sr.rowId) ?? 0
+    if (priority > prevPriority) {
+      syncStatusByRowId.set(sr.rowId, sr.syncStatus)
+      syncPriorityByRowId.set(sr.rowId, priority)
+    }
+  }
 
   const importedLegacyIds = new Set<string>()
   for (const list of [...incomeRowLists, ...expenseRowLists]) {
@@ -536,12 +622,23 @@ export async function getDynamicFinanceOverview(opts?: {
     tableName: string
     title: string
     amount: number
+    netAmount: number
+    vatRate: number
+    vatAmount: number
+    currency: string
+    exchangeRate: number
+    baseAmountTry: number
     date: string
     dueDate: string | null
-    status: 'completed' | 'pending' | 'cancelled'
+    status: AccountingPaymentStatus
     statusLabel: string
     methodLabel: string
     categoryLabel: string
+    documentType: string
+    documentNumber: string | null
+    counterpartyName: string | null
+    counterpartyTaxId: string | null
+    accountingSyncStatus: string
     notes: string | null
     persons: Array<{ id: string; tableId: string; displayTitle: string }>
     services: Array<{ id: string; tableId: string; displayTitle: string }>
@@ -553,11 +650,25 @@ export async function getDynamicFinanceOverview(opts?: {
     tableName: string
     title: string
     amount: number
+    netAmount: number
+    vatRate: number
+    vatAmount: number
+    currency: string
+    exchangeRate: number
+    baseAmountTry: number
     quantity: number
     unitCost: number
     date: string
+    dueDate: string | null
+    status: AccountingPaymentStatus
+    statusLabel: string
     categoryLabel: string
     methodLabel: string
+    documentType: string
+    documentNumber: string | null
+    counterpartyName: string | null
+    counterpartyTaxId: string | null
+    accountingSyncStatus: string
     notes: string | null
   }
 
@@ -569,7 +680,34 @@ export async function getDynamicFinanceOverview(opts?: {
 
     for (const r of rows) {
       const vals = (r.values ?? {}) as Record<string, unknown>
-      const amount = m.amountColumnId ? toFiniteNumber(vals[m.amountColumnId], 0) : 0
+      const rawGross = m.amountColumnId ? toFiniteNumber(vals[m.amountColumnId], 0) : 0
+      const currency = m.currencyColumnId ? normalizeCurrencyCode(vals[m.currencyColumnId]) : 'TRY'
+      const exchangeRate = m.exchangeRateColumnId
+        ? normalizeExchangeRate(vals[m.exchangeRateColumnId], currency)
+        : 1
+      const vatRate = m.vatRateColumnId ? normalizeVatRate(vals[m.vatRateColumnId]) : 0
+      const amounts = calculateAccountingAmounts({
+        grossAmount: rawGross,
+        vatRate,
+        vatIncluded: true,
+        currency,
+        exchangeRate,
+      })
+      const explicitNet =
+        m.netAmountColumnId && vals[m.netAmountColumnId] != null && vals[m.netAmountColumnId] !== ''
+          ? toFiniteNumber(vals[m.netAmountColumnId], NaN)
+          : NaN
+      const explicitVat =
+        m.vatAmountColumnId && vals[m.vatAmountColumnId] != null && vals[m.vatAmountColumnId] !== ''
+          ? toFiniteNumber(vals[m.vatAmountColumnId], NaN)
+          : NaN
+      const explicitReconciles =
+        Number.isFinite(explicitNet) &&
+        Number.isFinite(explicitVat) &&
+        Math.abs(roundMoney(explicitNet + explicitVat) - amounts.grossAmount) <= 0.02
+      const netAmount = explicitReconciles ? roundMoney(explicitNet) : amounts.netAmount
+      const vatAmount = explicitReconciles ? roundMoney(explicitVat) : amounts.vatAmount
+
       const rawDate = m.dateColumnId ? vals[m.dateColumnId] : null
       const dateStr =
         typeof rawDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rawDate)
@@ -581,8 +719,7 @@ export async function getDynamicFinanceOverview(opts?: {
 
       const statusCol = m.statusColumnId ? colById.get(m.statusColumnId) : undefined
       const rawStatus = m.statusColumnId ? vals[m.statusColumnId] : null
-      const statusLabel =
-        resolveOptionLabel(statusCol, rawStatus) ?? 'Tamamlandı'
+      const statusLabel = resolveOptionLabel(statusCol, rawStatus) ?? 'Tamamlandı / Ödendi'
       const status = m.statusColumnId ? normalizePaymentStatus(rawStatus, statusLabel) : 'completed'
 
       const methodCol = m.methodColumnId ? colById.get(m.methodColumnId) : undefined
@@ -593,26 +730,64 @@ export async function getDynamicFinanceOverview(opts?: {
       const categoryLabel =
         (m.categoryColumnId ? resolveOptionLabel(catCol, vals[m.categoryColumnId]) : null) ?? mod.table.name
 
-      const notes =
-        m.notesColumnId && vals[m.notesColumnId] ? String(vals[m.notesColumnId]).trim() : null
+      const documentType = m.documentTypeColumnId
+        ? normalizeDocumentType(vals[m.documentTypeColumnId])
+        : 'belgesiz'
+      const documentNumber =
+        m.documentNumberColumnId && vals[m.documentNumberColumnId]
+          ? String(vals[m.documentNumberColumnId]).trim()
+          : null
 
       const persons =
         (m.personRelationColumnId ? r.relations[m.personRelationColumnId] : undefined) ?? []
       const services =
         (m.serviceRelationColumnId ? r.relations[m.serviceRelationColumnId] : undefined) ?? []
 
+      const explicitCounterparty =
+        m.counterpartyNameColumnId && vals[m.counterpartyNameColumnId]
+          ? String(vals[m.counterpartyNameColumnId]).trim()
+          : null
+      const counterpartyName = explicitCounterparty || persons[0]?.displayTitle || null
+      const counterpartyTaxId =
+        m.counterpartyTaxIdColumnId && vals[m.counterpartyTaxIdColumnId]
+          ? String(vals[m.counterpartyTaxIdColumnId]).trim()
+          : null
+
+      const syncFromTable = m.accountingSyncStatusColumnId
+        ? vals[m.accountingSyncStatusColumnId]
+        : null
+      const accountingSyncStatus = normalizeAccountingSyncStatus(
+        syncStatusByRowId.get(r.id) ??
+          syncFromTable ??
+          (status === 'cancelled' ? 'ignored' : amounts.grossAmount !== 0 ? 'ready' : 'pending')
+      )
+
+      const notes =
+        m.notesColumnId && vals[m.notesColumnId] ? String(vals[m.notesColumnId]).trim() : null
+
       const entry: NormalizedIncomeEntry = {
         rowId: r.id,
         tableId: mod.table.id,
         tableName: mod.table.name,
         title: r.displayTitle,
-        amount,
+        amount: amounts.grossAmount,
+        netAmount,
+        vatRate: amounts.vatRate,
+        vatAmount,
+        currency,
+        exchangeRate,
+        baseAmountTry: amounts.baseAmountTry,
         date: dateStr,
         dueDate,
         status,
         statusLabel,
         methodLabel,
         categoryLabel,
+        documentType,
+        documentNumber,
+        counterpartyName,
+        counterpartyTaxId,
+        accountingSyncStatus,
         notes,
         persons,
         services,
@@ -624,6 +799,8 @@ export async function getDynamicFinanceOverview(opts?: {
           entry.title,
           entry.categoryLabel,
           entry.methodLabel,
+          entry.counterpartyName ?? '',
+          entry.documentNumber ?? '',
           entry.notes ?? '',
           ...entry.persons.map((p) => p.displayTitle),
           ...entry.services.map((s) => s.displayTitle),
@@ -645,16 +822,50 @@ export async function getDynamicFinanceOverview(opts?: {
 
     for (const r of rows) {
       const vals = (r.values ?? {}) as Record<string, unknown>
-      const qty = m.quantityColumnId ? toFiniteNumber(vals[m.quantityColumnId], 1) : 1
+      const qty = m.quantityColumnId ? Math.max(1, toFiniteNumber(vals[m.quantityColumnId], 1)) : 1
       const unitCost = m.unitCostColumnId ? toFiniteNumber(vals[m.unitCostColumnId], 0) : 0
       const explicitTotal = m.amountColumnId ? toFiniteNumber(vals[m.amountColumnId], NaN) : NaN
-      const amount = Number.isFinite(explicitTotal) ? explicitTotal : qty * unitCost
+      const rawGross = Number.isFinite(explicitTotal) ? explicitTotal : qty * unitCost
+      const currency = m.currencyColumnId ? normalizeCurrencyCode(vals[m.currencyColumnId]) : 'TRY'
+      const exchangeRate = m.exchangeRateColumnId
+        ? normalizeExchangeRate(vals[m.exchangeRateColumnId], currency)
+        : 1
+      const vatRate = m.vatRateColumnId ? normalizeVatRate(vals[m.vatRateColumnId]) : 0
+      const amounts = calculateAccountingAmounts({
+        grossAmount: rawGross,
+        vatRate,
+        vatIncluded: true,
+        currency,
+        exchangeRate,
+      })
+      const explicitNet =
+        m.netAmountColumnId && vals[m.netAmountColumnId] != null && vals[m.netAmountColumnId] !== ''
+          ? toFiniteNumber(vals[m.netAmountColumnId], NaN)
+          : NaN
+      const explicitVat =
+        m.vatAmountColumnId && vals[m.vatAmountColumnId] != null && vals[m.vatAmountColumnId] !== ''
+          ? toFiniteNumber(vals[m.vatAmountColumnId], NaN)
+          : NaN
+      const explicitReconciles =
+        Number.isFinite(explicitNet) &&
+        Number.isFinite(explicitVat) &&
+        Math.abs(roundMoney(explicitNet + explicitVat) - amounts.grossAmount) <= 0.02
+      const netAmount = explicitReconciles ? roundMoney(explicitNet) : amounts.netAmount
+      const vatAmount = explicitReconciles ? roundMoney(explicitVat) : amounts.vatAmount
 
       const rawDate = m.dateColumnId ? vals[m.dateColumnId] : null
       const dateStr =
         typeof rawDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rawDate)
           ? rawDate.slice(0, 10)
           : new Date(r.createdAt).toISOString().slice(0, 10)
+      const rawDue = m.dueDateColumnId ? vals[m.dueDateColumnId] : null
+      const dueDate =
+        typeof rawDue === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rawDue) ? rawDue.slice(0, 10) : null
+
+      const statusCol = m.statusColumnId ? colById.get(m.statusColumnId) : undefined
+      const rawStatus = m.statusColumnId ? vals[m.statusColumnId] : null
+      const statusLabel = resolveOptionLabel(statusCol, rawStatus) ?? 'Tamamlandı / Ödendi'
+      const status = m.statusColumnId ? normalizePaymentStatus(rawStatus, statusLabel) : 'completed'
 
       const catCol = m.categoryColumnId ? colById.get(m.categoryColumnId) : undefined
       const categoryLabel =
@@ -664,11 +875,37 @@ export async function getDynamicFinanceOverview(opts?: {
       const methodLabel =
         (m.methodColumnId ? resolveOptionLabel(methodCol, vals[m.methodColumnId]) : null) ?? 'Belirtilmedi'
 
+      const documentType = m.documentTypeColumnId
+        ? normalizeDocumentType(vals[m.documentTypeColumnId])
+        : 'belgesiz'
+      const documentNumber =
+        m.documentNumberColumnId && vals[m.documentNumberColumnId]
+          ? String(vals[m.documentNumberColumnId]).trim()
+          : null
+      const counterpartyName =
+        m.counterpartyNameColumnId && vals[m.counterpartyNameColumnId]
+          ? String(vals[m.counterpartyNameColumnId]).trim()
+          : null
+      const counterpartyTaxId =
+        m.counterpartyTaxIdColumnId && vals[m.counterpartyTaxIdColumnId]
+          ? String(vals[m.counterpartyTaxIdColumnId]).trim()
+          : null
+
+      const syncFromTable = m.accountingSyncStatusColumnId
+        ? vals[m.accountingSyncStatusColumnId]
+        : null
+      const accountingSyncStatus = normalizeAccountingSyncStatus(
+        syncStatusByRowId.get(r.id) ??
+          syncFromTable ??
+          (status === 'cancelled' ? 'ignored' : amounts.grossAmount !== 0 ? 'ready' : 'pending')
+      )
+
       const notes =
         m.notesColumnId && vals[m.notesColumnId] ? String(vals[m.notesColumnId]).trim() : null
 
+      if (opts?.status && opts.status !== 'all' && status !== opts.status) continue
       if (searchLower) {
-        const hay = `${r.displayTitle} ${categoryLabel} ${notes ?? ''}`.toLocaleLowerCase('tr-TR')
+        const hay = `${r.displayTitle} ${categoryLabel} ${counterpartyName ?? ''} ${documentNumber ?? ''} ${notes ?? ''}`.toLocaleLowerCase('tr-TR')
         if (!hay.includes(searchLower)) continue
       }
 
@@ -677,59 +914,129 @@ export async function getDynamicFinanceOverview(opts?: {
         tableId: mod.table.id,
         tableName: mod.table.name,
         title: r.displayTitle,
-        amount,
+        amount: amounts.grossAmount,
+        netAmount,
+        vatRate: amounts.vatRate,
+        vatAmount,
+        currency,
+        exchangeRate,
+        baseAmountTry: amounts.baseAmountTry,
         quantity: qty,
         unitCost,
         date: dateStr,
+        dueDate,
+        status,
+        statusLabel,
         categoryLabel,
         methodLabel,
+        documentType,
+        documentNumber,
+        counterpartyName,
+        counterpartyTaxId,
+        accountingSyncStatus,
         notes,
       })
     }
   })
 
-  // KPIs
+  // KPIs (TRY equivalent for multi-currency consistency)
   let completedIncome = 0
   let completedCount = 0
   let pendingIncome = 0
   let pendingCount = 0
+  let partialIncome = 0
+  let partialCount = 0
   let cancelledIncome = 0
   let monthIncome = 0
+  let totalNetIncome = 0
+  let totalVatCollected = 0
 
   for (const inc of incomeEntries) {
+    const valTry = inc.baseAmountTry
+    const vatTry = Math.round(inc.vatAmount * inc.exchangeRate * 100) / 100
+    const netTry = Math.round(inc.netAmount * inc.exchangeRate * 100) / 100
     if (inc.status === 'completed') {
-      completedIncome += inc.amount
+      completedIncome += valTry
       completedCount += 1
-      if (inc.date.slice(0, 7) === activeMonth) monthIncome += inc.amount
+      totalNetIncome += netTry
+      totalVatCollected += vatTry
+      if (inc.date.slice(0, 7) === activeMonth) monthIncome += valTry
+    } else if (inc.status === 'partial') {
+      partialIncome += valTry
+      partialCount += 1
+      pendingIncome += valTry
+      pendingCount += 1
     } else if (inc.status === 'pending') {
-      pendingIncome += inc.amount
+      pendingIncome += valTry
       pendingCount += 1
     } else {
-      cancelledIncome += inc.amount
+      cancelledIncome += valTry
     }
   }
 
   let totalExpense = 0
+  let expenseCount = 0
+  let pendingExpense = 0
+  let pendingExpenseCount = 0
   let monthExpense = 0
+  let totalNetExpense = 0
+  let totalVatPaid = 0
+
   for (const exp of expenseEntries) {
-    totalExpense += exp.amount
-    if (exp.date.slice(0, 7) === activeMonth) monthExpense += exp.amount
+    if (exp.status === 'cancelled') continue
+    const valTry = exp.baseAmountTry
+    const vatTry = Math.round(exp.vatAmount * exp.exchangeRate * 100) / 100
+    const netTry = Math.round(exp.netAmount * exp.exchangeRate * 100) / 100
+    totalExpense += valTry
+    expenseCount += 1
+    totalNetExpense += netTry
+    totalVatPaid += vatTry
+    if (exp.status === 'pending' || exp.status === 'partial') {
+      pendingExpense += valTry
+      pendingExpenseCount += 1
+    }
+    if (exp.date.slice(0, 7) === activeMonth) monthExpense += valTry
   }
 
+  const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100
+
   const kpis = {
-    totalIncome: completedIncome + pendingIncome,
-    completedIncome,
+    totalIncome: r2(completedIncome + pendingIncome),
+    completedIncome: r2(completedIncome),
     completedCount,
-    pendingIncome,
+    pendingIncome: r2(pendingIncome),
     pendingCount,
-    cancelledIncome,
-    totalExpense,
-    expenseCount: expenseEntries.length,
-    netCashflow: completedIncome - totalExpense,
-    monthIncome,
-    monthExpense,
-    monthNetCashflow: monthIncome - monthExpense,
+    partialIncome: r2(partialIncome),
+    partialCount,
+    cancelledIncome: r2(cancelledIncome),
+    totalExpense: r2(totalExpense),
+    expenseCount,
+    pendingExpense: r2(pendingExpense),
+    pendingExpenseCount,
+    netCashflow: r2(completedIncome - totalExpense),
+    monthIncome: r2(monthIncome),
+    monthExpense: r2(monthExpense),
+    monthNetCashflow: r2(monthIncome - monthExpense),
+    totalNetIncome: r2(totalNetIncome),
+    totalVatCollected: r2(totalVatCollected),
+    totalNetExpense: r2(totalNetExpense),
+    totalVatPaid: r2(totalVatPaid),
+    netVatPayable: r2(totalVatCollected - totalVatPaid),
     activeMonth,
+  }
+
+  const allSyncStatuses = [
+    ...incomeEntries.map((i) => i.accountingSyncStatus),
+    ...expenseEntries.map((e) => e.accountingSyncStatus),
+  ]
+  const accountingSummary = {
+    totalCount: allSyncStatuses.length,
+    readyCount: allSyncStatuses.filter((st) => st === 'ready').length,
+    pendingCount: allSyncStatuses.filter((st) => st === 'pending').length,
+    syncedCount: allSyncStatuses.filter((st) => st === 'synced').length,
+    failedCount: allSyncStatuses.filter((st) => st === 'failed').length,
+    ignoredCount: allSyncStatuses.filter((st) => st === 'ignored').length,
+    connectedProvider: activeConnection?.provider ?? null,
   }
 
   // Chart buckets
@@ -743,11 +1050,12 @@ export async function getDynamicFinanceOverview(opts?: {
     for (const inc of incomeEntries) {
       if (inc.status !== 'completed') continue
       const b = map.get(inc.date)
-      if (b) b.gelir += inc.amount
+      if (b) b.gelir += inc.baseAmountTry
     }
     for (const exp of expenseEntries) {
+      if (exp.status === 'cancelled') continue
       const b = map.get(exp.date)
-      if (b) b.gider += exp.amount
+      if (b) b.gider += exp.baseAmountTry
     }
     for (const [iso, vals] of map.entries()) {
       chartData.push({
@@ -774,11 +1082,12 @@ export async function getDynamicFinanceOverview(opts?: {
     for (const inc of incomeEntries) {
       if (inc.status !== 'completed') continue
       const b = buckets.find((bk) => inc.date >= bk.start && inc.date <= bk.end)
-      if (b) b.gelir += inc.amount
+      if (b) b.gelir += inc.baseAmountTry
     }
     for (const exp of expenseEntries) {
+      if (exp.status === 'cancelled') continue
       const b = buckets.find((bk) => exp.date >= bk.start && exp.date <= bk.end)
-      if (b) b.gider += exp.amount
+      if (b) b.gider += exp.baseAmountTry
     }
     for (const b of buckets) {
       chartData.push({
@@ -802,11 +1111,12 @@ export async function getDynamicFinanceOverview(opts?: {
     for (const inc of incomeEntries) {
       if (inc.status !== 'completed') continue
       const b = map.get(inc.date.slice(0, 7))
-      if (b) b.gelir += inc.amount
+      if (b) b.gelir += inc.baseAmountTry
     }
     for (const exp of expenseEntries) {
+      if (exp.status === 'cancelled') continue
       const b = map.get(exp.date.slice(0, 7))
-      if (b) b.gider += exp.amount
+      if (b) b.gider += exp.baseAmountTry
     }
     for (const [ym, vals] of map.entries()) {
       chartData.push({
@@ -819,7 +1129,7 @@ export async function getDynamicFinanceOverview(opts?: {
     }
   }
 
-  // Group by Person / Entity
+  // Group by Linked Person OR Counterparty Name (works across all B2B/B2C sectors)
   const personGroupMap = new Map<
     string,
     {
@@ -829,6 +1139,7 @@ export async function getDynamicFinanceOverview(opts?: {
       personName: string
       paidTotal: number
       pendingTotal: number
+      paidCount: number
       pendingCount: number
       totalCount: number
       lastDate: string
@@ -839,22 +1150,31 @@ export async function getDynamicFinanceOverview(opts?: {
   for (const inc of incomeEntries) {
     if (inc.status === 'cancelled') continue
     const primaryPerson = inc.persons[0] ?? null
-    const key = primaryPerson ? primaryPerson.id : '__unlinked__'
+    const fallbackName = inc.counterpartyName?.trim() || null
+    const key = primaryPerson
+      ? primaryPerson.id
+      : fallbackName
+        ? `cp:${fallbackName.toLocaleLowerCase('tr-TR')}`
+        : '__unlinked__'
     const existing = personGroupMap.get(key) ?? {
       key,
       personRowId: primaryPerson?.id ?? null,
       personTableId: primaryPerson?.tableId ?? null,
-      personName: primaryPerson?.displayTitle ?? 'Genel / Cari Bağlantısız',
+      personName: primaryPerson?.displayTitle ?? fallbackName ?? 'Genel / Cari Belirtilmemiş',
       paidTotal: 0,
       pendingTotal: 0,
+      paidCount: 0,
       pendingCount: 0,
       totalCount: 0,
       lastDate: inc.date,
       rows: [],
     }
-    if (inc.status === 'completed') existing.paidTotal += inc.amount
-    if (inc.status === 'pending') {
-      existing.pendingTotal += inc.amount
+    if (inc.status === 'completed') {
+      existing.paidTotal = r2(existing.paidTotal + inc.baseAmountTry)
+      existing.paidCount += 1
+    }
+    if (inc.status === 'pending' || inc.status === 'partial') {
+      existing.pendingTotal = r2(existing.pendingTotal + inc.baseAmountTry)
       existing.pendingCount += 1
     }
     existing.totalCount += 1
@@ -872,8 +1192,9 @@ export async function getDynamicFinanceOverview(opts?: {
   // Category summaries
   const expenseCatMap = new Map<string, { label: string; total: number; count: number }>()
   for (const exp of expenseEntries) {
+    if (exp.status === 'cancelled') continue
     const prev = expenseCatMap.get(exp.categoryLabel) ?? { label: exp.categoryLabel, total: 0, count: 0 }
-    prev.total += exp.amount
+    prev.total = r2(prev.total + exp.baseAmountTry)
     prev.count += 1
     expenseCatMap.set(exp.categoryLabel, prev)
   }
@@ -945,7 +1266,6 @@ export async function getDynamicFinanceOverview(opts?: {
           : 0,
       }))
 
-    // Payments either directly linked to appointmentId OR linked to both the appointment's person/service
     const linkedPayments = incomeEntries.filter((inc) => {
       if (apptRowIdSet.has(inc.rowId)) return true
       if (linkedServiceRows.length > 0 && inc.services.some((s) => apptRowIdSet.has(s.id))) return true
@@ -964,6 +1284,8 @@ export async function getDynamicFinanceOverview(opts?: {
 
   return {
     hasFinanceTables: incomeTables.length > 0 || expenseTables.length > 0,
+    isLockedSingleSchema: true,
+    tablesAutoProvisioned,
     incomeTableIds: incomeTables.map((t) => t.table.id),
     expenseTableIds: expenseTables.map((t) => t.table.id),
     moduleTables: [...incomeTables, ...expenseTables].map((m) => ({
@@ -974,6 +1296,7 @@ export async function getDynamicFinanceOverview(opts?: {
       isAutoDetected: m.isAutoDetected,
     })),
     kpis,
+    accountingSummary,
     period,
     chartData,
     personGroups,
@@ -996,13 +1319,23 @@ export async function createQuickDynamicFinanceEntry(
     tableId?: string
     title: string
     amount: number
+    netAmount?: number
+    vatRate?: number
+    vatIncluded?: boolean
+    currency?: string
+    exchangeRate?: number
     quantity?: number
     unitCost?: number
     date?: string
     dueDate?: string | null
-    status?: 'completed' | 'pending' | 'cancelled'
+    status?: AccountingPaymentStatus
     method?: string
     category?: string
+    documentType?: string
+    documentNumber?: string | null
+    counterpartyName?: string | null
+    counterpartyTaxId?: string | null
+    accountingCode?: string | null
     notes?: string
     personRowId?: string | null
     serviceRowIds?: string[]
@@ -1016,14 +1349,8 @@ export async function createQuickDynamicFinanceEntry(
 
   const role: 'finance_income' | 'finance_expense' =
     input.entryType === 'expense' ? 'finance_expense' : 'finance_income'
-  const { resolved } = await resolveEffectiveModuleTables()
-  let targetMod = input.tableId
-    ? resolved.find((r) => r.table.id === input.tableId)
-    : resolved.find((r) => r.moduleRole === role)
-
-  if (!targetMod) {
-    targetMod = await ensureFinanceTableForEntry(role)
-  }
+  const ensured = await ensureCanonicalFinanceTables()
+  const targetMod = role === 'finance_expense' ? ensured.expenseTable : ensured.incomeTable
 
   const colById = new Map(targetMod.table.columns.map((c) => [c.id, c]))
   const primaryCol =
@@ -1031,20 +1358,72 @@ export async function createQuickDynamicFinanceEntry(
     targetMod.table.columns.find((c) => c.fieldType === 'text')
   const m = targetMod.mapping
 
-  const cleanTitle = (input.title || '').trim() || (role === 'finance_expense' ? 'Gider Kaydı' : 'Tahsilat Kaydı')
+  const cleanTitle =
+    (input.title || '').trim() || (role === 'finance_expense' ? 'Gider Kaydı' : 'Tahsilat Kaydı')
   const qty = Math.max(1, toFiniteNumber(input.quantity, 1))
-  const amount = toFiniteNumber(input.amount, 0)
+  const currency = normalizeCurrencyCode(input.currency)
+  if (
+    currency !== 'TRY' &&
+    !(typeof input.exchangeRate === 'number' && Number.isFinite(input.exchangeRate) && input.exchangeRate > 0)
+  ) {
+    throw new Error('Dövizli işlemler için geçerli bir döviz kuru giriniz')
+  }
+  const exchangeRate = normalizeExchangeRate(input.exchangeRate, currency)
+  const vatRate = normalizeVatRate(input.vatRate)
+  const rawInputAmount = toFiniteNumber(input.amount, 0)
+  const fallbackFromUnit =
+    rawInputAmount === 0 && input.unitCost !== undefined
+      ? roundMoney(qty * toFiniteNumber(input.unitCost, 0))
+      : rawInputAmount
+  const amounts = calculateAccountingAmounts({
+    grossAmount: input.vatIncluded === false ? undefined : fallbackFromUnit,
+    netAmount:
+      input.vatIncluded === false
+        ? toFiniteNumber(input.netAmount ?? fallbackFromUnit, 0)
+        : input.netAmount !== undefined
+          ? toFiniteNumber(input.netAmount, NaN)
+          : undefined,
+    vatRate,
+    vatIncluded: input.vatIncluded !== false,
+    currency,
+    exchangeRate,
+  })
+  if (!Number.isFinite(amounts.grossAmount) || amounts.grossAmount === 0) {
+    throw new Error('Lütfen sıfırdan farklı geçerli bir tutar giriniz')
+  }
   const unitCost =
-    input.unitCost !== undefined ? toFiniteNumber(input.unitCost, amount) : Math.round((amount / qty) * 100) / 100
-  const dateVal = input.date && /^\d{4}-\d{2}-\d{2}/.test(input.date) ? input.date.slice(0, 10) : todayIso()
+    input.unitCost !== undefined
+      ? toFiniteNumber(input.unitCost, amounts.grossAmount)
+      : roundMoney(amounts.grossAmount / qty)
+  const dateVal =
+    input.date && /^\d{4}-\d{2}-\d{2}/.test(input.date) ? input.date.slice(0, 10) : todayIso()
 
   const values: Record<string, unknown> = {}
   if (primaryCol) values[primaryCol.id] = cleanTitle
-  if (m.amountColumnId) values[m.amountColumnId] = amount
+  if (m.amountColumnId) values[m.amountColumnId] = amounts.grossAmount
+  if (m.netAmountColumnId) values[m.netAmountColumnId] = amounts.netAmount
+  if (m.vatAmountColumnId) values[m.vatAmountColumnId] = amounts.vatAmount
+  if (m.vatRateColumnId) {
+    const vatCol = colById.get(m.vatRateColumnId)
+    values[m.vatRateColumnId] =
+      vatCol?.fieldType === 'number'
+        ? amounts.vatRate
+        : pickOptionValueByKeyword(vatCol, String(amounts.vatRate), String(amounts.vatRate))
+  }
+  if (m.currencyColumnId) {
+    values[m.currencyColumnId] = pickOptionValueByKeyword(
+      colById.get(m.currencyColumnId),
+      currency,
+      currency
+    )
+  }
+  if (m.exchangeRateColumnId) values[m.exchangeRateColumnId] = exchangeRate
   if (m.quantityColumnId) values[m.quantityColumnId] = qty
   if (m.unitCostColumnId) values[m.unitCostColumnId] = unitCost
   if (m.dateColumnId) values[m.dateColumnId] = dateVal
-  if (m.dueDateColumnId && input.dueDate) values[m.dueDateColumnId] = input.dueDate.slice(0, 10)
+  if (m.dueDateColumnId && input.dueDate && /^\d{4}-\d{2}-\d{2}/.test(input.dueDate)) {
+    values[m.dueDateColumnId] = input.dueDate.slice(0, 10)
+  }
   if (m.statusColumnId) {
     values[m.statusColumnId] = pickStatusSelectValue(
       colById.get(m.statusColumnId),
@@ -1058,11 +1437,37 @@ export async function createQuickDynamicFinanceEntry(
       input.method
     )
   }
-  if (m.categoryColumnId && input.category) {
+  const categoryKey =
+    input.category || (role === 'finance_expense' ? 'diger_gider' : 'hizmet_geliri')
+  if (m.categoryColumnId) {
     values[m.categoryColumnId] = pickOptionValueByKeyword(
       colById.get(m.categoryColumnId),
-      input.category,
-      input.category
+      categoryKey,
+      categoryKey
+    )
+  }
+  if (m.documentTypeColumnId) {
+    const docType = normalizeDocumentType(input.documentType)
+    values[m.documentTypeColumnId] = pickOptionValueByKeyword(
+      colById.get(m.documentTypeColumnId),
+      docType,
+      docType
+    )
+  }
+  if (m.documentNumberColumnId && input.documentNumber?.trim()) {
+    values[m.documentNumberColumnId] = input.documentNumber.trim()
+  }
+  if (m.counterpartyNameColumnId && input.counterpartyName?.trim()) {
+    values[m.counterpartyNameColumnId] = input.counterpartyName.trim()
+  }
+  if (m.counterpartyTaxIdColumnId && input.counterpartyTaxId?.trim()) {
+    values[m.counterpartyTaxIdColumnId] = input.counterpartyTaxId.replace(/\s+/g, '')
+  }
+  if (m.accountingCodeColumnId) {
+    values[m.accountingCodeColumnId] = resolveTdhpAccountCode(
+      role === 'finance_expense' ? 'expense' : 'income',
+      String(m.categoryColumnId ? values[m.categoryColumnId] ?? categoryKey : categoryKey),
+      input.accountingCode
     )
   }
   if (m.notesColumnId && input.notes) {
@@ -1705,171 +2110,20 @@ export async function completeDynamicMaintenance(
 
 export async function applyModuleStarterPack(pack: ModuleStarterPackKey) {
   await ensureDynamicTablesSchema()
-  const { schema, resolved } = await resolveEffectiveModuleTables()
-  const { personTable, serviceTable } = findCandidatePersonAndServiceTables(schema, resolved)
 
+  if (
+    pack === 'general_finance' ||
+    pack === 'clinic_finance' ||
+    pack === 'real_estate_finance' ||
+    pack === 'insurance_finance'
+  ) {
+    await ensureCanonicalFinanceTables()
+    return getStudioSchema()
+  }
+
+  const { schema } = await resolveEffectiveModuleTables()
   const maxCanvasX = schema.tables.reduce((max, t) => Math.max(max, t.canvasX || 0), 450)
   const canvasStartX = maxCanvasX + 380
-
-  const personSpec = personTable
-    ? {
-        id: personTable.id,
-        relationLabel: personTable.name,
-        inverseLabel: 'Tahsilat & Ödemeleri',
-      }
-    : undefined
-
-  const serviceSpec = serviceTable
-    ? {
-        id: serviceTable.id,
-        relationLabel: serviceTable.name,
-        inverseLabel: 'Tahsilat Kayıtları',
-      }
-    : undefined
-
-  if (pack === 'real_estate_finance') {
-    await seedSectorFinanceAndStockTables({
-      includeFinance: true,
-      includeStock: false,
-      canvasStartX,
-      personTable: personSpec,
-      serviceTable: serviceSpec,
-      income: {
-        tableName: 'Komisyon & Tahsilatlar',
-        categories: [
-          { id: 'satis_komisyon', label: 'Satış Hizmet Bedeli', color: '#15803d' },
-          { id: 'kira_komisyon', label: 'Kiralama Komisyonu', color: '#0284c7' },
-          { id: 'kapora', label: 'Kapora / Ön Ödeme', color: '#2563eb' },
-        ],
-        samples: [
-          {
-            title: 'Örnek Kiralama Hizmet Bedeli',
-            amount: 38000,
-            status: 'tamamlandi',
-            method: 'havale_eft',
-            category: 'kira_komisyon',
-            daysOffset: -1,
-          },
-        ],
-      },
-      expense: {
-        tableName: 'Ofis & İlan Giderleri',
-        categories: [
-          { id: 'portal_ilan', label: 'İlan Portalı & Vitrin', color: '#2563eb' },
-          { id: 'afis_reklam', label: 'Afiş, Branda & Çekim', color: '#0284c7' },
-          { id: 'ofis_kira', label: 'Ofis & Sabit Giderler', color: '#0d9488' },
-        ],
-        samples: [
-          {
-            title: 'İlan Portalı Aylık Vitrin Paketi',
-            category: 'portal_ilan',
-            qty: 1,
-            unitCost: 9500,
-            daysOffset: -3,
-          },
-        ],
-      },
-    })
-    return getStudioSchema()
-  }
-
-  if (pack === 'insurance_finance') {
-    await seedSectorFinanceAndStockTables({
-      includeFinance: true,
-      includeStock: false,
-      canvasStartX,
-      personTable: personSpec,
-      serviceTable: serviceSpec,
-      income: {
-        tableName: 'Prim & Komisyon Tahsilatları',
-        categories: [
-          { id: 'kasko_trafik', label: 'Kasko & Trafik Primi', color: '#2563eb' },
-          { id: 'saglik_tss', label: 'Sağlık / TSS Primi', color: '#15803d' },
-          { id: 'acente_komisyon', label: 'Acente Komisyonu', color: '#0284c7' },
-        ],
-        samples: [
-          {
-            title: 'Genişletilmiş Kasko Poliçe Tahsilatı',
-            amount: 16400,
-            status: 'tamamlandi',
-            method: 'kredi_karti',
-            category: 'kasko_trafik',
-            daysOffset: -1,
-          },
-        ],
-      },
-      expense: {
-        tableName: 'Acente Giderleri',
-        categories: [
-          { id: 'yazilim', label: 'Teklif Yazılımı & Lisans', color: '#2563eb' },
-          { id: 'kargo_ofis', label: 'Poliçe Kargo & Ofis', color: '#0284c7' },
-        ],
-        samples: [
-          {
-            title: 'Çoklu Sigorta Teklif Ekranı Aboneliği',
-            category: 'yazilim',
-            qty: 1,
-            unitCost: 4800,
-            daysOffset: -2,
-          },
-        ],
-      },
-    })
-    return getStudioSchema()
-  }
-
-  if (pack === 'clinic_finance' || pack === 'general_finance') {
-    const isClinic = pack === 'clinic_finance'
-    await seedSectorFinanceAndStockTables({
-      includeFinance: true,
-      includeStock: false,
-      canvasStartX,
-      personTable: personSpec,
-      serviceTable: serviceSpec,
-      income: {
-        tableName: isClinic ? 'Hasta Tahsilatları' : 'Tahsilatlar & Gelirler',
-        categories: isClinic
-          ? [
-              { id: 'tedavi', label: 'Tedavi Tahsilatı', color: '#15803d' },
-              { id: 'on_odeme', label: 'Ön Ödeme / Taksit', color: '#2563eb' },
-              { id: 'muayene', label: 'Muayene & Kontrol', color: '#0284c7' },
-            ]
-          : [
-              { id: 'hizmet_satis', label: 'Hizmet & Satış Geliri', color: '#15803d' },
-              { id: 'sozlesme', label: 'Sözleşme / Paket Tahsilatı', color: '#2563eb' },
-              { id: 'kapora', label: 'Ön Ödeme / Kapora', color: '#0284c7' },
-            ],
-        samples: [
-          {
-            title: isClinic ? 'Örnek Tedavi Seans Tahsilatı' : 'Örnek Hizmet Tahsilatı',
-            amount: 4500,
-            status: 'tamamlandi',
-            method: 'kredi_karti',
-            category: isClinic ? 'tedavi' : 'hizmet_satis',
-            daysOffset: -1,
-          },
-        ],
-      },
-      expense: {
-        tableName: isClinic ? 'Klinik Giderleri' : 'İşletme Giderleri',
-        categories: [
-          { id: 'stok_malzeme', label: 'Malzeme & Ürün Alımı', color: '#0284c7' },
-          { id: 'bakim_onarim', label: 'Cihaz Bakım & Servis', color: '#0d9488' },
-          { id: 'sabit_gider', label: 'Kira, Fatura & Genel Gider', color: '#2563eb' },
-        ],
-        samples: [
-          {
-            title: 'Aylık Sarf Malzeme Tedariki',
-            category: 'stok_malzeme',
-            qty: 1,
-            unitCost: 3200,
-            daysOffset: -3,
-          },
-        ],
-      },
-    })
-    return getStudioSchema()
-  }
 
   // Stock & Maintenance Starter Packs
   const isClinicStock = pack === 'clinic_stock'
@@ -2004,6 +2258,9 @@ export async function migrateLegacyModuleData(
       if (seen.has(key)) continue
       const vals: Record<string, unknown> = { __legacy_id: key }
       if (incPrimary) vals[incPrimary.id] = `${p.patientName || 'Kayıt'} — Tahsilat`
+      if (im.counterpartyNameColumnId && p.patientName) {
+        vals[im.counterpartyNameColumnId] = p.patientName
+      }
       if (im.amountColumnId) vals[im.amountColumnId] = p.amount
       if (im.dateColumnId) vals[im.dateColumnId] = p.date
       if (im.dueDateColumnId && p.dueDate) vals[im.dueDateColumnId] = p.dueDate

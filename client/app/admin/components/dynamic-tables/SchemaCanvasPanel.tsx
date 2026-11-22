@@ -54,6 +54,7 @@ import {
   type TablePurpose,
 } from './tableSetupHelpers'
 import {
+  isFinanceModuleRole,
   MODULE_ROLE_META,
   type DynamicAppointmentConfigDef,
   type DynamicModuleConfigDef,
@@ -391,6 +392,7 @@ function SalesTableNode({ data }: { data: SalesTableNodeData }) {
               <strong
                 onDoubleClick={(e) => {
                   if (!canManageSchema) return
+                  if (moduleConfig?.enabled && isFinanceModuleRole(moduleConfig.moduleRole)) return
                   e.stopPropagation()
                   setRenaming(true)
                 }}
@@ -430,18 +432,20 @@ function SalesTableNode({ data }: { data: SalesTableNodeData }) {
 
             {canManageSchema && (
               <div className="nodrag" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setRenaming(true)
-                  }}
-                  className={depth.btn}
-                  style={{ minHeight: 24, padding: '2px 5px' }}
-                  title="Adını değiştir"
-                >
-                  <Edit3 size={11} />
-                </button>
+                {!(moduleConfig?.enabled && isFinanceModuleRole(moduleConfig.moduleRole)) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setRenaming(true)
+                    }}
+                    className={depth.btn}
+                    style={{ minHeight: 24, padding: '2px 5px' }}
+                    title="Adını değiştir"
+                  >
+                    <Edit3 size={11} />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -454,18 +458,20 @@ function SalesTableNode({ data }: { data: SalesTableNodeData }) {
                 >
                   <Settings2 size={11} />
                 </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setConfirmDeleteTable(true)
-                  }}
-                  className={depth.btn}
-                  style={{ minHeight: 24, padding: '2px 5px', color: 'var(--danger)' }}
-                  title="Listeyi sil"
-                >
-                  <Trash2 size={11} />
-                </button>
+                {!(moduleConfig?.enabled && isFinanceModuleRole(moduleConfig.moduleRole)) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setConfirmDeleteTable(true)
+                    }}
+                    className={depth.btn}
+                    style={{ minHeight: 24, padding: '2px 5px', color: 'var(--danger)' }}
+                    title="Listeyi sil"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                )}
               </div>
             )}
           </>

@@ -1,0 +1,161 @@
+/* Ürün ve Hizmetler bölümüne özgü ızgara, yapışkan form ve araç çubuğu düzeni */
+
+.splitGrid {
+  display: grid;
+  grid-template-columns: minmax(300px, 370px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  min-width: 0;
+}
+
+.splitGrid > .stickyForm {
+  position: sticky;
+  top: 12px;
+}
+
+.rightCol {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.aiFormRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.aiPromptBox {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.searchBox {
+  flex: 1 1 200px;
+  max-width: 300px;
+  min-height: 38px;
+}
+
+.catalogGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 255px), 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.itemHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.itemTitle {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 850;
+  line-height: 1.3;
+  color: var(--foreground);
+  word-break: break-word;
+}
+
+.itemContent {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--foreground-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.itemFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 9px;
+  border-top: 1px solid var(--clay-border);
+}
+
+.wellIcon {
+  flex-shrink: 0;
+  color: var(--foreground-2);
+}
+
+.goodIcon {
+  flex-shrink: 0;
+  color: var(--clay-good);
+}
+
+.warnTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+  color: var(--clay-danger);
+}
+
+.spin {
+  animation: urunSpin 0.9s linear infinite;
+}
+
+@keyframes urunSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Açık tema .admin-content !important kurallarına karşı kontrast koruma */
+:global([data-theme='light']) .itemTitle,
+:global([data-theme='light'] .admin-content) .itemTitle {
+  color: var(--foreground) !important;
+}
+
+:global([data-theme='light']) .itemContent,
+:global([data-theme='light'] .admin-content) .itemContent {
+  color: var(--foreground-2) !important;
+}
+
+:global([data-theme='light']) .wellIcon,
+:global([data-theme='light'] .admin-content) .wellIcon {
+  color: var(--foreground-2) !important;
+}
+
+:global([data-theme='light']) .goodIcon,
+:global([data-theme='light'] .admin-content) .goodIcon {
+  color: var(--clay-good) !important;
+}
+
+:global([data-theme='light']) .warnTitle,
+:global([data-theme='light']) .warnTitle span,
+:global([data-theme='light'] .admin-content) .warnTitle,
+:global([data-theme='light'] .admin-content) .warnTitle span {
+  color: var(--clay-danger) !important;
+}
+
+@media (max-width: 1080px) {
+  .splitGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .splitGrid > .stickyForm {
+    position: static;
+  }
+}
+
+@media (max-width: 640px) {
+  .searchBox {
+    max-width: none;
+    width: 100%;
+  }
+}

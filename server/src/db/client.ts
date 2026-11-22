@@ -19,6 +19,28 @@ const pool = postgres(connectionString, {
 
 export const db = drizzle(pool, { schema })
 
+/**
+ * Cross-process PostgreSQL session advisory lock on a reserved pool connection.
+ * Safe across multi-replica deployments and automatically released if the connection drops.
+ */
+export async function withPgAdvisoryLock<T>(
+  namespace: string,
+  key: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const reserved = await pool.reserve()
+  try {
+    await reserved`SELECT pg_advisory_lock(hashtext(${namespace}), hashtext(${key}))`
+    try {
+      return await fn()
+    } finally {
+      await reserved`SELECT pg_advisory_unlock(hashtext(${namespace}), hashtext(${key}))`.catch(() => {})
+    }
+  } finally {
+    reserved.release()
+  }
+}
+
 export async function checkDbHealth(): Promise<boolean> {
   try {
     await pool`SELECT 1`

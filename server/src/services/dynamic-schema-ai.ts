@@ -5,6 +5,7 @@ import {
   createDynamicRow,
   createDynamicTable,
   getStudioSchema,
+  isFinanceModuleRole,
   syncClinicFlowsWithDynamicTables,
   updateDynamicRow,
   upsertAppointmentConfig,
@@ -14,6 +15,7 @@ import {
   type DynamicModuleRole,
   type InitialColumnInput,
 } from '../db/repositories/dynamic-tables'
+import { ensureCanonicalFinanceTables } from './dynamic-finance-stock'
 import { recordAiTokenUsage } from '../db/repositories/ai-usage'
 import { getGeminiClient } from './gemini-client'
 
@@ -57,14 +59,12 @@ const SCENARIO_JSON_SCHEMA = {
             type: 'string',
             enum: [
               'none',
-              'finance_income',
-              'finance_expense',
               'stock_inventory',
               'stock_movement',
               'asset_maintenance',
             ],
             description:
-              'Tablonun Ödemeler & Finans veya Stok & Bakım ekranındaki özel rolü: finance_income = Tahsilat/Gelir/Komisyon/Prim, finance_expense = Gider/Masraf, stock_inventory = Stok/Envanter/Malzeme/Yedek Parça, asset_maintenance = Cihaz/Ekipman/Periyodik Bakım, stock_movement = Stok Hareket Geçmişi, none = Standart liste.',
+              'Tablonun Stok & Bakım ekranındaki özel rolü: stock_inventory = Stok/Envanter/Malzeme/Yedek Parça, asset_maintenance = Cihaz/Ekipman/Periyodik Bakım, stock_movement = Stok Hareket Geçmişi, none = Standart liste. (Finans tabloları sistem tarafından standart ve sabit olarak yönetilir, yeni finans tablosu oluşturma.)',
           },
           isRequiredInAppointment: {
             type: 'boolean',
@@ -157,7 +157,7 @@ interface AiGeneratedRelation {
   allowMultiple?: boolean
 }
 
-interface AiScenarioPlan {
+export interface AiScenarioPlan {
   summary: string
   tables: AiGeneratedTable[]
   relations: AiGeneratedRelation[]
@@ -169,6 +169,22 @@ function normTr(s: string): string {
   return String(s || '')
     .trim()
     .toLocaleLowerCase('tr-TR')
+}
+
+function detectFinanceRoleFromAiTable(
+  item: AiGeneratedTable
+): 'finance_income' | 'finance_expense' | null {
+  if (isFinanceModuleRole(item.moduleRole)) return item.moduleRole
+  if (item.moduleRole && item.moduleRole !== 'none') return null
+  if (item.appointmentRole === 'person' || item.appointmentRole === 'service') return null
+  const lower = normTr(item.name)
+  if (/(giderler|masraflar|harcamalar|gider\s*(&|ve)\s*masraf|işletme\s+gider|isletme\s+gider|klinik\s+gider|ofis.*gider|gider\s+takib|masraf\s+takib)/i.test(lower)) {
+    return 'finance_expense'
+  }
+  if (/(gelirler|tahsilatlar|ödemeler|odemeler|gelir\s*(&|ve)\s*tahsilat|tahsilat\s+takib|gelir\s+takib|fatura\s*(&|ve)\s*tahsilat)/i.test(lower)) {
+    return 'finance_income'
+  }
+  return null
 }
 
 export async function buildDynamicSchemaFromScenario(
@@ -230,11 +246,10 @@ KURALLAR:
 4. Kullanıcının belirttiği sektöre %100 uygun Türkçe terimler kullan (asla alakasız sektör terimi karıştırma). Her yeni liste için ilk alan isPrimaryTitle: true olmalı, telefon varsa "phone", tutar/fiyat/prim/bütçe varsa "currency" seçilmeli ve 2 adet gerçekçi Türkçe sampleRecords üretilmelidir.
 5. Gereksiz karmaşık tablo uydurma; senaryoda anlatılan ihtiyacı en temiz ve anlaşılır 1 ila 7 liste ile kur.
 6. Finans ve Stok/Bakım Rolleri (moduleRole):
-   - Kullanıcı senaryosunda tahsilat, gelir, komisyon, prim, ödeme takibi geçiyorsa veya tam işletme kurgusu isteniyorsa ilgili listeye moduleRole: "finance_income" ver (Tutar currency, İşlem Tarihi date, Durum select, Ödeme Yöntemi select alanlarıyla birlikte ve kişi/hizmet listesine bağlayarak).
-   - Gider, masraf, maliyet takibi geçiyorsa ilgili listeye moduleRole: "finance_expense" ver.
+   - Ödemeler & Finans tabloları (Gelirler & Tahsilatlar ve Giderler & Masraflar) sistem tarafından sabit ve ön muhasebe uyumlu olarak otomatik yönetilir; kesinlikle ekstra gelir/tahsilat veya gider/masraf tablosu OLUŞTURMA.
    - Stok, malzeme, yedek parça, sarf, ürün envanteri geçiyorsa ilgili listeye moduleRole: "stock_inventory" ver (Mevcut Stok number, Kritik Eşik number, Birim Maliyet currency, gerekiyorsa Son Kullanma Tarihi date ile).
    - Cihaz bakımı, periyodik bakım, muayene veya kalibrasyon geçiyorsa ilgili listeye moduleRole: "asset_maintenance" ver (Periyodik mi boolean, Periyot Günü number, Planlanan Tarih date, Sonraki Bakım Tarihi date, Durum select, Tahmini Ücret currency ile).
-   - Bunların dışındaki müşteri, hizmet, ilan, teklif vb. standart listelerde moduleRole: "none" bırak. Saf gelir/gider/stok/bakım listelerinde appointmentRole her zaman "none" olmalıdır.
+   - Bunların dışındaki müşteri, hizmet, ilan, teklif vb. standart listelerde moduleRole: "none" bırak. Saf stok/bakım listelerinde appointmentRole her zaman "none" olmalıdır.
 7. Senaryo emlak ilanı, araç ilanı, ürün veya harici ilan bağlantısı içeriyorsa ilgili ana listeye mutlaka "İlan Linki" (fieldType: "text") alanı ekle ve sampleRecords içinde gerçekçi örnek URL değerleri (ör. "https://www.sahibinden.com/ilan/emlak-konut-satilik-ornek-1042851920/detay") üret.`
 
   const userPrompt = `Mevcut Listeler:\n${existingSummary}\n\nKullanıcının Senaryosu / İsteği:\n${scenario}`
@@ -307,6 +322,23 @@ KURALLAR:
     throw new Error('Yapay zeka çıktısı okunamadı, lütfen cümlenizi biraz daha net yazıp tekrar deneyin.')
   }
 
+  return applyAiScenarioPlan(plan, { userId, modelUsed })
+}
+
+export async function applyAiScenarioPlan(
+  plan: AiScenarioPlan,
+  opts?: { userId?: string; modelUsed?: string }
+): Promise<{
+  summary: string
+  modelUsed: string
+  createdTableCount: number
+  createdRelationCount: number
+  schema: Awaited<ReturnType<typeof getStudioSchema>>
+}> {
+  const userId = opts?.userId
+  const modelUsed = opts?.modelUsed ?? 'manual-plan'
+  const currentSchema = await getStudioSchema()
+
   const plannedTables = Array.isArray(plan.tables) ? plan.tables.slice(0, 8) : []
   const plannedRelations = Array.isArray(plan.relations) ? plan.relations.slice(0, 12) : []
 
@@ -335,6 +367,21 @@ KURALLAR:
 
     const key = normTr(cleanTableName)
     const rawCols = Array.isArray(item.columns) ? item.columns.slice(0, 8) : []
+
+    // Finans tabloları sabittir; yapay zeka ekstra gelir/gider tablosu oluşturamaz, mevcut standart tabloyu eşleştirir
+    const detectedFinRole = detectFinanceRoleFromAiTable(item)
+    if (detectedFinRole) {
+      const ensured = await ensureCanonicalFinanceTables()
+      const targetFin =
+        detectedFinRole === 'finance_expense' ? ensured.expenseTable.table : ensured.incomeTable.table
+      tableByNormName.set(key, {
+        id: targetFin.id,
+        name: targetFin.name,
+        isNew: false,
+        sampleRowIds: [],
+      })
+      continue
+    }
 
     const existingMatch = currentSchema.tables.find((t) => normTr(t.name) === key)
 
@@ -534,6 +581,7 @@ KURALLAR:
     if (
       item.moduleRole &&
       item.moduleRole !== 'none' &&
+      !isFinanceModuleRole(item.moduleRole) &&
       ALLOWED_MODULE_ROLES.includes(item.moduleRole as DynamicModuleRole)
     ) {
       const entry = tableByNormName.get(normTr(item.name))

@@ -92,6 +92,7 @@ interface InlineTableConnectionsBarProps {
   activeTable: DynamicTableDef
   allTables: DynamicTableDef[]
   relations: DynamicRelationDef[]
+  allowCreateNewTable?: boolean
   onClose: () => void
   onMutated: () => void
 }
@@ -100,6 +101,7 @@ export default function InlineTableConnectionsBar({
   activeTable,
   allTables,
   relations,
+  allowCreateNewTable = true,
   onClose,
   onMutated,
 }: InlineTableConnectionsBarProps) {
@@ -110,7 +112,7 @@ export default function InlineTableConnectionsBar({
   )
 
   const [selectedOtherTableId, setSelectedOtherTableId] = useState<string>(
-    otherTables[0]?.id || '__new__'
+    otherTables[0]?.id || (allowCreateNewTable ? '__new__' : '')
   )
   const [newOtherTableName, setNewOtherTableName] = useState('')
   const [choice, setChoice] = useState<HumanRelationChoice>('both_many')
@@ -120,11 +122,14 @@ export default function InlineTableConnectionsBar({
   useEffect(() => {
     const others = allTables.filter((t) => t.id !== activeTable.id)
     setSelectedOtherTableId((curr) => {
-      if (curr === '__new__') return others.length === 0 ? '__new__' : curr
+      if (curr === '__new__') {
+        if (!allowCreateNewTable) return others[0]?.id || ''
+        return others.length === 0 ? '__new__' : curr
+      }
       if (others.some((t) => t.id === curr)) return curr
-      return others[0]?.id || '__new__'
+      return others[0]?.id || (allowCreateNewTable ? '__new__' : '')
     })
-  }, [activeTable.id, allTables])
+  }, [activeTable.id, allTables, allowCreateNewTable])
 
   const selectedOtherObj = otherTables.find((t) => t.id === selectedOtherTableId)
   const previewOtherName =
@@ -145,6 +150,10 @@ export default function InlineTableConnectionsBar({
       let finalOtherName = previewOtherName
 
       if (selectedOtherTableId === '__new__') {
+        if (!allowCreateNewTable) {
+          toast.error('Bu alanda yeni tablo oluşturulamaz; mevcut bir tabloyu seçebilirsiniz')
+          return
+        }
         const cleanNew = newOtherTableName.trim()
         if (!cleanNew) {
           toast.error('Bağlanacak yeni tablonun adını yazınız')
@@ -434,18 +443,25 @@ export default function InlineTableConnectionsBar({
                   )
                 })}
 
-                <button
-                  type="button"
-                  onClick={() => setSelectedOtherTableId('__new__')}
-                  className={selectedOtherTableId === '__new__' ? depth.btnPrimary : depth.btnPale}
-                  style={{ minHeight: 29, padding: '3px 10px', fontSize: 12 }}
-                >
-                  <Plus size={12} color={selectedOtherTableId === '__new__' ? '#ffffff' : undefined} />
-                  <span>Yeni Tablo Oluşturup Bağla</span>
-                </button>
+                {allowCreateNewTable && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOtherTableId('__new__')}
+                    className={selectedOtherTableId === '__new__' ? depth.btnPrimary : depth.btnPale}
+                    style={{ minHeight: 29, padding: '3px 10px', fontSize: 12 }}
+                  >
+                    <Plus size={12} color={selectedOtherTableId === '__new__' ? '#ffffff' : undefined} />
+                    <span>Yeni Tablo Oluşturup Bağla</span>
+                  </button>
+                )}
+                {!allowCreateNewTable && otherTables.length === 0 && (
+                  <span style={{ fontSize: 12, color: 'var(--pc-muted)' }}>
+                    Bağlanabilecek mevcut başka bir tablo bulunmuyor.
+                  </span>
+                )}
               </div>
 
-              {selectedOtherTableId === '__new__' && (
+              {allowCreateNewTable && selectedOtherTableId === '__new__' && (
                 <input
                   type="text"
                   value={newOtherTableName}

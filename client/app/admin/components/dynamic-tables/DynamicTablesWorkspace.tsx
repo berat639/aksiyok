@@ -27,7 +27,16 @@ import {
   type StarterBlueprintKey,
   type TablePurpose,
 } from './tableSetupHelpers'
-import type { DynamicTableDef, StudioSchemaResponse } from './types'
+import { isFinanceModuleRole, type DynamicTableDef, type StudioSchemaResponse } from './types'
+
+function filterOutFinanceTables(data: StudioSchemaResponse): DynamicTableDef[] {
+  const financeIds = new Set(
+    (data.moduleConfigs || [])
+      .filter((mc) => mc.enabled && isFinanceModuleRole(mc.moduleRole))
+      .map((mc) => mc.tableId),
+  )
+  return (data.tables || []).filter((t) => !financeIds.has(t.id))
+}
 
 export default function DynamicTablesWorkspace() {
   const [schema, setSchema] = useState<StudioSchemaResponse | null>(null)
@@ -58,9 +67,10 @@ export default function DynamicTablesWorkspace() {
         return
       }
       setSchema(data)
+      const visible = filterOutFinanceTables(data)
       setSelectedTableId((curr) => {
-        if (curr && data.tables?.some((t: DynamicTableDef) => t.id === curr)) return curr
-        return data.tables?.[0]?.id || null
+        if (curr && visible.some((t: DynamicTableDef) => t.id === curr)) return curr
+        return visible[0]?.id || null
       })
     } catch {
       toast.error('Veriler yüklenirken ağ hatası oluştu')
@@ -135,7 +145,8 @@ export default function DynamicTablesWorkspace() {
         return
       }
       setSchema(data)
-      setSelectedTableId(data.tables?.[data.tables.length - 1]?.id || data.tables?.[0]?.id || null)
+      const visible = filterOutFinanceTables(data)
+      setSelectedTableId(visible[visible.length - 1]?.id || visible[0]?.id || null)
       setRefreshToken((n) => n + 1)
       setAutoArrangeVersion((n) => n + 1)
       window.dispatchEvent(new Event('auth-user-refresh'))
@@ -154,9 +165,10 @@ export default function DynamicTablesWorkspace() {
 
   const handleAiSchemaApplied = useCallback((nextSchema: StudioSchemaResponse) => {
     setSchema(nextSchema)
+    const visible = filterOutFinanceTables(nextSchema)
     setSelectedTableId((curr) => {
-      if (curr && nextSchema.tables?.some((t) => t.id === curr)) return curr
-      return nextSchema.tables?.[nextSchema.tables.length - 1]?.id || nextSchema.tables?.[0]?.id || null
+      if (curr && visible.some((t) => t.id === curr)) return curr
+      return visible[visible.length - 1]?.id || visible[0]?.id || null
     })
     setRefreshToken((n) => n + 1)
     setAutoArrangeVersion((n) => n + 1)
@@ -164,12 +176,13 @@ export default function DynamicTablesWorkspace() {
 
   const handleTablesCleared = useCallback((nextSchema: StudioSchemaResponse) => {
     setSchema(nextSchema)
+    const visible = filterOutFinanceTables(nextSchema)
     setDiagramPropertiesTableId((curr) =>
-      curr && nextSchema.tables?.some((t) => t.id === curr) ? curr : null
+      curr && visible.some((t) => t.id === curr) ? curr : null
     )
     setSelectedTableId((curr) => {
-      if (curr && nextSchema.tables?.some((t) => t.id === curr)) return curr
-      return nextSchema.tables?.[0]?.id || null
+      if (curr && visible.some((t) => t.id === curr)) return curr
+      return visible[0]?.id || null
     })
     setFocusedDetailRowId(null)
     setRefreshToken((n) => n + 1)
@@ -197,31 +210,55 @@ export default function DynamicTablesWorkspace() {
     setDiagramPropertiesTableId((curr) => (curr === tableId ? null : tableId))
   }, [])
 
+  const visibleTables = useMemo(
+    () => (schema ? filterOutFinanceTables(schema) : []),
+    [schema],
+  )
+  const visibleTableIds = useMemo(
+    () => new Set(visibleTables.map((t) => t.id)),
+    [visibleTables],
+  )
+  const visibleRelations = useMemo(
+    () =>
+      (schema?.relations || []).filter(
+        (r) => visibleTableIds.has(r.sourceTableId) && visibleTableIds.has(r.targetTableId),
+      ),
+    [schema, visibleTableIds],
+  )
+  const visibleAppointmentConfigs = useMemo(
+    () => (schema?.appointmentConfigs || []).filter((c) => visibleTableIds.has(c.tableId)),
+    [schema, visibleTableIds],
+  )
+  const visibleModuleConfigs = useMemo(
+    () => (schema?.moduleConfigs || []).filter((c) => visibleTableIds.has(c.tableId)),
+    [schema, visibleTableIds],
+  )
+
   const diagramPropertiesTable = useMemo(
     () =>
-      schema && diagramPropertiesTableId
-        ? schema.tables.find((t) => t.id === diagramPropertiesTableId) || null
+      diagramPropertiesTableId
+        ? visibleTables.find((t) => t.id === diagramPropertiesTableId) || null
         : null,
-    [schema, diagramPropertiesTableId]
+    [visibleTables, diagramPropertiesTableId]
   )
 
   const diagramPropertiesApptConfig = useMemo(
     () =>
-      schema && diagramPropertiesTable
-        ? schema.appointmentConfigs.find((c) => c.tableId === diagramPropertiesTable.id && c.enabled) ||
+      diagramPropertiesTable
+        ? visibleAppointmentConfigs.find((c) => c.tableId === diagramPropertiesTable.id && c.enabled) ||
           null
         : null,
-    [schema, diagramPropertiesTable]
+    [visibleAppointmentConfigs, diagramPropertiesTable]
   )
 
   const diagramPropertiesModConfig = useMemo(
     () =>
-      schema && diagramPropertiesTable
-        ? (schema.moduleConfigs || []).find(
+      diagramPropertiesTable
+        ? visibleModuleConfigs.find(
             (c) => c.tableId === diagramPropertiesTable.id && c.enabled
           ) || null
         : null,
-    [schema, diagramPropertiesTable]
+    [visibleModuleConfigs, diagramPropertiesTable]
   )
 
   if (loading && !schema) {
@@ -325,20 +362,20 @@ export default function DynamicTablesWorkspace() {
 
           <span className={depth.badge}>
             <Table2 size={12} />
-            <span>{schema.tables.length} Tablo</span>
+            <span>{visibleTables.length} Tablo</span>
           </span>
-          {schema.canManageSchema && schema.relations.length > 0 && (
+          {schema.canManageSchema && visibleRelations.length > 0 && (
             <span className={depth.badge}>
               <Link2 size={12} />
-              <span>{schema.relations.length} İlişki</span>
+              <span>{visibleRelations.length} İlişki</span>
             </span>
           )}
         </div>
 
-        {schema.tables.length > 0 && schema.canManageSchema && (
+        {visibleTables.length > 0 && schema.canManageSchema && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <ScenarioAiBuilderBox
-              existingTableCount={schema.tables.length}
+              existingTableCount={visibleTables.length}
               collapsible
               defaultExpanded={false}
               floatingDropdown
@@ -370,9 +407,9 @@ export default function DynamicTablesWorkspace() {
         <div className={depth.card} style={{ padding: 0, overflow: 'hidden' }}>
           <TablePropertiesPanel
             activeTable={diagramPropertiesTable}
-            allTables={schema.tables}
-            relations={schema.relations}
-            allAppointmentConfigs={schema.appointmentConfigs}
+            allTables={visibleTables}
+            relations={visibleRelations}
+            allAppointmentConfigs={visibleAppointmentConfigs}
             appointmentConfig={diagramPropertiesApptConfig}
             moduleConfig={diagramPropertiesModConfig}
             onClose={() => setDiagramPropertiesTableId(null)}
@@ -386,7 +423,7 @@ export default function DynamicTablesWorkspace() {
       )}
 
       {/* Sıfır Tablo Durumu (Tablo Oluşturma Yetkisi Olanlar) */}
-      {schema.tables.length === 0 && schema.canManageSchema && (
+      {visibleTables.length === 0 && schema.canManageSchema && (
         <div className={styles.zeroStarterLayout}>
           <div
             className={depth.card}
@@ -502,7 +539,7 @@ export default function DynamicTablesWorkspace() {
       )}
 
       {/* Sıfır Tablo Durumu (Tablo Oluşturma Yetkisi Olmayan Çalışanlar) */}
-      {schema.tables.length === 0 && !schema.canManageSchema && (
+      {visibleTables.length === 0 && !schema.canManageSchema && (
         <div className={depth.card} style={{ padding: '28px 20px', textAlign: 'center' }}>
           <strong style={{ fontSize: 14, color: 'var(--foreground)' }}>
             Henüz oluşturulmuş bir veri tablosu bulunmuyor
@@ -514,13 +551,13 @@ export default function DynamicTablesWorkspace() {
       )}
 
       {/* Tablo Oluşturma Yetkisi Varsa: Sadece Yan Yana (Solda Diyagram, Sağda Tablo) */}
-      {schema.tables.length > 0 && schema.canManageSchema && (
+      {visibleTables.length > 0 && schema.canManageSchema && (
         <div className={styles.splitWorkspace}>
           <SchemaCanvasPanel
-            tables={schema.tables}
-            relations={schema.relations}
-            appointmentConfigs={schema.appointmentConfigs}
-            moduleConfigs={schema.moduleConfigs}
+            tables={visibleTables}
+            relations={visibleRelations}
+            appointmentConfigs={visibleAppointmentConfigs}
+            moduleConfigs={visibleModuleConfigs}
             appointmentNodePosition={schema.appointmentNodePosition}
             selectedTableId={selectedTableId}
             canManageSchema={schema.canManageSchema}
@@ -537,10 +574,10 @@ export default function DynamicTablesWorkspace() {
 
           <div className={styles.mainTableCard}>
             <DynamicDataGridPanel
-              tables={schema.tables}
-              relations={schema.relations}
-              appointmentConfigs={schema.appointmentConfigs}
-              moduleConfigs={schema.moduleConfigs}
+              tables={visibleTables}
+              relations={visibleRelations}
+              appointmentConfigs={visibleAppointmentConfigs}
+              moduleConfigs={visibleModuleConfigs}
               selectedTableId={selectedTableId}
               canManageSchema={schema.canManageSchema}
               refreshToken={refreshToken}
@@ -556,13 +593,13 @@ export default function DynamicTablesWorkspace() {
       )}
 
       {/* Tablo Oluşturma Yetkisi Yoksa: Sadece Sağdaki Tablo (Kayıt Ekleme ve Düzeltme) */}
-      {schema.tables.length > 0 && !schema.canManageSchema && (
+      {visibleTables.length > 0 && !schema.canManageSchema && (
         <div className={styles.mainTableCard}>
           <DynamicDataGridPanel
-            tables={schema.tables}
-            relations={schema.relations}
-            appointmentConfigs={schema.appointmentConfigs}
-            moduleConfigs={schema.moduleConfigs}
+            tables={visibleTables}
+            relations={visibleRelations}
+            appointmentConfigs={visibleAppointmentConfigs}
+            moduleConfigs={visibleModuleConfigs}
             selectedTableId={selectedTableId}
             canManageSchema={false}
             refreshToken={refreshToken}
@@ -578,10 +615,10 @@ export default function DynamicTablesWorkspace() {
       {/* Toplu Tablo Temizleme Modalı */}
       <BulkClearTablesModal
         isOpen={clearModalOpen}
-        tables={schema.tables}
-        relations={schema.relations}
-        appointmentConfigs={schema.appointmentConfigs}
-        moduleConfigs={schema.moduleConfigs}
+        tables={visibleTables}
+        relations={visibleRelations}
+        appointmentConfigs={visibleAppointmentConfigs}
+        moduleConfigs={visibleModuleConfigs}
         onClose={() => setClearModalOpen(false)}
         onCleared={handleTablesCleared}
       />

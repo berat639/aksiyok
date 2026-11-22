@@ -1,9 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'react-hot-toast'
 import {
   AlertTriangle,
+  Boxes,
   CalendarClock,
   Check,
   Clock,
@@ -46,8 +47,10 @@ import {
 } from '@/app/admin/components/dynamic-tables/types'
 import ClinicalDatePicker from '@/app/admin/components/dynamic-tables/ui/ClinicalDatePicker'
 import ConfirmModal from '@/app/admin/components/ConfirmModal'
-import depth from '@/styles/clinic-depth.module.css'
+import InfoTooltip from '@/app/admin/components/ui/InfoTooltip'
+import clay from './isletme-clay.module.css'
 import s from './isletme.module.css'
+import local from './StokBakimSection.module.css'
 
 type SubTab = 'inventory' | 'maintenance' | 'history'
 
@@ -636,7 +639,13 @@ export default function StokBakimSection() {
   /* ───────────── Görünüm ───────────── */
 
   if (loading && !overview) {
-    return <span className={s.muted}>Stok ve bakım verileri yükleniyor…</span>
+    return (
+      <div className={clay.scope}>
+        <div className={clay.card}>
+          <span className={clay.muted}>Stok ve bakım verileri yükleniyor…</span>
+        </div>
+      </div>
+    )
   }
 
   const alerts = overview?.alerts ?? {
@@ -648,676 +657,1250 @@ export default function StokBakimSection() {
     totalStockValue: 0,
   }
 
-  if (!overview?.hasStockTables) {
-    return (
-      <div className={s.stack}>
-        {overview?.legacyMigration.hasUnmigratedLegacyStock && canManageSchema && (
-          <div className={s.panelCard}>
-            <div className={s.topBar}>
-              <span className={s.muted}>
+  const hasStockTables = Boolean(overview?.hasStockTables)
+  const sktAlertTotal = alerts.sktExpiredCount + alerts.sktSoonCount
+
+  return (
+    <div className={clay.scope}>
+      {/* Üst Güçlü Mavi Clay Hero Şeridi */}
+      <div className={clay.hero}>
+        <div className={clay.heroMain}>
+          <div className={clay.heroLeft}>
+            <span className={clay.heroBadgeIcon} aria-hidden="true">
+              <Boxes size={20} strokeWidth={2.2} color="#ffffff" />
+            </span>
+            <div style={{ minWidth: 0 }}>
+              <div className={clay.heroTitleRow}>
+                <h3 className={clay.heroName}>Stok ve Bakım</h3>
+                <span className={clay.heroPill}>Envanter: {formatCurrencyTR(alerts.totalStockValue)}</span>
+                <InfoTooltip title="Stok ve Bakım" glyph="?">
+                  Tüm işletme türleriyle uyumlu ürün, sarf malzeme ve ekipman stoklarını, isteğe bağlı son kullanma tarihi (SKT) takibini ve periyodik bakımları buradan yönetin.
+                </InfoTooltip>
+              </div>
+              <div className={clay.heroMeta}>
+                <span className={clay.heroMetaItem}>
+                  {alerts.lowStockCount} kritik stok · {alerts.maintenanceDueCount} yaklaşan bakım
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {hasStockTables && (
+            <div className={clay.heroActions}>
+              <label className={clay.heroSwitchPill}>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={recordInFinance}
+                  aria-label="Alım ve bakım tutarlarını giderlere işle"
+                  className={clay.switch}
+                  onClick={() => setRecordInFinance((v) => !v)}
+                />
+                <span className={clay.heroSwitchLabel}>Gidere işle</span>
+              </label>
+
+              {subTab === 'inventory' && invMod && (
+                <button
+                  type="button"
+                  className={clay.heroPrimaryBtn}
+                  onClick={() => (stockFormOpen ? setStockFormOpen(false) : openNewStock())}
+                >
+                  {stockFormOpen ? <X size={14} color="#0e2152" /> : <Plus size={14} color="#0e2152" />}
+                  <span>{stockFormOpen ? 'Kapat' : 'Yeni Kalem'}</span>
+                </button>
+              )}
+
+              {subTab === 'maintenance' && maintMod && (
+                <button
+                  type="button"
+                  className={clay.heroPrimaryBtn}
+                  onClick={() => (maintFormOpen ? setMaintFormOpen(false) : openNewMaint())}
+                >
+                  {maintFormOpen ? <X size={14} color="#0e2152" /> : <Plus size={14} color="#0e2152" />}
+                  <span>{maintFormOpen ? 'Kapat' : 'Bakım Planla'}</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {hasStockTables && overview && (
+          <div className={clay.heroTabs} role="tablist" aria-label="Stok ve bakım görünümleri">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === 'inventory'}
+              className={subTab === 'inventory' ? clay.heroTabOn : clay.heroTab}
+              onClick={() => setSubTab('inventory')}
+            >
+              <Package size={13} color={subTab === 'inventory' ? '#0e2152' : '#ffffff'} />
+              <span>Stok ({alerts.totalStockItems})</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === 'maintenance'}
+              className={subTab === 'maintenance' ? clay.heroTabOn : clay.heroTab}
+              onClick={() => setSubTab('maintenance')}
+            >
+              <Wrench size={13} color={subTab === 'maintenance' ? '#0e2152' : '#ffffff'} />
+              <span>Bakım ({overview.maintenanceItems.length})</span>
+              {alerts.maintenanceDueCount > 0 && subTab !== 'maintenance' && (
+                <span className={local.maintDueDot} aria-hidden="true" />
+              )}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === 'history'}
+              className={subTab === 'history' ? clay.heroTabOn : clay.heroTab}
+              onClick={() => setSubTab('history')}
+            >
+              <History size={13} color={subTab === 'history' ? '#0e2152' : '#ffffff'} />
+              <span>Geçmiş ({overview.recentMovements.length})</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Sıfır Durum Kurulumu */}
+      {!hasStockTables ? (
+        <>
+          {overview?.legacyMigration.hasUnmigratedLegacyStock && canManageSchema && (
+            <div className={clay.noticeInfo}>
+              <span className={clay.muted}>
                 Önceki kayıtlarda <strong>{overview.legacyMigration.unmigratedItems}</strong> stok ve{' '}
                 <strong>{overview.legacyMigration.unmigratedMaintenances}</strong> bakım bulundu.
               </span>
-              <button type="button" className={depth.btnMint} disabled={migrating} onClick={() => void handleMigrateLegacy()}>
+              <button
+                type="button"
+                className={clay.mintBtn}
+                disabled={migrating}
+                onClick={() => void handleMigrateLegacy()}
+              >
                 <DownloadCloud size={13} />
-                {migrating ? 'Aktarılıyor…' : 'Mevcut Kayıtları Aktar'}
+                <span>{migrating ? 'Aktarılıyor…' : 'Mevcut Kayıtları Aktar'}</span>
               </button>
             </div>
-          </div>
-        )}
-
-        <div className={s.panelCard}>
-          <div className={s.emptyState} style={{ borderStyle: 'solid' }}>
-            <Package size={20} color="var(--accent)" />
-            <strong style={{ color: 'var(--foreground)' }}>Stok ve Bakım Alanını Başlatın</strong>
-            <span style={{ maxWidth: 440 }}>
-              Tüm işletme türleriyle uyumlu ürün, sarf malzeme, ekipman stoku, isteğe bağlı SKT ve periyodik bakım tablolarını tek tıkla oluşturun.
-            </span>
-            {canManageSchema ? (
-              <button type="button" className={depth.btnPrimary} disabled={setupBusy} onClick={() => void initializeUniversalStock()}>
-                <Plus size={13} color="#ffffff" />
-                <span style={{ color: '#ffffff' }}>{setupBusy ? 'Hazırlanıyor…' : 'Stok ve Bakımı Başlat'}</span>
-              </button>
-            ) : (
-              <span className={s.muted}>Yönetici stok alanını başlattığında kayıtlar burada görünecektir.</span>
-            )}
-          </div>
-
-          {canManageSchema && unboundTables.length > 0 && (
-            <form className={s.topBar} onSubmit={handleBindTable}>
-              <span className={s.muted}>Veya mevcut bir tablonuzu bağlayın:</span>
-              <div className={s.row} style={{ gap: 6 }}>
-                <select className={s.compactInput} style={{ width: 170 }} value={bindTableId} onChange={(e) => setBindTableId(e.target.value)}>
-                  <option value="">Tablo seçin…</option>
-                  {unboundTables.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
-                  ))}
-                </select>
-                <select className={s.compactInput} style={{ width: 165 }} value={bindRole} onChange={(e) => setBindRole(e.target.value as any)}>
-                  <option value="stock_inventory">Stok &amp; Envanter</option>
-                  <option value="asset_maintenance">Periyodik Bakım</option>
-                  <option value="stock_movement">Hareket Geçmişi</option>
-                </select>
-                <button type="submit" className={depth.btn} disabled={setupBusy || !bindTableId} style={{ minHeight: 34 }}>
-                  Bağla
-                </button>
-              </div>
-            </form>
           )}
-        </div>
-      </div>
-    )
-  }
 
-  return (
-    <div className={s.stack}>
-      {overview.legacyMigration.hasUnmigratedLegacyStock && canManageSchema && (
-        <div className={s.panelCard}>
-          <div className={s.topBar}>
-            <span className={s.muted}>
-              Eski stok kayıtlarında <strong>{overview.legacyMigration.unmigratedItems}</strong> kalem ve{' '}
-              <strong>{overview.legacyMigration.unmigratedMaintenances}</strong> bakım var.
-            </span>
-            <button type="button" className={depth.btnMint} style={{ minHeight: 28, fontSize: '11.5px' }} disabled={migrating} onClick={() => void handleMigrateLegacy()}>
-              <DownloadCloud size={12} />
-              {migrating ? 'Aktarılıyor…' : 'Aktar'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Üst Sekmeler + Envanter Değeri + Otomatik Gider Anahtarı */}
-      <div className={s.topBar}>
-        <div className={depth.segmentTrack} role="tablist" aria-label="Stok ve bakım görünümleri">
-          <button type="button" role="tab" aria-selected={subTab === 'inventory'} className={subTab === 'inventory' ? depth.segmentActive : depth.segment} onClick={() => setSubTab('inventory')}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, ...(subTab === 'inventory' ? { color: '#ffffff' } : {}) }}>
-              <Package size={13} />Stok ({alerts.totalStockItems})
-            </span>
-          </button>
-          <button type="button" role="tab" aria-selected={subTab === 'maintenance'} className={subTab === 'maintenance' ? depth.segmentActive : depth.segment} onClick={() => setSubTab('maintenance')}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, ...(subTab === 'maintenance' ? { color: '#ffffff' } : {}) }}>
-              <Wrench size={13} />Bakım ({overview.maintenanceItems.length})
-              {alerts.maintenanceDueCount > 0 && subTab !== 'maintenance' && (
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--danger)' }} />
-              )}
-            </span>
-          </button>
-          <button type="button" role="tab" aria-selected={subTab === 'history'} className={subTab === 'history' ? depth.segmentActive : depth.segment} onClick={() => setSubTab('history')}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, ...(subTab === 'history' ? { color: '#ffffff' } : {}) }}>
-              <History size={13} />Geçmiş ({overview.recentMovements.length})
-            </span>
-          </button>
-        </div>
-
-        <div className={s.row} style={{ gap: 10 }}>
-          <span className={depth.badge}>Envanter: {formatCurrencyTR(alerts.totalStockValue)}</span>
-          <label className={s.row} style={{ gap: 6, cursor: 'pointer' }}>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={recordInFinance}
-              aria-label="Alım ve bakım tutarlarını giderlere işle"
-              className={depth.switch}
-              onClick={() => setRecordInFinance((v) => !v)}
-            />
-            <span className={s.muted}>Gidere işle</span>
-          </label>
-        </div>
-      </div>
-
-      {/* Son Hareketi Geri Alma Şeridi */}
-      {lastAction && (
-        <div className={s.panelCard} style={{ padding: '8px 12px' }}>
-          <div className={s.topBar}>
-            <span className={s.muted}>
-              Son işlem: <strong>{lastAction.name}</strong> · {lastAction.quantity} {lastAction.unitLabel} ({MOVEMENT_LABELS[lastAction.movementType]})
-            </span>
-            <div className={s.row} style={{ gap: 6 }}>
-              <button type="button" className={depth.btn} style={{ minHeight: 26, padding: '2px 9px', fontSize: '11px' }} disabled={undoBusy} onClick={() => void undoLastAction()}>
-                <RotateCcw size={12} /> {undoBusy ? 'Geri alınıyor…' : 'Geri al'}
-              </button>
-              <button type="button" className={s.iconBtn} style={{ width: 24, height: 24 }} aria-label="Bildirimi kapat" onClick={() => setLastAction(null)}>
-                <X size={12} />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 1. STOK & ENVANTER */}
-      {subTab === 'inventory' && (
-        <div className={s.stack}>
-          <div className={s.topBar}>
-            <div className={s.row} style={{ gap: 5 }}>
-              {([
-                ['all', `Tümü (${alerts.totalStockItems})`],
-                ['low_stock', `Kritik (${alerts.lowStockCount})`],
-                ['skt_expired', `SKT Geçmiş (${alerts.sktExpiredCount})`],
-                ['skt_soon', `SKT ≤30g (${alerts.sktSoonCount})`],
-              ] as const).map(([id, label]) => (
+          <div className={clay.card}>
+            <div className={clay.emptyHero}>
+              <span className={`${clay.iconChip} ${clay.chipBrand}`} aria-hidden="true">
+                <Package size={19} strokeWidth={2.2} color="#ffffff" />
+              </span>
+              <strong style={{ fontSize: 15, color: 'var(--foreground)' }}>
+                Stok ve Bakım Alanını Başlatın
+              </strong>
+              <span style={{ maxWidth: 460 }}>
+                Tüm işletme türleriyle uyumlu ürün, sarf malzeme, ekipman stoku, isteğe bağlı SKT ve periyodik bakım tablolarını tek tıkla oluşturun.
+              </span>
+              {canManageSchema ? (
                 <button
-                  key={id}
                   type="button"
-                  className={alertFilter === id ? depth.btnPrimary : depth.btn}
-                  style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }}
-                  onClick={() => setAlertFilter(id)}
+                  className={clay.primaryBtn}
+                  disabled={setupBusy}
+                  onClick={() => void initializeUniversalStock()}
                 >
-                  <span style={alertFilter === id ? { color: '#ffffff' } : undefined}>{label}</span>
+                  <Plus size={14} color="#ffffff" />
+                  <span>{setupBusy ? 'Hazırlanıyor…' : 'Stok ve Bakımı Başlat'}</span>
                 </button>
-              ))}
-              {categoryOptions.length > 1 && (
-                <select
-                  aria-label="Kategori filtresi"
-                  className={s.compactInput}
-                  style={{ width: 'auto', minWidth: 115, height: 28, fontSize: '11.5px' }}
-                  value={categoryFilter}
-                  onChange={(e) => setCategoryFilter(e.target.value)}
-                >
-                  <option value="all">Tüm kategoriler</option>
-                  {categoryOptions.map((c) => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
+              ) : (
+                <span className={clay.muted}>
+                  Yönetici stok alanını başlattığında kayıtlar burada görünecektir.
+                </span>
               )}
             </div>
 
-            <div className={s.row} style={{ gap: 6 }}>
-              <div className={s.searchInline} style={{ minWidth: 170 }}>
-                <Search size={13} color="var(--foreground-3)" />
-                <input aria-label="Stok kalemi ara" placeholder="Kalem veya kategori ara…" value={search} onChange={(e) => setSearch(e.target.value)} />
-                {search && (
-                  <button type="button" className={s.iconBtn} style={{ width: 20, height: 20 }} aria-label="Aramayı temizle" onClick={() => setSearch('')}>
-                    <X size={11} />
-                  </button>
-                )}
-              </div>
-              {invMod && (
-                <button type="button" className={depth.btnPrimary} style={{ minHeight: 32, padding: '4px 11px', fontSize: '12px' }} onClick={() => (stockFormOpen ? setStockFormOpen(false) : openNewStock())}>
-                  <Plus size={13} color="#ffffff" />
-                  <span style={{ color: '#ffffff' }}>{stockFormOpen ? 'Kapat' : 'Yeni Kalem'}</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {stockFormOpen && (
-            <form className={s.panelCard} onSubmit={submitStock}>
-              <div className={s.topBar}>
-                <h3 className={s.sectionTitle}>{stockDraft.rowId ? 'Stok kalemini düzenle' : 'Yeni stok kalemi'}</h3>
-                <button type="button" className={s.iconBtn} aria-label="Formu kapat" onClick={() => setStockFormOpen(false)}>
-                  <X size={14} />
-                </button>
-              </div>
-
-              <div className={s.stockFormGrid}>
-                <input
-                  aria-label="Kalem adı"
-                  className={s.compactInput}
-                  required
-                  placeholder="Kalem adı (ör. Kâğıt havlu, Filtre, Kutu ambalaj)"
-                  value={stockDraft.name}
-                  onChange={(e) => setStockDraft({ ...stockDraft, name: e.target.value })}
-                />
-                <input
-                  aria-label="Kategori"
-                  list="stok-kategori-onerileri"
-                  className={s.compactInput}
-                  placeholder="Kategori (isteğe bağlı)"
-                  value={stockDraft.category}
-                  onChange={(e) => setStockDraft({ ...stockDraft, category: e.target.value })}
-                />
-                <datalist id="stok-kategori-onerileri">
-                  {categoryOptions.map((c) => <option key={c} value={c} />)}
-                </datalist>
-                <input
-                  aria-label="Birim"
-                  list="stok-birim-onerileri"
-                  className={s.compactInput}
-                  placeholder="Birim"
-                  value={stockDraft.unit}
-                  onChange={(e) => setStockDraft({ ...stockDraft, unit: e.target.value })}
-                />
-                <datalist id="stok-birim-onerileri">
-                  {unitOptions.map((u) => <option key={u} value={u} />)}
-                </datalist>
-              </div>
-
-              <div className={s.stockNumGrid}>
-                <label className={s.stack} style={{ gap: 3 }}>
-                  <span className={s.muted}>Miktar</span>
-                  <input type="number" min="0" className={s.compactInput} value={stockDraft.quantity} onChange={(e) => setStockDraft({ ...stockDraft, quantity: e.target.value })} />
-                </label>
-                <label className={s.stack} style={{ gap: 3 }}>
-                  <span className={s.muted}>Kritik eşik</span>
-                  <input type="number" min="0" className={s.compactInput} value={stockDraft.minThreshold} onChange={(e) => setStockDraft({ ...stockDraft, minThreshold: e.target.value })} />
-                </label>
-                <label className={s.stack} style={{ gap: 3 }}>
-                  <span className={s.muted}>Birim maliyet (₺)</span>
-                  <input type="number" min="0" step="0.01" placeholder="0,00" className={s.compactInput} value={stockDraft.unitCost} onChange={(e) => setStockDraft({ ...stockDraft, unitCost: e.target.value })} />
-                </label>
-                <label className={s.stack} style={{ gap: 3 }}>
-                  <span className={s.muted}>Tedarikçi / Not</span>
-                  <input type="text" placeholder="İsteğe bağlı" className={s.compactInput} value={stockDraft.notes} onChange={(e) => setStockDraft({ ...stockDraft, notes: e.target.value })} />
-                </label>
-              </div>
-
-              <div className={s.topBar}>
-                <div className={s.row} style={{ gap: 8 }}>
-                  <label className={s.row} style={{ gap: 6, cursor: 'pointer' }}>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={stockDraft.hasExpiry}
-                      aria-label="Son kullanma tarihi ekle"
-                      className={depth.switch}
-                      onClick={() => setStockDraft({ ...stockDraft, hasExpiry: !stockDraft.hasExpiry })}
-                    />
-                    <span className={s.muted}>SKT takibi (isteğe bağlı)</span>
-                  </label>
-                  {stockDraft.hasExpiry && (
-                    <ClinicalDatePicker
-                      compact
-                      value={stockDraft.expiryDate}
-                      onChange={(iso) => setStockDraft({ ...stockDraft, expiryDate: iso })}
-                      placeholder="SKT seçin"
-                    />
-                  )}
-                </div>
-
-                <div className={s.row} style={{ gap: 6 }}>
-                  <button type="button" className={depth.btn} style={{ minHeight: 30 }} onClick={() => setStockFormOpen(false)}>Vazgeç</button>
-                  <button type="submit" className={depth.btnPrimary} style={{ minHeight: 30 }} disabled={savingStock}>
-                    <Check size={13} color="#ffffff" />
-                    <span style={{ color: '#ffffff' }}>{savingStock ? 'Kaydediliyor…' : stockDraft.rowId ? 'Güncelle' : 'Kaydet'}</span>
+            {canManageSchema && unboundTables.length > 0 && (
+              <form className={clay.noticeInfo} onSubmit={handleBindTable}>
+                <span className={clay.muted}>Veya mevcut bir tablonuzu bağlayın:</span>
+                <div className={clay.row}>
+                  <select
+                    aria-label="Bağlanacak tablo"
+                    className={clay.wellSelect}
+                    style={{ width: 175 }}
+                    value={bindTableId}
+                    onChange={(e) => setBindTableId(e.target.value)}
+                  >
+                    <option value="">Tablo seçin…</option>
+                    {unboundTables.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Modül rolü"
+                    className={clay.wellSelect}
+                    style={{ width: 170 }}
+                    value={bindRole}
+                    onChange={(e) => setBindRole(e.target.value as 'stock_inventory' | 'asset_maintenance' | 'stock_movement')}
+                  >
+                    <option value="stock_inventory">Stok &amp; Envanter</option>
+                    <option value="asset_maintenance">Periyodik Bakım</option>
+                    <option value="stock_movement">Hareket Geçmişi</option>
+                  </select>
+                  <button
+                    type="submit"
+                    className={clay.ctlBtn}
+                    disabled={setupBusy || !bindTableId}
+                  >
+                    <span>Bağla</span>
                   </button>
                 </div>
-              </div>
-            </form>
-          )}
-
-          <div className={s.panelCard}>
-            {visibleStock.length === 0 ? (
-              <div className={s.emptyState}>
-                <Package size={18} />
-                <span>{alerts.totalStockItems === 0 ? 'Henüz stok kalemi yok. “Yeni Kalem” ile ilk kaydınızı ekleyin.' : 'Bu filtreyle eşleşen stok kalemi yok.'}</span>
-              </div>
-            ) : (
-              <div className={s.compactList}>
-                {visibleStock.map((item) => {
-                  const sev = stockSeverity(item)
-                  const moveOpen = activeMoveRowId === item.rowId
-                  const busy = busyRowId === item.rowId
-                  return (
-                    <div key={item.rowId} className={s.compactRow}>
-                      <div className={s.compactMain} style={{ flexWrap: 'wrap' }}>
-                        <div style={{ minWidth: 0, flex: '1 1 240px' }}>
-                          <div className={s.row} style={{ gap: 6 }}>
-                            <strong className={s.staffName}>{item.name}</strong>
-                            <span className={depth.badge} style={{ fontSize: 10.5, padding: '1px 7px' }}>{item.categoryLabel}</span>
-                            {sev === 'expired' && <span className={s.statusOff}><AlertTriangle size={10} />SKT Geçmiş</span>}
-                            {item.isLowStock && <span className={s.statusOff}>Kritik (≤{item.minThreshold})</span>}
-                            {!item.isExpired && item.isExpiringSoon && (
-                              <span className={depth.badge} style={{ fontSize: 10.5, padding: '1px 7px' }}>SKT {item.daysUntilExpiry}g</span>
-                            )}
-                          </div>
-                          <div className={s.staffSub} style={{ marginTop: 2 }}>
-                            Mevcut: <strong style={{ color: 'var(--foreground)' }}>{item.quantity} {item.unitLabel}</strong>
-                            {item.unitCost > 0 && ` · Birim: ${formatCurrencyTR(item.unitCost)}`}
-                            {item.expiryDate && ` · SKT: ${formatDynamicDateTR(item.expiryDate)}`}
-                            {item.notes && ` · ${item.notes}`}
-                          </div>
-                        </div>
-
-                        <div className={s.compactActions}>
-                          <button
-                            type="button"
-                            className={moveOpen ? depth.btnPrimary : depth.btn}
-                            style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }}
-                            aria-expanded={moveOpen}
-                            onClick={() => openMovement(item)}
-                          >
-                            <span style={moveOpen ? { color: '#ffffff' } : undefined}>{moveOpen ? 'Kapat' : 'Giriş / Çıkış'}</span>
-                          </button>
-                          <button type="button" className={s.iconBtn} title="Düzenle" aria-label={`${item.name} düzenle`} onClick={() => openEditStock(item)}>
-                            <Pencil size={13} />
-                          </button>
-                          {canManageSchema && (
-                            <button type="button" className={s.iconBtn} title="Kaldır" aria-label={`${item.name} kaldır`} style={{ color: 'var(--danger)' }} onClick={() => setConfirmArchive({ rowId: item.rowId, name: item.name, kind: 'stock' })}>
-                              <Trash2 size={13} />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {moveOpen && (
-                        <div className={s.compactEdit}>
-                          <div className={s.row} style={{ gap: 6 }}>
-                            <input
-                              type="number"
-                              min="1"
-                              aria-label="İşlem adedi"
-                              className={s.compactInput}
-                              style={{ width: 72, height: 30 }}
-                              value={moveQty}
-                              onChange={(e) => setMoveQty(e.target.value)}
-                            />
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              aria-label="Birim maliyet"
-                              placeholder="Birim ₺"
-                              className={s.compactInput}
-                              style={{ width: 96, height: 30 }}
-                              value={moveCost}
-                              onChange={(e) => setMoveCost(e.target.value)}
-                            />
-                            <input
-                              type="text"
-                              aria-label="Hareket notu"
-                              placeholder="Not (isteğe bağlı)"
-                              className={s.compactInput}
-                              style={{ flex: 1, minWidth: 130, height: 30 }}
-                              value={moveNote}
-                              onChange={(e) => setMoveNote(e.target.value)}
-                            />
-                          </div>
-                          <div className={s.row} style={{ gap: 5 }}>
-                            <button type="button" disabled={busy} className={depth.btnMint} style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }} onClick={() => void runMovement(item, 'giris')}>
-                              <Plus size={12} />Alım / Giriş
-                            </button>
-                            <button type="button" disabled={busy} className={depth.btnPale} style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }} onClick={() => void runMovement(item, 'cikis')}>
-                              <Minus size={12} />Kullanım
-                            </button>
-                            <button type="button" disabled={busy} className={depth.btn} style={{ minHeight: 28, padding: '3px 8px', fontSize: '11.5px' }} onClick={() => void runMovement(item, 'iade')}>
-                              <RotateCcw size={11} />İade
-                            </button>
-                            <button type="button" disabled={busy} className={depth.btn} style={{ minHeight: 28, padding: '3px 8px', fontSize: '11.5px' }} onClick={() => void runMovement(item, 'fire')}>
-                              Fire / Zayi
-                            </button>
-                            <button type="button" disabled={busy} className={depth.btn} style={{ minHeight: 28, padding: '3px 8px', fontSize: '11.5px', color: 'var(--danger)' }} onClick={() => void runMovement(item, 'imha')}>
-                              İmha
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
+              </form>
             )}
           </div>
-        </div>
-      )}
-
-      {/* 2. PERİYODİK BAKIM */}
-      {subTab === 'maintenance' && (
-        <div className={s.stack}>
-          <div className={s.topBar}>
-            <div className={s.row} style={{ gap: 5 }}>
-              <button type="button" className={!onlyDueMaint ? depth.btnPrimary : depth.btn} style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }} onClick={() => setOnlyDueMaint(false)}>
-                <span style={!onlyDueMaint ? { color: '#ffffff' } : undefined}>Tümü ({overview.maintenanceItems.length})</span>
-              </button>
-              <button type="button" className={onlyDueMaint ? depth.btnPrimary : depth.btn} style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }} onClick={() => setOnlyDueMaint(true)}>
-                <span style={onlyDueMaint ? { color: '#ffffff' } : undefined}>Yaklaşan ≤14g ({alerts.maintenanceDueCount})</span>
+        </>
+      ) : (
+        <>
+          {/* Eski Kayıt Aktarım Şeridi */}
+          {overview && overview.legacyMigration.hasUnmigratedLegacyStock && canManageSchema && (
+            <div className={clay.noticeInfo}>
+              <span className={clay.muted}>
+                Eski stok kayıtlarında <strong>{overview.legacyMigration.unmigratedItems}</strong> kalem ve{' '}
+                <strong>{overview.legacyMigration.unmigratedMaintenances}</strong> bakım var.
+              </span>
+              <button
+                type="button"
+                className={clay.mintBtn}
+                disabled={migrating}
+                onClick={() => void handleMigrateLegacy()}
+              >
+                <DownloadCloud size={12} />
+                <span>{migrating ? 'Aktarılıyor…' : 'Aktar'}</span>
               </button>
             </div>
-
-            <div className={s.row} style={{ gap: 6 }}>
-              <div className={s.searchInline} style={{ minWidth: 170 }}>
-                <Search size={13} color="var(--foreground-3)" />
-                <input aria-label="Bakım kaydı ara" placeholder="Ekipman veya servis ara…" value={search} onChange={(e) => setSearch(e.target.value)} />
-              </div>
-              {maintMod && (
-                <button type="button" className={depth.btnPrimary} style={{ minHeight: 32, padding: '4px 11px', fontSize: '12px' }} onClick={() => (maintFormOpen ? setMaintFormOpen(false) : openNewMaint())}>
-                  <Plus size={13} color="#ffffff" />
-                  <span style={{ color: '#ffffff' }}>{maintFormOpen ? 'Kapat' : 'Bakım Planla'}</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {maintFormOpen && (
-            <form className={s.panelCard} onSubmit={submitMaint}>
-              <div className={s.topBar}>
-                <h3 className={s.sectionTitle}>{maintDraft.rowId ? 'Bakım kaydını düzenle' : 'Yeni bakım planla'}</h3>
-                <button type="button" className={s.iconBtn} aria-label="Formu kapat" onClick={() => setMaintFormOpen(false)}>
-                  <X size={14} />
-                </button>
-              </div>
-
-              <div className={s.stockFormGrid}>
-                <input
-                  aria-label="Ekipman veya varlık adı"
-                  className={s.compactInput}
-                  required
-                  placeholder="Ekipman / varlık adı (ör. Klima ünitesi, Hizmet aracı, Yazıcı)"
-                  value={maintDraft.name}
-                  onChange={(e) => setMaintDraft({ ...maintDraft, name: e.target.value })}
-                />
-                <ClinicalDatePicker
-                  compact
-                  value={maintDraft.scheduledDate}
-                  onChange={(iso) => setMaintDraft({ ...maintDraft, scheduledDate: iso || todayIsoDate() })}
-                  placeholder="Planlanan tarih"
-                />
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  aria-label="Tahmini ücret"
-                  placeholder="Tahmini ücret (₺)"
-                  className={s.compactInput}
-                  value={maintDraft.estimatedCost}
-                  onChange={(e) => setMaintDraft({ ...maintDraft, estimatedCost: e.target.value })}
-                />
-              </div>
-
-              <div className={s.topBar}>
-                <div className={s.row} style={{ gap: 6 }}>
-                  <label className={s.row} style={{ gap: 6, cursor: 'pointer' }}>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={maintDraft.isPeriodic}
-                      aria-label="Periyodik tekrarla"
-                      className={depth.switch}
-                      onClick={() => setMaintDraft({ ...maintDraft, isPeriodic: !maintDraft.isPeriodic })}
-                    />
-                    <span className={s.muted}>Periyodik</span>
-                  </label>
-                  {maintDraft.isPeriodic && (
-                    <>
-                      {PERIOD_PRESETS.map((p) => (
-                        <button
-                          key={p.days}
-                          type="button"
-                          className={String(p.days) === maintDraft.periodicDays ? s.dayBtnOn : s.dayBtn}
-                          style={{ minWidth: 'auto', padding: '0 8px' }}
-                          onClick={() => setMaintDraft({ ...maintDraft, periodicDays: String(p.days) })}
-                        >
-                          <span style={String(p.days) === maintDraft.periodicDays ? { color: '#ffffff' } : undefined}>{p.days}g</span>
-                        </button>
-                      ))}
-                      <input
-                        type="number"
-                        min="1"
-                        aria-label="Periyot gün sayısı"
-                        className={s.compactInput}
-                        style={{ width: 68, height: 28 }}
-                        value={maintDraft.periodicDays}
-                        onChange={(e) => setMaintDraft({ ...maintDraft, periodicDays: e.target.value })}
-                      />
-                    </>
-                  )}
-                </div>
-
-                <div className={s.row} style={{ gap: 6 }}>
-                  <input
-                    type="text"
-                    aria-label="Servis veya not"
-                    placeholder="Yetkili servis / not"
-                    className={s.compactInput}
-                    style={{ width: 170, height: 30 }}
-                    value={maintDraft.notes}
-                    onChange={(e) => setMaintDraft({ ...maintDraft, notes: e.target.value })}
-                  />
-                  <button type="submit" className={depth.btnPrimary} style={{ minHeight: 30 }} disabled={savingMaint}>
-                    <Check size={13} color="#ffffff" />
-                    <span style={{ color: '#ffffff' }}>{savingMaint ? 'Kaydediliyor…' : maintDraft.rowId ? 'Güncelle' : 'Planla'}</span>
-                  </button>
-                </div>
-              </div>
-            </form>
           )}
 
-          <div className={s.panelCard}>
-            {visibleMaint.length === 0 ? (
-              <div className={s.emptyState}>
-                <CalendarClock size={18} />
-                <span>{overview.maintenanceItems.length === 0 ? 'Planlanmış bakım kaydı yok.' : 'Bu filtrede bakım kaydı yok.'}</span>
-              </div>
-            ) : (
-              <div className={s.compactList}>
-                {visibleMaint.map((m) => {
-                  const busy = busyRowId === m.rowId
-                  const openComplete = activeCompleteRowId === m.rowId
-                  const overdue = m.daysUntilDue !== null && m.daysUntilDue < 0
-                  return (
-                    <div key={m.rowId} className={s.compactRow}>
-                      <div className={s.compactMain} style={{ flexWrap: 'wrap' }}>
-                        <div style={{ minWidth: 0, flex: '1 1 240px' }}>
-                          <div className={s.row} style={{ gap: 6 }}>
-                            <strong className={s.staffName}>{m.name}</strong>
-                            {m.isPeriodic && m.periodicDays > 0 && (
-                              <span className={depth.badge} style={{ fontSize: 10.5, padding: '1px 7px' }}>Her {m.periodicDays}g</span>
-                            )}
-                            {overdue ? (
-                              <span className={s.statusOff}>{Math.abs(m.daysUntilDue!)} gün gecikti</span>
-                            ) : m.isMaintenanceDue && m.daysUntilDue !== null ? (
-                              <span className={depth.badge} style={{ fontSize: 10.5, padding: '1px 7px' }}>{m.daysUntilDue} gün kaldı</span>
-                            ) : m.status === 'completed' ? (
-                              <span className={s.statusOk}>Tamamlandı</span>
-                            ) : null}
-                          </div>
-                          <div className={s.staffSub} style={{ marginTop: 2 }}>
-                            {m.effectiveDueDate ? `Tarih: ${formatDynamicDateTR(m.effectiveDueDate)}` : m.statusLabel}
-                            {m.estimatedCost > 0 && ` · Tahmini: ${formatCurrencyTR(m.estimatedCost)}`}
-                            {m.notes && ` · ${m.notes}`}
-                          </div>
-                        </div>
+          {/* 4 Tıklanabilir Kompakt KPI Kartı */}
+          {overview && (
+            <div className={clay.statGrid}>
+              <button
+                type="button"
+                className={`${clay.statCardClickable} ${subTab === 'inventory' && alertFilter === 'all' ? clay.statCardActive : ''}`}
+                style={{ color: 'var(--foreground)' }}
+                onClick={() => {
+                  setSubTab('inventory')
+                  setAlertFilter('all')
+                }}
+              >
+                <span className={clay.cardHead}>
+                  <span className={clay.cardTitleGroup}>
+                    <span className={`${clay.iconChip} ${clay.chipBrand}`} aria-hidden="true">
+                      <Package size={18} strokeWidth={2.2} color="#ffffff" />
+                    </span>
+                    <span className={clay.statTitle}>Toplam Kalem</span>
+                  </span>
+                </span>
+                <span className={clay.statVal}>{alerts.totalStockItems}</span>
+                <span className={clay.statFoot}>
+                  <span className={clay.wellPill}>Değer: {formatCurrencyTR(alerts.totalStockValue)}</span>
+                </span>
+              </button>
 
-                        <div className={s.compactActions}>
-                          <button type="button" disabled={busy} className={s.snippetChip} title="7 gün ertele" onClick={() => void postponeMaint(m, 7)}>+7g</button>
-                          <button type="button" disabled={busy} className={s.snippetChip} title="30 gün ertele" onClick={() => void postponeMaint(m, 30)}>+30g</button>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            className={openComplete ? depth.btn : depth.btnPrimary}
-                            style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }}
-                            onClick={() => {
-                              if (openComplete) {
-                                setActiveCompleteRowId(null)
-                              } else {
-                                setActiveCompleteRowId(m.rowId)
-                                setCompleteCost(m.estimatedCost > 0 ? String(m.estimatedCost) : '')
-                                setCompleteNote('')
-                              }
-                            }}
-                          >
-                            {!openComplete && <Check size={12} color="#ffffff" />}
-                            <span style={!openComplete ? { color: '#ffffff' } : undefined}>{openComplete ? 'Kapat' : 'Tamamla'}</span>
-                          </button>
-                          <button type="button" className={s.iconBtn} title="Düzenle" aria-label={`${m.name} düzenle`} onClick={() => openEditMaint(m)}>
-                            <Pencil size={13} />
-                          </button>
-                          {canManageSchema && (
-                            <button type="button" className={s.iconBtn} title="Kaldır" aria-label={`${m.name} kaldır`} style={{ color: 'var(--danger)' }} onClick={() => setConfirmArchive({ rowId: m.rowId, name: m.name, kind: 'maint' })}>
-                              <Trash2 size={13} />
-                            </button>
-                          )}
-                        </div>
-                      </div>
+              <button
+                type="button"
+                className={`${clay.statCardClickable} ${subTab === 'inventory' && alertFilter === 'low_stock' ? clay.statCardActive : ''}`}
+                style={{ color: 'var(--foreground)' }}
+                onClick={() => {
+                  setSubTab('inventory')
+                  setAlertFilter('low_stock')
+                }}
+              >
+                <span className={clay.cardHead}>
+                  <span className={clay.cardTitleGroup}>
+                    <span
+                      className={`${clay.iconChip} ${alerts.lowStockCount > 0 ? clay.chipCoral : clay.chipMint}`}
+                      aria-hidden="true"
+                    >
+                      <AlertTriangle size={18} strokeWidth={2.2} color="#ffffff" />
+                    </span>
+                    <span className={clay.statTitle}>Kritik Stok</span>
+                  </span>
+                </span>
+                <span className={`${clay.statVal} ${alerts.lowStockCount > 0 ? clay.valDanger : clay.valGood}`}>
+                  {alerts.lowStockCount}
+                </span>
+                <span className={clay.statFoot}>
+                  <span className={alerts.lowStockCount > 0 ? clay.pillDanger : clay.pillGood}>
+                    {alerts.lowStockCount > 0 ? 'Eşik altında' : 'Tümü normal'}
+                  </span>
+                </span>
+              </button>
 
-                      {openComplete && (
-                        <div className={s.compactEdit}>
-                          <div className={s.row} style={{ gap: 6 }}>
-                            <Clock size={13} color="var(--foreground-3)" />
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              aria-label="Gerçekleşen bakım ücreti"
-                              placeholder="Bakım ücreti (₺)"
-                              className={s.compactInput}
-                              style={{ width: 120, height: 30 }}
-                              value={completeCost}
-                              onChange={(e) => setCompleteCost(e.target.value)}
-                            />
-                            <input
-                              type="text"
-                              aria-label="Tamamlama notu"
-                              placeholder="Yapılan işlem / not"
-                              className={s.compactInput}
-                              style={{ flex: 1, minWidth: 140, height: 30 }}
-                              value={completeNote}
-                              onChange={(e) => setCompleteNote(e.target.value)}
-                            />
-                            <button type="button" disabled={busy} className={depth.btnPrimary} style={{ minHeight: 30, padding: '4px 12px', fontSize: '11.5px' }} onClick={() => void completeMaint(m)}>
-                              <Check size={12} color="#ffffff" />
-                              <span style={{ color: '#ffffff' }}>{busy ? 'İşleniyor…' : 'Bakımı Tamamla'}</span>
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+              <button
+                type="button"
+                className={`${clay.statCardClickable} ${subTab === 'inventory' && (alertFilter === 'skt_expired' || alertFilter === 'skt_soon') ? clay.statCardActive : ''}`}
+                style={{ color: 'var(--foreground)' }}
+                onClick={() => {
+                  setSubTab('inventory')
+                  setAlertFilter(alerts.sktExpiredCount > 0 ? 'skt_expired' : 'skt_soon')
+                }}
+              >
+                <span className={clay.cardHead}>
+                  <span className={clay.cardTitleGroup}>
+                    <span className={`${clay.iconChip} ${clay.chipAmber}`} aria-hidden="true">
+                      <Clock size={18} strokeWidth={2.2} color="#ffffff" />
+                    </span>
+                    <span className={clay.statTitle}>SKT Uyarıları</span>
+                  </span>
+                </span>
+                <span
+                  className={`${clay.statVal} ${
+                    alerts.sktExpiredCount > 0 ? clay.valDanger : alerts.sktSoonCount > 0 ? clay.valWatch : ''
+                  }`}
+                >
+                  {sktAlertTotal}
+                </span>
+                <span className={clay.statFoot}>
+                  <span
+                    className={
+                      alerts.sktExpiredCount > 0
+                        ? clay.pillDanger
+                        : alerts.sktSoonCount > 0
+                          ? clay.pillWatch
+                          : clay.wellPill
+                    }
+                  >
+                    {alerts.sktExpiredCount} geçmiş · {alerts.sktSoonCount} ≤30g
+                  </span>
+                </span>
+              </button>
 
-      {/* 3. HAREKET GEÇMİŞİ */}
-      {subTab === 'history' && (
-        <div className={s.panelCard}>
-          <div className={s.topBar}>
-            <h3 className={s.sectionTitle}>Son stok ve bakım hareketleri</h3>
-            <div className={s.searchInline} style={{ minWidth: 180 }}>
-              <Search size={13} color="var(--foreground-3)" />
-              <input aria-label="Hareketlerde ara" placeholder="Hareket veya kişi ara…" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <button
+                type="button"
+                className={`${clay.statCardClickable} ${subTab === 'maintenance' && onlyDueMaint ? clay.statCardActive : ''}`}
+                style={{ color: 'var(--foreground)' }}
+                onClick={() => {
+                  setSubTab('maintenance')
+                  setOnlyDueMaint(true)
+                }}
+              >
+                <span className={clay.cardHead}>
+                  <span className={clay.cardTitleGroup}>
+                    <span className={`${clay.iconChip} ${clay.chipViolet}`} aria-hidden="true">
+                      <Wrench size={18} strokeWidth={2.2} color="#ffffff" />
+                    </span>
+                    <span className={clay.statTitle}>Yaklaşan Bakım</span>
+                  </span>
+                </span>
+                <span className={`${clay.statVal} ${alerts.maintenanceDueCount > 0 ? clay.valWatch : ''}`}>
+                  {alerts.maintenanceDueCount}
+                </span>
+                <span className={clay.statFoot}>
+                  <span className={alerts.maintenanceDueCount > 0 ? clay.pillWatch : clay.wellPill}>
+                    {overview.maintenanceItems.length} planlı kayıt
+                  </span>
+                </span>
+              </button>
             </div>
-          </div>
+          )}
 
-          {visibleMovements.length === 0 ? (
-            <div className={s.emptyState}>
-              <History size={18} />
-              <span>Henüz kaydedilmiş stok veya bakım hareketi yok.</span>
+          {/* Son Hareketi Geri Alma Şeridi */}
+          {lastAction && (
+            <div className={clay.noticeGood}>
+              <span className={clay.goodText}>
+                Son işlem: <strong>{lastAction.name}</strong> · {lastAction.quantity} {lastAction.unitLabel} (
+                {MOVEMENT_LABELS[lastAction.movementType]})
+              </span>
+              <div className={clay.row} style={{ gap: 6 }}>
+                <button
+                  type="button"
+                  className={clay.ctlBtnSm}
+                  disabled={undoBusy}
+                  onClick={() => void undoLastAction()}
+                >
+                  <RotateCcw size={12} />
+                  <span>{undoBusy ? 'Geri alınıyor…' : 'Geri al'}</span>
+                </button>
+                <button
+                  type="button"
+                  className={clay.iconToolBtn}
+                  aria-label="Bildirimi kapat"
+                  onClick={() => setLastAction(null)}
+                >
+                  <X size={13} />
+                </button>
+              </div>
             </div>
-          ) : (
-            <div className={s.compactList}>
-              {visibleMovements.map((mv) => (
-                <div key={mv.rowId} className={s.compactRow}>
-                  <div className={s.compactMain}>
-                    <span className={depth.badge} style={{ fontSize: 10.5, padding: '1px 7px', flexShrink: 0 }}>{mv.movementTypeLabel}</span>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div className={s.staffName}>{mv.itemTitle || mv.title}</div>
-                      <div className={s.staffSub}>
-                        {formatDynamicDateTR(mv.date)}
-                        {mv.actor && ` · ${mv.actor}`}
-                      </div>
-                    </div>
-                    <div className={s.compactActions}>
-                      <span className={s.muted} style={{ fontWeight: 700 }}>{mv.quantity} br</span>
-                      {mv.totalAmount > 0 && <span className={depth.badge}>{formatCurrencyTR(mv.totalAmount)}</span>}
-                    </div>
+          )}
+
+          {/* 1. STOK & ENVANTER */}
+          {subTab === 'inventory' && (
+            <section className={clay.card}>
+              <div className={clay.cardHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+                    <Package size={16} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <div className={clay.cardTitleRow}>
+                    <h4 className={clay.cardTitle}>Stok ve Envanter</h4>
+                    <span className={clay.wellPill}>{visibleStock.length} kalem</span>
                   </div>
                 </div>
-              ))}
-            </div>
+
+                <div className={clay.fieldBox} style={{ minHeight: 36, minWidth: 210, flex: '0 1 250px' }}>
+                  <Search size={13} color="var(--pc-muted)" />
+                  <input
+                    className={clay.fieldInput}
+                    style={{ height: 32 }}
+                    aria-label="Stok kalemi ara"
+                    placeholder="Kalem veya kategori ara…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      className={clay.iconToolBtn}
+                      style={{ width: 22, height: 22 }}
+                      aria-label="Aramayı temizle"
+                      onClick={() => setSearch('')}
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className={clay.topBar}>
+                <div className={clay.row} style={{ gap: 6 }}>
+                  {([
+                    ['all', `Tümü (${alerts.totalStockItems})`],
+                    ['low_stock', `Kritik (${alerts.lowStockCount})`],
+                    ['skt_expired', `SKT Geçmiş (${alerts.sktExpiredCount})`],
+                    ['skt_soon', `SKT ≤30g (${alerts.sktSoonCount})`],
+                  ] as const).map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className={alertFilter === id ? clay.ctlBtnOn : clay.ctlBtnSm}
+                      onClick={() => setAlertFilter(id)}
+                    >
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                  {categoryOptions.length > 1 && (
+                    <select
+                      aria-label="Kategori filtresi"
+                      className={clay.wellSelect}
+                      style={{ width: 'auto', minWidth: 130, minHeight: 30, padding: '4px 10px', fontSize: 11.5 }}
+                      value={categoryFilter}
+                      onChange={(e) => setCategoryFilter(e.target.value)}
+                    >
+                      <option value="all">Tüm kategoriler</option>
+                      {categoryOptions.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              </div>
+
+              {stockFormOpen && (
+                <form className={clay.subCard} onSubmit={submitStock}>
+                  <div className={clay.topBar}>
+                    <h5 className={clay.cardTitle}>
+                      {stockDraft.rowId ? 'Stok kalemini düzenle' : 'Yeni stok kalemi'}
+                    </h5>
+                    <button
+                      type="button"
+                      className={clay.iconToolBtn}
+                      aria-label="Formu kapat"
+                      onClick={() => setStockFormOpen(false)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+
+                  <div className={local.stockFormGrid}>
+                    <input
+                      aria-label="Kalem adı"
+                      className={clay.wellInput}
+                      required
+                      placeholder="Kalem adı (ör. Kâğıt havlu, Filtre, Kutu ambalaj)"
+                      value={stockDraft.name}
+                      onChange={(e) => setStockDraft({ ...stockDraft, name: e.target.value })}
+                    />
+                    <input
+                      aria-label="Kategori"
+                      list="stok-kategori-onerileri"
+                      className={clay.wellInput}
+                      placeholder="Kategori (isteğe bağlı)"
+                      value={stockDraft.category}
+                      onChange={(e) => setStockDraft({ ...stockDraft, category: e.target.value })}
+                    />
+                    <datalist id="stok-kategori-onerileri">
+                      {categoryOptions.map((c) => (
+                        <option key={c} value={c} />
+                      ))}
+                    </datalist>
+                    <input
+                      aria-label="Birim"
+                      list="stok-birim-onerileri"
+                      className={clay.wellInput}
+                      placeholder="Birim"
+                      value={stockDraft.unit}
+                      onChange={(e) => setStockDraft({ ...stockDraft, unit: e.target.value })}
+                    />
+                    <datalist id="stok-birim-onerileri">
+                      {unitOptions.map((u) => (
+                        <option key={u} value={u} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div className={local.stockNumGrid}>
+                    <label className={clay.field}>
+                      <span className={clay.fieldLabel}>Miktar</span>
+                      <input
+                        type="number"
+                        min="0"
+                        className={clay.wellInput}
+                        value={stockDraft.quantity}
+                        onChange={(e) => setStockDraft({ ...stockDraft, quantity: e.target.value })}
+                      />
+                    </label>
+                    <label className={clay.field}>
+                      <span className={clay.fieldLabel}>Kritik eşik</span>
+                      <input
+                        type="number"
+                        min="0"
+                        className={clay.wellInput}
+                        value={stockDraft.minThreshold}
+                        onChange={(e) => setStockDraft({ ...stockDraft, minThreshold: e.target.value })}
+                      />
+                    </label>
+                    <label className={clay.field}>
+                      <span className={clay.fieldLabel}>Birim maliyet (₺)</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0,00"
+                        className={clay.wellInput}
+                        value={stockDraft.unitCost}
+                        onChange={(e) => setStockDraft({ ...stockDraft, unitCost: e.target.value })}
+                      />
+                    </label>
+                    <label className={clay.field}>
+                      <span className={clay.fieldLabel}>Tedarikçi / Not</span>
+                      <input
+                        type="text"
+                        placeholder="İsteğe bağlı"
+                        className={clay.wellInput}
+                        value={stockDraft.notes}
+                        onChange={(e) => setStockDraft({ ...stockDraft, notes: e.target.value })}
+                      />
+                    </label>
+                  </div>
+
+                  <div className={clay.topBar}>
+                    <div className={clay.row}>
+                      <label className={clay.row} style={{ gap: 7, cursor: 'pointer' }}>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={stockDraft.hasExpiry}
+                          aria-label="Son kullanma tarihi ekle"
+                          className={clay.switch}
+                          onClick={() => setStockDraft({ ...stockDraft, hasExpiry: !stockDraft.hasExpiry })}
+                        />
+                        <span className={clay.muted}>SKT takibi (isteğe bağlı)</span>
+                      </label>
+                      {stockDraft.hasExpiry && (
+                        <ClinicalDatePicker
+                          compact
+                          value={stockDraft.expiryDate}
+                          onChange={(iso) => setStockDraft({ ...stockDraft, expiryDate: iso })}
+                          placeholder="SKT seçin"
+                        />
+                      )}
+                    </div>
+
+                    <div className={clay.row} style={{ gap: 6 }}>
+                      <button
+                        type="button"
+                        className={clay.ctlBtnSm}
+                        onClick={() => setStockFormOpen(false)}
+                      >
+                        <span>Vazgeç</span>
+                      </button>
+                      <button type="submit" className={clay.primaryBtn} disabled={savingStock}>
+                        <Check size={13} color="#ffffff" />
+                        <span>{savingStock ? 'Kaydediliyor…' : stockDraft.rowId ? 'Güncelle' : 'Kaydet'}</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              )}
+
+              {visibleStock.length === 0 ? (
+                <div className={clay.emptyHero}>
+                  <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+                    <Package size={16} color="#ffffff" />
+                  </span>
+                  <span>
+                    {alerts.totalStockItems === 0
+                      ? 'Henüz stok kalemi yok. “Yeni Kalem” ile ilk kaydınızı ekleyin.'
+                      : 'Bu filtreyle eşleşen stok kalemi yok.'}
+                  </span>
+                </div>
+              ) : (
+                <div className={clay.tableShell}>
+                  <table className={clay.table}>
+                    <thead>
+                      <tr>
+                        <th>Kalem &amp; Kategori</th>
+                        <th>Mevcut Stok</th>
+                        <th>Birim / Toplam</th>
+                        <th>Durum / SKT</th>
+                        <th className={clay.stickyCol}>İşlemler</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleStock.map((item) => {
+                        const sev = stockSeverity(item)
+                        const moveOpen = activeMoveRowId === item.rowId
+                        const busy = busyRowId === item.rowId
+                        const totalValue = item.quantity * item.unitCost
+                        return (
+                          <Fragment key={item.rowId}>
+                            <tr className={moveOpen ? clay.rowOpen : undefined}>
+                              <td>
+                                <div className={clay.row} style={{ gap: 6 }}>
+                                  <strong style={{ fontWeight: 800, color: 'var(--foreground)' }}>
+                                    {item.name}
+                                  </strong>
+                                  <span className={clay.wellPill}>{item.categoryLabel}</span>
+                                </div>
+                                {item.notes && (
+                                  <div className={clay.muted} style={{ marginTop: 3 }}>
+                                    {item.notes}
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                <strong style={{ color: 'var(--foreground)' }}>
+                                  {item.quantity} {item.unitLabel}
+                                </strong>
+                                <div className={clay.muted}>Eşik: ≤{item.minThreshold}</div>
+                              </td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                {item.unitCost > 0 ? (
+                                  <>
+                                    <div style={{ fontWeight: 700 }}>{formatCurrencyTR(item.unitCost)}</div>
+                                    <div className={clay.muted}>Top. {formatCurrencyTR(totalValue)}</div>
+                                  </>
+                                ) : (
+                                  <span className={clay.muted}>—</span>
+                                )}
+                              </td>
+                              <td>
+                                <div className={clay.row} style={{ gap: 5 }}>
+                                  {sev === 'expired' && (
+                                    <span className={clay.pillDanger}>
+                                      <AlertTriangle size={11} />
+                                      SKT Geçmiş
+                                    </span>
+                                  )}
+                                  {item.isLowStock && (
+                                    <span className={clay.pillDanger}>Kritik (≤{item.minThreshold})</span>
+                                  )}
+                                  {!item.isExpired && item.isExpiringSoon && (
+                                    <span className={clay.pillWatch}>SKT {item.daysUntilExpiry}g</span>
+                                  )}
+                                  {sev !== 'expired' && !item.isLowStock && !item.isExpiringSoon && (
+                                    <span className={clay.pillGood}>Normal</span>
+                                  )}
+                                </div>
+                                {item.expiryDate && (
+                                  <div className={clay.muted} style={{ marginTop: 3 }}>
+                                    SKT: {formatDynamicDateTR(item.expiryDate)}
+                                  </div>
+                                )}
+                              </td>
+                              <td className={clay.stickyCol}>
+                                <div
+                                  className={clay.row}
+                                  style={{ justifyContent: 'flex-end', gap: 5, flexWrap: 'nowrap' }}
+                                >
+                                  <button
+                                    type="button"
+                                    className={moveOpen ? clay.ctlBtnOn : clay.ctlBtnSm}
+                                    aria-expanded={moveOpen}
+                                    onClick={() => openMovement(item)}
+                                  >
+                                    {moveOpen ? 'Kapat' : 'Giriş / Çıkış'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={clay.iconToolBtn}
+                                    title="Düzenle"
+                                    aria-label={`${item.name} düzenle`}
+                                    onClick={() => openEditStock(item)}
+                                  >
+                                    <Pencil size={13} />
+                                  </button>
+                                  {canManageSchema && (
+                                    <button
+                                      type="button"
+                                      className={clay.iconToolBtnDanger}
+                                      title="Kaldır"
+                                      aria-label={`${item.name} kaldır`}
+                                      onClick={() =>
+                                        setConfirmArchive({ rowId: item.rowId, name: item.name, kind: 'stock' })
+                                      }
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+
+                            {moveOpen && (
+                              <tr>
+                                <td colSpan={5} className={clay.drawerWell}>
+                                  <div className={local.drawerControls}>
+                                    <div className={clay.row} style={{ gap: 6, flex: '1 1 320px' }}>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        aria-label="İşlem adedi"
+                                        className={clay.wellInput}
+                                        style={{ width: 72, minHeight: 32, padding: '4px 8px' }}
+                                        value={moveQty}
+                                        onChange={(e) => setMoveQty(e.target.value)}
+                                      />
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        aria-label="Birim maliyet"
+                                        placeholder="Birim ₺"
+                                        className={clay.wellInput}
+                                        style={{ width: 96, minHeight: 32, padding: '4px 8px' }}
+                                        value={moveCost}
+                                        onChange={(e) => setMoveCost(e.target.value)}
+                                      />
+                                      <input
+                                        type="text"
+                                        aria-label="Hareket notu"
+                                        placeholder="Not (isteğe bağlı)"
+                                        className={clay.wellInput}
+                                        style={{ flex: 1, minWidth: 140, minHeight: 32, padding: '4px 10px' }}
+                                        value={moveNote}
+                                        onChange={(e) => setMoveNote(e.target.value)}
+                                      />
+                                    </div>
+                                    <div className={clay.row} style={{ gap: 6 }}>
+                                      <button
+                                        type="button"
+                                        disabled={busy}
+                                        className={clay.mintBtn}
+                                        onClick={() => void runMovement(item, 'giris')}
+                                      >
+                                        <Plus size={12} />
+                                        <span>Alım / Giriş</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busy}
+                                        className={clay.ctlBtnSm}
+                                        onClick={() => void runMovement(item, 'cikis')}
+                                      >
+                                        <Minus size={12} />
+                                        <span>Kullanım</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busy}
+                                        className={clay.ctlBtnSm}
+                                        onClick={() => void runMovement(item, 'iade')}
+                                      >
+                                        <RotateCcw size={11} />
+                                        <span>İade</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busy}
+                                        className={clay.ctlBtnSm}
+                                        onClick={() => void runMovement(item, 'fire')}
+                                      >
+                                        <span>Fire / Zayi</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busy}
+                                        className={clay.dangerBtn}
+                                        onClick={() => void runMovement(item, 'imha')}
+                                      >
+                                        <span>İmha</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
           )}
-        </div>
+
+          {/* 2. PERİYODİK BAKIM */}
+          {subTab === 'maintenance' && overview && (
+            <section className={clay.card}>
+              <div className={clay.cardHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipViolet}`} aria-hidden="true">
+                    <CalendarClock size={16} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <div className={clay.cardTitleRow}>
+                    <h4 className={clay.cardTitle}>Periyodik Bakım</h4>
+                    <span className={clay.wellPill}>{visibleMaint.length} kayıt</span>
+                  </div>
+                </div>
+
+                <div className={clay.fieldBox} style={{ minHeight: 36, minWidth: 210, flex: '0 1 250px' }}>
+                  <Search size={13} color="var(--pc-muted)" />
+                  <input
+                    className={clay.fieldInput}
+                    style={{ height: 32 }}
+                    aria-label="Bakım kaydı ara"
+                    placeholder="Ekipman veya servis ara…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      className={clay.iconToolBtn}
+                      style={{ width: 22, height: 22 }}
+                      aria-label="Aramayı temizle"
+                      onClick={() => setSearch('')}
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className={clay.topBar}>
+                <div className={clay.row} style={{ gap: 6 }}>
+                  <button
+                    type="button"
+                    className={!onlyDueMaint ? clay.ctlBtnOn : clay.ctlBtnSm}
+                    onClick={() => setOnlyDueMaint(false)}
+                  >
+                    <span>Tümü ({overview.maintenanceItems.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={onlyDueMaint ? clay.ctlBtnOn : clay.ctlBtnSm}
+                    onClick={() => setOnlyDueMaint(true)}
+                  >
+                    <span>Yaklaşan ≤14g ({alerts.maintenanceDueCount})</span>
+                  </button>
+                </div>
+              </div>
+
+              {maintFormOpen && (
+                <form className={clay.subCard} onSubmit={submitMaint}>
+                  <div className={clay.topBar}>
+                    <h5 className={clay.cardTitle}>
+                      {maintDraft.rowId ? 'Bakım kaydını düzenle' : 'Yeni bakım planla'}
+                    </h5>
+                    <button
+                      type="button"
+                      className={clay.iconToolBtn}
+                      aria-label="Formu kapat"
+                      onClick={() => setMaintFormOpen(false)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+
+                  <div className={local.maintFormGrid}>
+                    <input
+                      aria-label="Ekipman veya varlık adı"
+                      className={clay.wellInput}
+                      required
+                      placeholder="Ekipman / varlık adı (ör. Klima ünitesi, Hizmet aracı, Yazıcı)"
+                      value={maintDraft.name}
+                      onChange={(e) => setMaintDraft({ ...maintDraft, name: e.target.value })}
+                    />
+                    <ClinicalDatePicker
+                      compact
+                      value={maintDraft.scheduledDate}
+                      onChange={(iso) => setMaintDraft({ ...maintDraft, scheduledDate: iso || todayIsoDate() })}
+                      placeholder="Planlanan tarih"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      aria-label="Tahmini ücret"
+                      placeholder="Tahmini ücret (₺)"
+                      className={clay.wellInput}
+                      value={maintDraft.estimatedCost}
+                      onChange={(e) => setMaintDraft({ ...maintDraft, estimatedCost: e.target.value })}
+                    />
+                  </div>
+
+                  <div className={clay.topBar}>
+                    <div className={clay.row} style={{ gap: 6 }}>
+                      <label className={clay.row} style={{ gap: 7, cursor: 'pointer' }}>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={maintDraft.isPeriodic}
+                          aria-label="Periyodik tekrarla"
+                          className={clay.switch}
+                          onClick={() => setMaintDraft({ ...maintDraft, isPeriodic: !maintDraft.isPeriodic })}
+                        />
+                        <span className={clay.muted}>Periyodik</span>
+                      </label>
+                      {maintDraft.isPeriodic && (
+                        <>
+                          {PERIOD_PRESETS.map((p) => {
+                            const active = String(p.days) === maintDraft.periodicDays
+                            return (
+                              <button
+                                key={p.days}
+                                type="button"
+                                className={active ? s.dayBtnOn : s.dayBtn}
+                                style={{ minWidth: 'auto', padding: '0 9px' }}
+                                onClick={() => setMaintDraft({ ...maintDraft, periodicDays: String(p.days) })}
+                              >
+                                <span>{p.days}g</span>
+                              </button>
+                            )
+                          })}
+                          <input
+                            type="number"
+                            min="1"
+                            aria-label="Periyot gün sayısı"
+                            className={clay.wellInput}
+                            style={{ width: 68, minHeight: 30, padding: '4px 8px' }}
+                            value={maintDraft.periodicDays}
+                            onChange={(e) => setMaintDraft({ ...maintDraft, periodicDays: e.target.value })}
+                          />
+                        </>
+                      )}
+                    </div>
+
+                    <div className={clay.row} style={{ gap: 6 }}>
+                      <input
+                        type="text"
+                        aria-label="Servis veya not"
+                        placeholder="Yetkili servis / not"
+                        className={clay.wellInput}
+                        style={{ width: 175, minHeight: 32, padding: '4px 10px' }}
+                        value={maintDraft.notes}
+                        onChange={(e) => setMaintDraft({ ...maintDraft, notes: e.target.value })}
+                      />
+                      <button type="submit" className={clay.primaryBtn} disabled={savingMaint}>
+                        <Check size={13} color="#ffffff" />
+                        <span>{savingMaint ? 'Kaydediliyor…' : maintDraft.rowId ? 'Güncelle' : 'Planla'}</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              )}
+
+              {visibleMaint.length === 0 ? (
+                <div className={clay.emptyHero}>
+                  <span className={`${clay.iconChipSm} ${clay.chipViolet}`} aria-hidden="true">
+                    <CalendarClock size={16} color="#ffffff" />
+                  </span>
+                  <span>
+                    {overview.maintenanceItems.length === 0
+                      ? 'Planlanmış bakım kaydı yok.'
+                      : 'Bu filtrede bakım kaydı yok.'}
+                  </span>
+                </div>
+              ) : (
+                <div className={clay.tableShell}>
+                  <table className={clay.table}>
+                    <thead>
+                      <tr>
+                        <th>Ekipman / Varlık</th>
+                        <th>Periyot</th>
+                        <th>Tarih &amp; Durum</th>
+                        <th>Tahmini Ücret</th>
+                        <th className={clay.stickyCol}>İşlemler</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleMaint.map((m) => {
+                        const busy = busyRowId === m.rowId
+                        const openComplete = activeCompleteRowId === m.rowId
+                        const overdue = m.daysUntilDue !== null && m.daysUntilDue < 0
+                        return (
+                          <Fragment key={m.rowId}>
+                            <tr className={openComplete ? clay.rowOpen : undefined}>
+                              <td>
+                                <strong style={{ fontWeight: 800, color: 'var(--foreground)' }}>
+                                  {m.name}
+                                </strong>
+                                {m.notes && (
+                                  <div className={clay.muted} style={{ marginTop: 3 }}>
+                                    {m.notes}
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                {m.isPeriodic && m.periodicDays > 0 ? (
+                                  <span className={clay.pillBrand}>Her {m.periodicDays}g</span>
+                                ) : (
+                                  <span className={clay.muted}>Tek seferlik</span>
+                                )}
+                              </td>
+                              <td>
+                                <div className={clay.row} style={{ gap: 6 }}>
+                                  <span style={{ whiteSpace: 'nowrap', fontWeight: 700 }}>
+                                    {m.effectiveDueDate ? formatDynamicDateTR(m.effectiveDueDate) : m.statusLabel}
+                                  </span>
+                                  {overdue ? (
+                                    <span className={clay.pillDanger}>
+                                      {Math.abs(m.daysUntilDue!)} gün gecikti
+                                    </span>
+                                  ) : m.isMaintenanceDue && m.daysUntilDue !== null ? (
+                                    <span className={clay.pillWatch}>{m.daysUntilDue} gün kaldı</span>
+                                  ) : m.status === 'completed' ? (
+                                    <span className={clay.pillGood}>Tamamlandı</span>
+                                  ) : null}
+                                </div>
+                              </td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                {m.estimatedCost > 0 ? (
+                                  <span style={{ fontWeight: 700 }}>{formatCurrencyTR(m.estimatedCost)}</span>
+                                ) : (
+                                  <span className={clay.muted}>—</span>
+                                )}
+                              </td>
+                              <td className={clay.stickyCol}>
+                                <div
+                                  className={clay.row}
+                                  style={{ justifyContent: 'flex-end', gap: 5, flexWrap: 'nowrap' }}
+                                >
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    className={clay.chipBtn}
+                                    title="7 gün ertele"
+                                    onClick={() => void postponeMaint(m, 7)}
+                                  >
+                                    +7g
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    className={clay.chipBtn}
+                                    title="30 gün ertele"
+                                    onClick={() => void postponeMaint(m, 30)}
+                                  >
+                                    +30g
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    className={openComplete ? clay.ctlBtnSm : clay.ctlBtnOn}
+                                    onClick={() => {
+                                      if (openComplete) {
+                                        setActiveCompleteRowId(null)
+                                      } else {
+                                        setActiveCompleteRowId(m.rowId)
+                                        setCompleteCost(m.estimatedCost > 0 ? String(m.estimatedCost) : '')
+                                        setCompleteNote('')
+                                      }
+                                    }}
+                                  >
+                                    {!openComplete && <Check size={12} color="#ffffff" />}
+                                    <span>{openComplete ? 'Kapat' : 'Tamamla'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={clay.iconToolBtn}
+                                    title="Düzenle"
+                                    aria-label={`${m.name} düzenle`}
+                                    onClick={() => openEditMaint(m)}
+                                  >
+                                    <Pencil size={13} />
+                                  </button>
+                                  {canManageSchema && (
+                                    <button
+                                      type="button"
+                                      className={clay.iconToolBtnDanger}
+                                      title="Kaldır"
+                                      aria-label={`${m.name} kaldır`}
+                                      onClick={() =>
+                                        setConfirmArchive({ rowId: m.rowId, name: m.name, kind: 'maint' })
+                                      }
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+
+                            {openComplete && (
+                              <tr>
+                                <td colSpan={5} className={clay.drawerWell}>
+                                  <div className={clay.row} style={{ gap: 8 }}>
+                                    <Clock size={14} color="var(--pc-muted)" />
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="0.01"
+                                      aria-label="Gerçekleşen bakım ücreti"
+                                      placeholder="Bakım ücreti (₺)"
+                                      className={clay.wellInput}
+                                      style={{ width: 135, minHeight: 32, padding: '4px 10px' }}
+                                      value={completeCost}
+                                      onChange={(e) => setCompleteCost(e.target.value)}
+                                    />
+                                    <input
+                                      type="text"
+                                      aria-label="Tamamlama notu"
+                                      placeholder="Yapılan işlem / not"
+                                      className={clay.wellInput}
+                                      style={{ flex: 1, minWidth: 160, minHeight: 32, padding: '4px 10px' }}
+                                      value={completeNote}
+                                      onChange={(e) => setCompleteNote(e.target.value)}
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={busy}
+                                      className={clay.primaryBtn}
+                                      style={{ minHeight: 32, padding: '0 13px', fontSize: 12 }}
+                                      onClick={() => void completeMaint(m)}
+                                    >
+                                      <Check size={12} color="#ffffff" />
+                                      <span>{busy ? 'İşleniyor…' : 'Bakımı Tamamla'}</span>
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* 3. HAREKET GEÇMİŞİ */}
+          {subTab === 'history' && (
+            <section className={clay.card}>
+              <div className={clay.cardHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipMint}`} aria-hidden="true">
+                    <History size={16} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <div className={clay.cardTitleRow}>
+                    <h4 className={clay.cardTitle}>Son stok ve bakım hareketleri</h4>
+                    <span className={clay.wellPill}>{visibleMovements.length} kayıt</span>
+                  </div>
+                </div>
+
+                <div className={clay.fieldBox} style={{ minHeight: 36, minWidth: 210, flex: '0 1 250px' }}>
+                  <Search size={13} color="var(--pc-muted)" />
+                  <input
+                    className={clay.fieldInput}
+                    style={{ height: 32 }}
+                    aria-label="Hareketlerde ara"
+                    placeholder="Hareket veya kişi ara…"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  {search && (
+                    <button
+                      type="button"
+                      className={clay.iconToolBtn}
+                      style={{ width: 22, height: 22 }}
+                      aria-label="Aramayı temizle"
+                      onClick={() => setSearch('')}
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {visibleMovements.length === 0 ? (
+                <div className={clay.emptyHero}>
+                  <span className={`${clay.iconChipSm} ${clay.chipMint}`} aria-hidden="true">
+                    <History size={16} color="#ffffff" />
+                  </span>
+                  <span>Henüz kaydedilmiş stok veya bakım hareketi yok.</span>
+                </div>
+              ) : (
+                <div className={clay.tableShell}>
+                  <table className={clay.table}>
+                    <thead>
+                      <tr>
+                        <th>Tür</th>
+                        <th>Kalem / İşlem</th>
+                        <th>Miktar</th>
+                        <th>Tutar</th>
+                        <th>Tarih</th>
+                        <th>İşlemi Yapan</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleMovements.map((mv) => {
+                        const isLoss = /imha|fire|zayi/i.test(mv.movementTypeLabel)
+                        const isEntry = /giriş|alım/i.test(mv.movementTypeLabel)
+                        const badgeClass = isLoss
+                          ? clay.pillDanger
+                          : isEntry
+                            ? clay.pillGood
+                            : clay.pillBrand
+                        return (
+                          <tr key={mv.rowId}>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <span className={badgeClass}>{mv.movementTypeLabel}</span>
+                            </td>
+                            <td>
+                              <strong style={{ fontWeight: 800, color: 'var(--foreground)' }}>
+                                {mv.itemTitle || mv.title}
+                              </strong>
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap', fontWeight: 800 }}>{mv.quantity} br</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {mv.totalAmount > 0 ? (
+                                <span className={clay.wellPill}>{formatCurrencyTR(mv.totalAmount)}</span>
+                              ) : (
+                                <span className={clay.muted}>—</span>
+                              )}
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>{formatDynamicDateTR(mv.date)}</td>
+                            <td>{mv.actor || <span className={clay.muted}>—</span>}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
+        </>
       )}
 
       <ConfirmModal

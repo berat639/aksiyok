@@ -19,9 +19,9 @@ import {
 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import depth from '@/styles/clinic-depth.module.css'
+import clay from '@/app/(panel)/panel/tabs/isletme/isletme-clay.module.css'
 import InfoTooltip from '../ui/InfoTooltip'
 import DynamicDataGridPanel from './DynamicDataGridPanel'
-import styles from './DynamicTablesStudio.module.css'
 import ClinicalDatePicker from './ui/ClinicalDatePicker'
 import {
   formatCurrencyTR,
@@ -570,8 +570,10 @@ export default function DynamicStockWorkspace() {
 
   if (loading && !overview) {
     return (
-      <div className={depth.card} style={{ padding: 36, textAlign: 'center', color: 'var(--pc-muted)' }}>
-        Stok ve periyodik bakım verileri yükleniyor…
+      <div className={clay.scope}>
+        <div className={clay.card} style={{ padding: 36, textAlign: 'center' }}>
+          <span className={clay.muted}>Stok ve periyodik bakım verileri yükleniyor…</span>
+        </div>
       </div>
     )
   }
@@ -587,99 +589,74 @@ export default function DynamicStockWorkspace() {
   }
   const hasInventoryModule = Boolean(overview && overview.inventoryTableIds.length > 0)
   const hasMaintenanceModule = Boolean(overview && overview.maintenanceTableIds.length > 0)
+  const sktAlertTotal = alerts.sktExpiredCount + alerts.sktSoonCount
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, width: '100%' }}>
-      {/* Üst Başlık, Toplam Envanter Değeri ve Hızlı Ekleme Butonları */}
-      <div
-        className={depth.card}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
-          flexWrap: 'wrap',
-          padding: '13px 16px',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <span
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 11,
-              background: 'var(--pc-tint)',
-              border: '1px solid var(--pc-border)',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
-            <Package size={18} style={{ color: 'var(--pc-tint-fg)' }} />
-          </span>
+    <div className={clay.scope}>
+      {/* Güçlü Mavi Clay Hero Şeridi */}
+      <div className={clay.hero}>
+        <div className={clay.heroMain}>
+          <div className={clay.heroLeft}>
+            <span className={clay.heroBadgeIcon} aria-hidden="true">
+              <Package size={20} strokeWidth={2.2} color="#ffffff" />
+            </span>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: 'var(--foreground)' }}>
-              Stok &amp; Periyodik Bakım
-            </h2>
-            <InfoTooltip title="Dinamik Envanter, SKT, Periyodik Bakım ve Gider Senkronizasyonu">
-              Tüm malzeme/ürün stoklarınız ve ekipman periyodik bakımlarınız dinamik tablolarda yönetilir. Stok alımı, tedarikçi iadesi ve tamamlanan ücretli periyodik bakımlar Ödemeler &amp; Finans sekmesindeki Giderler tablosuna otomatik işlenir.
-            </InfoTooltip>
-            {overview?.hasStockTables && (
-              <span className={depth.badge}>
-                <span>Envanter Değeri: {formatCurrencyTR(alerts.totalStockValue)}</span>
-              </span>
-            )}
+            <div style={{ minWidth: 0 }}>
+              <div className={clay.heroTitleRow}>
+                <h2 className={clay.heroName}>Stok &amp; Periyodik Bakım</h2>
+                <InfoTooltip
+                  title="Dinamik Envanter, SKT, Periyodik Bakım ve Gider Senkronizasyonu"
+                  glyph="?"
+                >
+                  Tüm malzeme/ürün stoklarınız ve ekipman periyodik bakımlarınız dinamik tablolarda yönetilir. Stok alımı, tedarikçi iadesi ve tamamlanan ücretli periyodik bakımlar Ödemeler &amp; Finans sekmesindeki Giderler tablosuna otomatik işlenir.
+                </InfoTooltip>
+                {overview?.hasStockTables && (
+                  <span className={clay.heroPill}>
+                    Envanter Değeri: {formatCurrencyTR(alerts.totalStockValue)}
+                  </span>
+                )}
+              </div>
+              <div className={clay.heroMeta}>
+                <span className={clay.heroMetaItem}>
+                  {alerts.totalStockItems} kalem · {alerts.lowStockCount} kritik stok · {alerts.maintenanceDueCount} yaklaşan bakım
+                </span>
+              </div>
+            </div>
           </div>
+
+          {overview?.hasStockTables && (
+            <div className={clay.heroActions}>
+              {hasMaintenanceModule && (
+                <button
+                  type="button"
+                  onClick={() => setNewMaintModalOpen(true)}
+                  className={clay.heroGhostBtn}
+                >
+                  <Wrench size={14} color="#ffffff" />
+                  <span>+ Periyodik Bakım Planla</span>
+                </button>
+              )}
+              {hasInventoryModule && (
+                <button
+                  type="button"
+                  onClick={() => setNewItemModalOpen(true)}
+                  className={clay.heroPrimaryBtn}
+                >
+                  <Plus size={15} color="#0e2152" />
+                  <span>Yeni Stok Kalemi</span>
+                </button>
+              )}
+            </div>
+          )}
         </div>
-
-        {overview?.hasStockTables && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            {hasMaintenanceModule && (
-              <button
-                type="button"
-                onClick={() => setNewMaintModalOpen(true)}
-                className={depth.btnPale}
-                style={{ minHeight: 34, padding: '6px 13px', fontSize: 12.5 }}
-              >
-                <Wrench size={14} />
-                <span>+ Periyodik Bakım Planla</span>
-              </button>
-            )}
-            {hasInventoryModule && (
-              <button
-                type="button"
-                onClick={() => setNewItemModalOpen(true)}
-                className={depth.btnPrimary}
-                style={{ minHeight: 34, padding: '6px 14px', fontSize: 12.5 }}
-              >
-                <Plus size={15} color="#ffffff" />
-                <span style={{ color: '#ffffff' }}>Yeni Stok Kalemi</span>
-              </button>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Eski Sabit Tablolardan Tek Tıkla Aktarım Banner'ı */}
       {overview?.legacyMigration.hasUnmigratedLegacyStock && canManageSchema && (
-        <div
-          className={depth.subcard}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            flexWrap: 'wrap',
-            padding: '10px 14px',
-            background: 'var(--pc-tint)',
-            border: '1.5px solid var(--pc-border)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+        <div className={clay.noticeInfo}>
+          <div className={clay.row} style={{ fontSize: 12.5 }}>
             <DownloadCloud size={16} style={{ color: 'var(--pc-tint-fg)', flexShrink: 0 }} />
-            <span style={{ color: 'var(--foreground)', fontWeight: 600 }}>
+            <span style={{ fontWeight: 600 }}>
               Önceki sabit stokta{' '}
               <strong>{overview.legacyMigration.unmigratedItems} malzeme</strong> ve{' '}
               <strong>{overview.legacyMigration.unmigratedMaintenances} bakım kaydı</strong> bulundu. Tek tıkla dinamik tablolara aktarabilirsiniz.
@@ -689,8 +666,7 @@ export default function DynamicStockWorkspace() {
             type="button"
             disabled={migratingLegacy}
             onClick={() => void handleMigrateLegacy()}
-            className={depth.btnMint}
-            style={{ minHeight: 31, padding: '4px 12px', fontSize: 12 }}
+            className={clay.mintBtn}
           >
             <DownloadCloud size={13} />
             <span>{migratingLegacy ? 'Aktarılıyor…' : 'Mevcut Stok & Bakımları Aktar'}</span>
@@ -700,15 +676,19 @@ export default function DynamicStockWorkspace() {
 
       {/* Sıfır Stok Tablosu Başlangıç Durumu */}
       {!overview?.hasStockTables && (
-        <div className={depth.card} style={{ padding: '18px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-            <Sparkles size={18} style={{ color: 'var(--pc-blue)', flexShrink: 0 }} />
-            <div>
-              <strong style={{ fontSize: 14, color: 'var(--foreground)' }}>
-                Sektörünüze Uygun Dinamik Stok &amp; Periyodik Bakım Tablolarını Tek Tıkla Kurun
-              </strong>
-              <div style={{ fontSize: 12.5, color: 'var(--pc-muted)' }}>
-                Kritik stok uyarıları, son kullanma tarihi (SKT) takibi, periyodik bakım döngüsü ve otomatik gider kaydı hazır gelir.
+        <section className={clay.card}>
+          <div className={clay.cardHead}>
+            <div className={clay.cardTitleGroup}>
+              <span className={`${clay.iconChip} ${clay.chipBrand}`} aria-hidden="true">
+                <Sparkles size={18} strokeWidth={2.2} color="#ffffff" />
+              </span>
+              <div>
+                <h3 className={clay.cardTitle}>
+                  Sektörünüze Uygun Dinamik Stok &amp; Periyodik Bakım Tablolarını Tek Tıkla Kurun
+                </h3>
+                <div className={clay.muted}>
+                  Kritik stok uyarıları, son kullanma tarihi (SKT) takibi, periyodik bakım döngüsü ve otomatik gider kaydı hazır gelir.
+                </div>
               </div>
             </div>
           </div>
@@ -719,68 +699,47 @@ export default function DynamicStockWorkspace() {
                 style={{
                   display: 'grid',
                   gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 245px), 1fr))',
-                  gap: 10,
+                  gap: 12,
                 }}
               >
                 {STOCK_STARTER_PACKS.map((pk, idx) => (
                   <div
                     key={pk.key}
-                    className={depth.subcard}
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between',
-                      gap: 10,
-                      padding: '12px 13px',
-                    }}
+                    className={clay.subCard}
+                    style={{ justifyContent: 'space-between' }}
                   >
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <span className={depth.badge} style={{ fontSize: 10, padding: '1px 7px' }}>
-                          {pk.badge}
-                        </span>
-                        <strong style={{ fontSize: 12.5 }}>{pk.title}</strong>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div className={clay.row} style={{ gap: 6 }}>
+                        <span className={clay.pillBrand}>{pk.badge}</span>
                       </div>
-                      <div style={{ fontSize: 11.5, color: 'var(--pc-muted)', marginTop: 4 }}>
-                        {pk.subtitle}
-                      </div>
+                      <strong style={{ fontSize: 13, color: 'var(--foreground)' }}>{pk.title}</strong>
+                      <div className={clay.muted}>{pk.subtitle}</div>
                     </div>
                     <button
                       type="button"
                       disabled={applyingPack !== null}
                       onClick={() => void handleApplyStarterPack(pk.key)}
-                      className={idx === 0 ? depth.btnPrimary : depth.btnPale}
-                      style={{ minHeight: 30, fontSize: 12, width: '100%' }}
+                      className={idx === 0 ? clay.primaryBtn : clay.ctlBtn}
+                      style={{ width: '100%' }}
                     >
-                      <span style={idx === 0 ? { color: '#ffffff' } : undefined}>
-                        {applyingPack === pk.key ? 'Kuruluyor…' : 'Tek Tıkla Kur'}
-                      </span>
+                      <span>{applyingPack === pk.key ? 'Kuruluyor…' : 'Tek Tıkla Kur'}</span>
                     </button>
                   </div>
                 ))}
               </div>
 
               {unboundCandidateTables.length > 0 && (
-                <form
-                  onSubmit={handleBindExistingTable}
-                  className={depth.subcard}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--foreground-2)' }}>
+                <form onSubmit={handleBindExistingTable} className={clay.noticeInfo}>
+                  <span style={{ fontSize: 12, fontWeight: 750 }}>
                     Veya mevcut bir tablonuzu doğrudan bağlayın:
                   </span>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div className={clay.row}>
                     <select
+                      aria-label="Bağlanacak tablo"
                       value={bindTableId}
                       onChange={(e) => setBindTableId(e.target.value)}
-                      className={depth.input}
-                      style={{ width: 210, minHeight: 31, fontSize: 12 }}
+                      className={clay.wellSelect}
+                      style={{ width: 210 }}
                     >
                       <option value="">Tablo seçiniz…</option>
                       {unboundCandidateTables.map((t) => (
@@ -790,10 +749,11 @@ export default function DynamicStockWorkspace() {
                       ))}
                     </select>
                     <select
+                      aria-label="Modül rolü"
                       value={bindRole}
-                      onChange={(e) => setBindRole(e.target.value as any)}
-                      className={depth.input}
-                      style={{ width: 205, minHeight: 31, fontSize: 12 }}
+                      onChange={(e) => setBindRole(e.target.value as 'stock_inventory' | 'asset_maintenance' | 'stock_movement')}
+                      className={clay.wellSelect}
+                      style={{ width: 205 }}
                     >
                       <option value="stock_inventory">Stok &amp; Envanter Tablosu</option>
                       <option value="asset_maintenance">Cihaz &amp; Periyodik Bakım Tablosu</option>
@@ -802,8 +762,7 @@ export default function DynamicStockWorkspace() {
                     <button
                       type="submit"
                       disabled={bindingExisting}
-                      className={depth.btn}
-                      style={{ minHeight: 31, fontSize: 12 }}
+                      className={clay.ctlBtn}
                     >
                       <span>{bindingExisting ? 'Bağlanıyor…' : 'Tabloyu Bağla'}</span>
                     </button>
@@ -812,66 +771,170 @@ export default function DynamicStockWorkspace() {
               )}
             </>
           ) : (
-            <div style={{ fontSize: 12.5, color: 'var(--pc-muted)' }}>
-              Yetkili kullanıcı stok ve bakım tablolarını oluşturduğunda bu ekrandan stok hareketlerini yönetebilirsiniz.
+            <div className={clay.emptyHero}>
+              <span>
+                Yetkili kullanıcı stok ve bakım tablolarını oluşturduğunda bu ekrandan stok hareketlerini yönetebilirsiniz.
+              </span>
             </div>
           )}
-        </div>
+        </section>
       )}
 
       {overview?.hasStockTables && (
         <>
-          {/* Tıklanabilir Akıllı Uyarı Filtre Rozetleri + Otomatik Gider Anahtarı */}
-          <div
-            className={depth.card}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 10,
-              flexWrap: 'wrap',
-              padding: '10px 14px',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {(
-                [
-                  { id: 'all' as const, label: `Tümü (${alerts.totalStockItems})` },
-                  { id: 'low_stock' as const, label: `Kritik Stok (${alerts.lowStockCount})` },
-                  { id: 'skt_expired' as const, label: `SKT Geçmiş (${alerts.sktExpiredCount})` },
-                  { id: 'skt_soon' as const, label: `SKT Yaklaşan ≤30g (${alerts.sktSoonCount})` },
-                  {
-                    id: 'maintenance_due' as const,
-                    label: `Yaklaşan Bakım ≤14g (${alerts.maintenanceDueCount})`,
-                  },
-                ]
-              ).map((f) => {
-                const active = alertFilter === f.id
-                return (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setAlertFilter(f.id)}
-                    className={active ? depth.btnPrimary : depth.btn}
-                    style={{ minHeight: 30, padding: '4px 11px', fontSize: 12 }}
-                  >
-                    <span style={active ? { color: '#ffffff' } : undefined}>{f.label}</span>
-                  </button>
-                )
-              })}
-            </div>
-
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={recordInFinance}
-                onClick={() => setRecordInFinance((v) => !v)}
-                className={depth.switch}
-              />
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground-2)' }}>
-                Alım, İade &amp; Bakım Tutarlarını Giderlere Otomatik İşle
+          {/* 4 Kompakt Tıklanabilir KPI Kartı */}
+          <div className={clay.statGrid}>
+            <button
+              type="button"
+              className={`${clay.statCardClickable} ${alertFilter === 'all' ? clay.statCardActive : ''}`}
+              style={{ color: 'var(--foreground)' }}
+              onClick={() => setAlertFilter('all')}
+            >
+              <span className={clay.cardHead}>
+                <span className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChip} ${clay.chipBrand}`} aria-hidden="true">
+                    <Package size={18} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <span className={clay.statTitle}>Toplam Kalem</span>
+                </span>
               </span>
+              <span className={clay.statVal}>{alerts.totalStockItems}</span>
+              <span className={clay.statFoot}>
+                <span className={clay.wellPill}>Değer: {formatCurrencyTR(alerts.totalStockValue)}</span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className={`${clay.statCardClickable} ${alertFilter === 'low_stock' ? clay.statCardActive : ''}`}
+              style={{ color: 'var(--foreground)' }}
+              onClick={() => setAlertFilter('low_stock')}
+            >
+              <span className={clay.cardHead}>
+                <span className={clay.cardTitleGroup}>
+                  <span
+                    className={`${clay.iconChip} ${alerts.lowStockCount > 0 ? clay.chipCoral : clay.chipMint}`}
+                    aria-hidden="true"
+                  >
+                    <AlertTriangle size={18} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <span className={clay.statTitle}>Kritik Stok</span>
+                </span>
+              </span>
+              <span className={`${clay.statVal} ${alerts.lowStockCount > 0 ? clay.valDanger : clay.valGood}`}>
+                {alerts.lowStockCount}
+              </span>
+              <span className={clay.statFoot}>
+                <span className={alerts.lowStockCount > 0 ? clay.pillDanger : clay.pillGood}>
+                  {alerts.lowStockCount > 0 ? 'Eşik altında' : 'Tümü normal'}
+                </span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className={`${clay.statCardClickable} ${alertFilter === 'skt_expired' || alertFilter === 'skt_soon' ? clay.statCardActive : ''}`}
+              style={{ color: 'var(--foreground)' }}
+              onClick={() => setAlertFilter(alerts.sktExpiredCount > 0 ? 'skt_expired' : 'skt_soon')}
+            >
+              <span className={clay.cardHead}>
+                <span className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChip} ${clay.chipAmber}`} aria-hidden="true">
+                    <Clock size={18} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <span className={clay.statTitle}>SKT Uyarıları</span>
+                </span>
+              </span>
+              <span
+                className={`${clay.statVal} ${
+                  alerts.sktExpiredCount > 0 ? clay.valDanger : alerts.sktSoonCount > 0 ? clay.valWatch : ''
+                }`}
+              >
+                {sktAlertTotal}
+              </span>
+              <span className={clay.statFoot}>
+                <span
+                  className={
+                    alerts.sktExpiredCount > 0
+                      ? clay.pillDanger
+                      : alerts.sktSoonCount > 0
+                        ? clay.pillWatch
+                        : clay.wellPill
+                  }
+                >
+                  {alerts.sktExpiredCount} geçmiş · {alerts.sktSoonCount} ≤30g
+                </span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              className={`${clay.statCardClickable} ${alertFilter === 'maintenance_due' ? clay.statCardActive : ''}`}
+              style={{ color: 'var(--foreground)' }}
+              onClick={() => setAlertFilter('maintenance_due')}
+            >
+              <span className={clay.cardHead}>
+                <span className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChip} ${clay.chipViolet}`} aria-hidden="true">
+                    <Wrench size={18} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <span className={clay.statTitle}>Yaklaşan Bakım</span>
+                </span>
+              </span>
+              <span className={`${clay.statVal} ${alerts.maintenanceDueCount > 0 ? clay.valWatch : ''}`}>
+                {alerts.maintenanceDueCount}
+              </span>
+              <span className={clay.statFoot}>
+                <span className={alerts.maintenanceDueCount > 0 ? clay.pillWatch : clay.wellPill}>
+                  {overview.maintenanceItems.length} planlı kayıt
+                </span>
+              </span>
+            </button>
+          </div>
+
+          {/* Tıklanabilir Akıllı Uyarı Filtre Rozetleri + Otomatik Gider Anahtarı */}
+          <div className={clay.card} style={{ padding: '12px 16px' }}>
+            <div className={clay.topBar}>
+              <div className={clay.row} style={{ gap: 6 }}>
+                {(
+                  [
+                    { id: 'all' as const, label: `Tümü (${alerts.totalStockItems})` },
+                    { id: 'low_stock' as const, label: `Kritik Stok (${alerts.lowStockCount})` },
+                    { id: 'skt_expired' as const, label: `SKT Geçmiş (${alerts.sktExpiredCount})` },
+                    { id: 'skt_soon' as const, label: `SKT Yaklaşan ≤30g (${alerts.sktSoonCount})` },
+                    {
+                      id: 'maintenance_due' as const,
+                      label: `Yaklaşan Bakım ≤14g (${alerts.maintenanceDueCount})`,
+                    },
+                  ]
+                ).map((f) => {
+                  const active = alertFilter === f.id
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setAlertFilter(f.id)}
+                      className={active ? clay.ctlBtnOn : clay.ctlBtnSm}
+                    >
+                      <span>{f.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+
+              <label className={clay.row} style={{ gap: 8, cursor: 'pointer' }}>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={recordInFinance}
+                  aria-label="Alım, iade ve bakım tutarlarını giderlere otomatik işle"
+                  onClick={() => setRecordInFinance((v) => !v)}
+                  className={clay.switch}
+                />
+                <span className={clay.muted} style={{ fontWeight: 700 }}>
+                  Alım, İade &amp; Bakım Tutarlarını Giderlere Otomatik İşle
+                </span>
+              </label>
             </div>
           </div>
 
@@ -880,47 +943,41 @@ export default function DynamicStockWorkspace() {
             style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 370px), 1fr))',
-              gap: 12,
+              gap: 14,
               alignItems: 'stretch',
             }}
           >
             {/* Sol Panel: Hızlı Stok Giriş / Kullanım / Zayi / İmha / İade */}
-            <div className={depth.card} style={{ padding: '13px 15px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <Layers size={15} style={{ color: 'var(--pc-blue)' }} />
-                  <strong style={{ fontSize: 13.5, color: 'var(--foreground)' }}>
-                    Hızlı Stok Giriş &amp; Düşüm İşlemleri
-                  </strong>
+            <section className={clay.card}>
+              <div className={clay.cardHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+                    <Layers size={16} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <h3 className={clay.cardTitle}>Hızlı Stok Giriş &amp; Düşüm İşlemleri</h3>
                 </div>
 
-                <div style={{ position: 'relative', width: 'min(210px, 100%)' }}>
-                  <Search
-                    size={13}
-                    style={{
-                      position: 'absolute',
-                      left: 9,
-                      top: '50%',
-                      transform: 'translateY(-50%)',
-                      color: 'var(--pc-muted)',
-                    }}
-                  />
+                <div className={clay.fieldBox} style={{ minHeight: 34, width: 'min(220px, 100%)' }}>
+                  <Search size={13} color="var(--pc-muted)" />
                   <input
                     type="text"
                     value={quickSearch}
                     onChange={(e) => setQuickSearch(e.target.value)}
                     placeholder="Malzeme veya cihaz ara…"
-                    className={depth.input}
-                    style={{ paddingLeft: 28, minHeight: 29, fontSize: 12 }}
+                    className={clay.fieldInput}
+                    style={{ height: 30 }}
                   />
+                  {quickSearch && (
+                    <button
+                      type="button"
+                      className={clay.iconToolBtn}
+                      style={{ width: 22, height: 22 }}
+                      aria-label="Aramayı temizle"
+                      onClick={() => setQuickSearch('')}
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -928,15 +985,15 @@ export default function DynamicStockWorkspace() {
                 style={{
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 8,
-                  maxHeight: 280,
+                  gap: 9,
+                  maxHeight: 300,
                   overflowY: 'auto',
                   paddingRight: 2,
                 }}
               >
                 {overview.inventoryItems.length === 0 ? (
-                  <div style={{ padding: '24px 10px', textAlign: 'center', color: 'var(--pc-muted)', fontSize: 12.5 }}>
-                    Seçili filtreye uygun stok kalemi bulunmuyor.
+                  <div className={clay.emptyHero}>
+                    <span>Seçili filtreye uygun stok kalemi bulunmuyor.</span>
                   </div>
                 ) : (
                   overview.inventoryItems.slice(0, 20).map((item) => {
@@ -952,58 +1009,26 @@ export default function DynamicStockWorkspace() {
                     return (
                       <div
                         key={item.rowId}
-                        className={depth.subcard}
-                        style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 7,
-                          padding: '9px 11px',
-                          border:
-                            item.isExpired || item.isLowStock
-                              ? '1.5px solid var(--danger)'
-                              : '1px solid var(--pc-border)',
-                        }}
+                        className={item.isExpired || item.isLowStock ? clay.subCardDanger : clay.subCard}
                       >
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 8,
-                            flexWrap: 'wrap',
-                          }}
-                        >
+                        <div className={clay.topBar}>
                           <div style={{ minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                              <strong style={{ fontSize: 12.5, color: 'var(--foreground)' }}>
+                            <div className={clay.row} style={{ gap: 6 }}>
+                              <strong style={{ fontSize: 13, color: 'var(--foreground)' }}>
                                 {item.name}
                               </strong>
-                              <span className={depth.badge} style={{ fontSize: 10 }}>
-                                {item.categoryLabel}
-                              </span>
-                              {item.isExpired && (
-                                <span
-                                  className={depth.badge}
-                                  style={{ fontSize: 10, color: 'var(--danger)' }}
-                                >
-                                  SKT Geçmiş
-                                </span>
-                              )}
+                              <span className={clay.wellPill}>{item.categoryLabel}</span>
+                              {item.isExpired && <span className={clay.pillDanger}>SKT Geçmiş</span>}
                               {!item.isExpired && item.isExpiringSoon && (
-                                <span className={depth.badge} style={{ fontSize: 10 }}>
-                                  SKT: {item.daysUntilExpiry} gün
-                                </span>
+                                <span className={clay.pillWatch}>SKT: {item.daysUntilExpiry} gün</span>
                               )}
                               {item.isLowStock && (
-                                <span
-                                  className={depth.badge}
-                                  style={{ fontSize: 10, color: 'var(--danger)' }}
-                                >
+                                <span className={clay.pillDanger}>
                                   Kritik Stok (Eşik: {item.minThreshold})
                                 </span>
                               )}
                             </div>
-                            <div style={{ fontSize: 11, color: 'var(--pc-muted)', marginTop: 2 }}>
+                            <div className={clay.muted} style={{ marginTop: 3 }}>
                               Mevcut: <strong>{item.quantity} {item.unitLabel}</strong>
                               {item.unitCost > 0 ? ` • Birim: ${formatCurrencyTR(item.unitCost)}` : ''}
                               {item.expiryDate ? ` • SKT: ${formatDynamicDateTR(item.expiryDate)}` : ''}
@@ -1011,16 +1036,8 @@ export default function DynamicStockWorkspace() {
                           </div>
                         </div>
 
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 6,
-                            flexWrap: 'wrap',
-                          }}
-                        >
-                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                        <div className={clay.topBar} style={{ gap: 6 }}>
+                          <div className={clay.row} style={{ gap: 5 }}>
                             <input
                               type="number"
                               min="1"
@@ -1029,8 +1046,8 @@ export default function DynamicStockWorkspace() {
                                 setQtyDraftByRow((prev) => ({ ...prev, [item.rowId]: e.target.value }))
                               }
                               title="İşlem adedi"
-                              className={depth.input}
-                              style={{ width: 62, minHeight: 27, padding: '2px 6px', fontSize: 12 }}
+                              className={clay.wellInput}
+                              style={{ width: 64, minHeight: 30, padding: '3px 8px', fontSize: 12 }}
                             />
                             <input
                               type="number"
@@ -1042,18 +1059,17 @@ export default function DynamicStockWorkspace() {
                               }
                               placeholder="Birim ₺"
                               title="Birim maliyet (₺)"
-                              className={depth.input}
-                              style={{ width: 86, minHeight: 27, padding: '2px 6px', fontSize: 12 }}
+                              className={clay.wellInput}
+                              style={{ width: 88, minHeight: 30, padding: '3px 8px', fontSize: 12 }}
                             />
                           </div>
 
-                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                          <div className={clay.row} style={{ gap: 4 }}>
                             <button
                               type="button"
                               disabled={isBusy}
                               onClick={() => void handleMovement(item, 'giris')}
-                              className={depth.btnMint}
-                              style={{ minHeight: 27, padding: '2px 8px', fontSize: 11 }}
+                              className={clay.mintBtn}
                               title="Stok girişi / satın alım"
                             >
                               <Plus size={12} />
@@ -1063,8 +1079,7 @@ export default function DynamicStockWorkspace() {
                               type="button"
                               disabled={isBusy}
                               onClick={() => void handleMovement(item, 'cikis')}
-                              className={depth.btnPale}
-                              style={{ minHeight: 27, padding: '2px 8px', fontSize: 11 }}
+                              className={clay.ctlBtnSm}
                               title="Kullanım / çıkış"
                             >
                               <Minus size={12} />
@@ -1074,8 +1089,7 @@ export default function DynamicStockWorkspace() {
                               type="button"
                               disabled={isBusy}
                               onClick={() => void handleMovement(item, 'fire')}
-                              className={depth.btn}
-                              style={{ minHeight: 27, padding: '2px 7px', fontSize: 11 }}
+                              className={clay.ctlBtnSm}
                               title="Zayi / bozulma"
                             >
                               <span>Zayi</span>
@@ -1084,8 +1098,7 @@ export default function DynamicStockWorkspace() {
                               type="button"
                               disabled={isBusy}
                               onClick={() => void handleMovement(item, 'imha')}
-                              className={depth.btn}
-                              style={{ minHeight: 27, padding: '2px 7px', fontSize: 11, color: 'var(--danger)' }}
+                              className={clay.dangerBtn}
                               title="Süresi doldu / imha"
                             >
                               <span>İmha</span>
@@ -1094,8 +1107,7 @@ export default function DynamicStockWorkspace() {
                               type="button"
                               disabled={isBusy}
                               onClick={() => void handleMovement(item, 'iade')}
-                              className={depth.btn}
-                              style={{ minHeight: 27, padding: '2px 7px', fontSize: 11 }}
+                              className={clay.ctlBtnSm}
                               title="Tedarikçiye iade (giderlerden düşer)"
                             >
                               <RotateCcw size={11} />
@@ -1108,39 +1120,38 @@ export default function DynamicStockWorkspace() {
                   })
                 )}
               </div>
-            </div>
+            </section>
 
             {/* Sağ Panel: Periyodik Bakım Takibi & Tek Tıkla Bakım Tamamlama */}
-            <div className={depth.card} style={{ padding: '13px 15px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <CalendarClock size={16} style={{ color: 'var(--pc-blue)' }} />
-                  <strong style={{ fontSize: 13.5, color: 'var(--foreground)' }}>
-                    Cihaz, Ekipman &amp; Periyodik Bakımlar
-                  </strong>
+            <section className={clay.card}>
+              <div className={clay.cardHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipViolet}`} aria-hidden="true">
+                    <CalendarClock size={16} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <h3 className={clay.cardTitle}>Cihaz, Ekipman &amp; Periyodik Bakımlar</h3>
                 </div>
-                <span className={depth.badge} style={{ fontSize: 10.5 }}>
-                  {overview.maintenanceItems.length} Kayıt
-                </span>
+                <span className={clay.wellPill}>{overview.maintenanceItems.length} Kayıt</span>
               </div>
 
               <div
                 style={{
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 8,
-                  maxHeight: 280,
+                  gap: 9,
+                  maxHeight: 300,
                   overflowY: 'auto',
                   paddingRight: 2,
                 }}
               >
                 {overview.maintenanceItems.length === 0 ? (
-                  <div style={{ padding: '24px 10px', textAlign: 'center', color: 'var(--pc-muted)', fontSize: 12.5 }}>
-                    Görüntülenecek bakım kaydı bulunmuyor.
+                  <div className={clay.emptyHero}>
+                    <span>Görüntülenecek bakım kaydı bulunmuyor.</span>
                   </div>
                 ) : (
                   overview.maintenanceItems.slice(0, 16).map((m) => {
                     const isBusy = busyRowId === m.rowId
+                    const overdue = m.daysUntilDue !== null && m.daysUntilDue < 0
                     const draftCost =
                       maintCostDraftByRow[m.rowId] !== undefined
                         ? maintCostDraftByRow[m.rowId]!
@@ -1151,54 +1162,47 @@ export default function DynamicStockWorkspace() {
                     return (
                       <div
                         key={m.rowId}
-                        className={depth.subcard}
-                        style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 7,
-                          padding: '9px 11px',
-                          border: m.isMaintenanceDue
-                            ? '1.5px solid var(--pc-blue)'
-                            : '1px solid var(--pc-border)',
-                        }}
+                        className={
+                          overdue
+                            ? clay.subCardDanger
+                            : m.isMaintenanceDue
+                              ? clay.subCardActive
+                              : clay.subCard
+                        }
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
-                          <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                              <strong style={{ fontSize: 12.5, color: 'var(--foreground)' }}>
-                                {m.name}
-                              </strong>
-                              <span className={depth.badge} style={{ fontSize: 10 }}>
-                                {m.typeLabel}
-                              </span>
-                              {m.isPeriodic && m.periodicDays > 0 && (
-                                <span className={depth.badge} style={{ fontSize: 10 }}>
-                                  Her {m.periodicDays} günde bir
-                                </span>
-                              )}
-                            </div>
-                            <div style={{ fontSize: 11, color: 'var(--pc-muted)', marginTop: 2 }}>
+                        <div>
+                          <div className={clay.row} style={{ gap: 6 }}>
+                            <strong style={{ fontSize: 13, color: 'var(--foreground)' }}>
+                              {m.name}
+                            </strong>
+                            <span className={clay.wellPill}>{m.typeLabel}</span>
+                            {m.isPeriodic && m.periodicDays > 0 && (
+                              <span className={clay.pillBrand}>Her {m.periodicDays} günde bir</span>
+                            )}
+                          </div>
+                          <div className={clay.row} style={{ gap: 6, marginTop: 4 }}>
+                            <span className={clay.muted}>
                               Durum: <strong>{m.statusLabel}</strong>
                               {m.effectiveDueDate && (
-                                <span>
+                                <>
                                   {' '}
-                                  • Plan / Sonraki:{' '}
-                                  <strong>{formatDynamicDateTR(m.effectiveDueDate)}</strong>
-                                </span>
+                                  • Plan / Sonraki: <strong>{formatDynamicDateTR(m.effectiveDueDate)}</strong>
+                                </>
                               )}
-                              {m.daysUntilDue !== null && m.daysUntilDue <= 14 && (
-                                <span style={{ color: 'var(--danger)', fontWeight: 700 }}>
-                                  {' '}
-                                  ({m.daysUntilDue < 0 ? `${Math.abs(m.daysUntilDue)} gün gecikti` : `${m.daysUntilDue} gün kaldı`})
-                                </span>
-                              )}
-                            </div>
+                            </span>
+                            {m.daysUntilDue !== null && m.daysUntilDue <= 14 && (
+                              <span className={overdue ? clay.pillDanger : clay.pillWatch}>
+                                {overdue
+                                  ? `${Math.abs(m.daysUntilDue)} gün gecikti`
+                                  : `${m.daysUntilDue} gün kaldı`}
+                              </span>
+                            )}
                           </div>
                         </div>
 
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                            <Clock size={12} style={{ color: 'var(--pc-muted)' }} />
+                        <div className={clay.topBar} style={{ gap: 8 }}>
+                          <div className={clay.row} style={{ gap: 6 }}>
+                            <Clock size={12} color="var(--pc-muted)" />
                             <input
                               type="number"
                               step="0.01"
@@ -1211,8 +1215,8 @@ export default function DynamicStockWorkspace() {
                                 }))
                               }
                               placeholder="Bakım ücreti (₺)"
-                              className={depth.input}
-                              style={{ width: 130, minHeight: 27, padding: '2px 8px', fontSize: 12 }}
+                              className={clay.wellInput}
+                              style={{ width: 132, minHeight: 30, padding: '3px 9px', fontSize: 12 }}
                             />
                           </div>
 
@@ -1220,13 +1224,11 @@ export default function DynamicStockWorkspace() {
                             type="button"
                             disabled={isBusy}
                             onClick={() => void handleCompleteMaintenance(m)}
-                            className={depth.btnPrimary}
-                            style={{ minHeight: 28, padding: '3px 11px', fontSize: 11.5 }}
+                            className={clay.primaryBtn}
+                            style={{ minHeight: 30, padding: '0 12px', fontSize: 12 }}
                           >
                             <Check size={13} color="#ffffff" />
-                            <span style={{ color: '#ffffff' }}>
-                              {isBusy ? 'İşleniyor…' : 'Bakımı Tamamla'}
-                            </span>
+                            <span>{isBusy ? 'İşleniyor…' : 'Bakımı Tamamla'}</span>
                           </button>
                         </div>
                       </div>
@@ -1234,33 +1236,56 @@ export default function DynamicStockWorkspace() {
                   })
                 )}
               </div>
-            </div>
+            </section>
           </div>
 
           {/* Alt Bölüm: Tam Özelleştirilebilir Dinamik Stok, Bakım ve Hareket Tabloları */}
           {schema && stockTables.length > 0 && (
-            <div className={styles.mainTableCard}>
-              <DynamicDataGridPanel
-                tables={stockTables}
-                allTables={schema.tables}
-                relations={schema.relations}
-                appointmentConfigs={schema.appointmentConfigs}
-                moduleConfigs={schema.moduleConfigs}
-                defaultNewTableModuleRole="stock_inventory"
-                selectedTableId={selectedTableId}
-                canManageSchema={canManageSchema}
-                refreshToken={refreshToken}
-                focusedDetailRowId={focusedDetailRowId}
-                onChangeFocusedDetailRowId={setFocusedDetailRowId}
-                onSelectTable={setSelectedTableId}
-                onTableCreated={(newId) => {
-                  setSelectedTableId(newId)
-                  triggerRefresh()
+            <section className={clay.gridFrame}>
+              <div className={clay.gridFrameHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+                    <Layers size={16} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <div>
+                    <h3 className={clay.cardTitle}>Dinamik Stok, Bakım ve Hareket Tabloları</h3>
+                    <div className={clay.muted}>
+                      Bağlı envanter, bakım ve stok hareket tablolarını buradan doğrudan düzenleyin.
+                    </div>
+                  </div>
+                </div>
+                <span className={clay.wellPill}>{stockTables.length} tablo</span>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  minHeight: 'clamp(500px, calc(100vh - 240px), 780px)',
                 }}
-                onDataMutated={triggerRefresh}
-                onNavigateToRow={handleNavigateToRow}
-              />
-            </div>
+              >
+                <DynamicDataGridPanel
+                  tables={stockTables}
+                  allTables={schema.tables}
+                  relations={schema.relations}
+                  appointmentConfigs={schema.appointmentConfigs}
+                  moduleConfigs={schema.moduleConfigs}
+                  defaultNewTableModuleRole="stock_inventory"
+                  selectedTableId={selectedTableId}
+                  canManageSchema={canManageSchema}
+                  refreshToken={refreshToken}
+                  focusedDetailRowId={focusedDetailRowId}
+                  onChangeFocusedDetailRowId={setFocusedDetailRowId}
+                  onSelectTable={setSelectedTableId}
+                  onTableCreated={(newId) => {
+                    setSelectedTableId(newId)
+                    triggerRefresh()
+                  }}
+                  onDataMutated={triggerRefresh}
+                  onNavigateToRow={handleNavigateToRow}
+                />
+              </div>
+            </section>
           )}
         </>
       )}
@@ -1271,130 +1296,114 @@ export default function DynamicStockWorkspace() {
           <div
             className={depth.modal}
             onClick={(e) => e.stopPropagation()}
-            style={{ padding: '16px 18px' }}
+            style={{ padding: '18px 20px', borderRadius: 22 }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <strong style={{ fontSize: 14.5, color: 'var(--foreground)' }}>
-                Yeni Stok / Envanter Kalemi Ekle
-              </strong>
-              <button
-                type="button"
-                onClick={() => setNewItemModalOpen(false)}
-                className={depth.btn}
-                style={{ minHeight: 28, padding: '3px 8px' }}
-              >
-                <X size={14} />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateQuickStockItem} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                  Malzeme / Ürün Adı *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={itemTitle}
-                  onChange={(e) => setItemTitle(e.target.value)}
-                  placeholder="Örn: Kompozit Dolgu Seti, Fren Balatası, Toner…"
-                  className={depth.input}
-                  style={{ minHeight: 34, fontSize: 12.5 }}
-                  autoFocus
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                    Başlangıç Stoku
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={itemQty}
-                    onChange={(e) => setItemQty(e.target.value)}
-                    className={depth.input}
-                    style={{ minHeight: 34, fontSize: 12.5 }}
-                  />
+            <div className={clay.scope} style={{ gap: 12 }}>
+              <div className={clay.topBar}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+                    <Package size={15} strokeWidth={2.2} color="#ffffff" />
+                  </span>
+                  <h3 className={clay.cardTitle}>Yeni Stok / Envanter Kalemi Ekle</h3>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                    Kritik Eşik
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={itemMinThreshold}
-                    onChange={(e) => setItemMinThreshold(e.target.value)}
-                    className={depth.input}
-                    style={{ minHeight: 34, fontSize: 12.5 }}
-                  />
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                    Birim Maliyet (₺)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={itemUnitCost}
-                    onChange={(e) => setItemUnitCost(e.target.value)}
-                    placeholder="0,00"
-                    className={depth.input}
-                    style={{ minHeight: 34, fontSize: 12.5 }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                  Son Kullanma Tarihi (SKT — İsteğe Bağlı)
-                </label>
-                <ClinicalDatePicker
-                  value={itemExpiryDate}
-                  onChange={(nextIso) => setItemExpiryDate(nextIso)}
-                  placeholder="SKT varsa seçiniz"
-                />
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                  Marka / Tedarikçi / Not
-                </label>
-                <input
-                  type="text"
-                  value={itemNotes}
-                  onChange={(e) => setItemNotes(e.target.value)}
-                  placeholder="Tedarikçi firma veya lot bilgisi…"
-                  className={depth.input}
-                  style={{ minHeight: 34, fontSize: 12.5 }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
                 <button
                   type="button"
                   onClick={() => setNewItemModalOpen(false)}
-                  className={depth.btn}
-                  style={{ minHeight: 34, padding: '6px 14px', fontSize: 12.5 }}
+                  className={clay.iconToolBtn}
+                  aria-label="Kapat"
                 >
-                  <span>Vazgeç</span>
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingItem}
-                  className={depth.btnPrimary}
-                  style={{ minHeight: 34, padding: '6px 16px', fontSize: 12.5 }}
-                >
-                  <Check size={15} color="#ffffff" />
-                  <span style={{ color: '#ffffff' }}>
-                    {savingItem ? 'Kaydediliyor…' : 'Stok Kalemini Ekle'}
-                  </span>
+                  <X size={15} />
                 </button>
               </div>
-            </form>
+
+              <form onSubmit={handleCreateQuickStockItem} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Malzeme / Ürün Adı *</span>
+                  <input
+                    type="text"
+                    required
+                    value={itemTitle}
+                    onChange={(e) => setItemTitle(e.target.value)}
+                    placeholder="Örn: Kompozit Dolgu Seti, Fren Balatası, Toner…"
+                    className={clay.wellInput}
+                    autoFocus
+                  />
+                </label>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  <label className={clay.field}>
+                    <span className={clay.fieldLabel}>Başlangıç Stoku</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={itemQty}
+                      onChange={(e) => setItemQty(e.target.value)}
+                      className={clay.wellInput}
+                    />
+                  </label>
+                  <label className={clay.field}>
+                    <span className={clay.fieldLabel}>Kritik Eşik</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={itemMinThreshold}
+                      onChange={(e) => setItemMinThreshold(e.target.value)}
+                      className={clay.wellInput}
+                    />
+                  </label>
+                  <label className={clay.field}>
+                    <span className={clay.fieldLabel}>Birim Maliyet (₺)</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={itemUnitCost}
+                      onChange={(e) => setItemUnitCost(e.target.value)}
+                      placeholder="0,00"
+                      className={clay.wellInput}
+                    />
+                  </label>
+                </div>
+
+                <div className={clay.field}>
+                  <span className={clay.fieldLabel}>Son Kullanma Tarihi (SKT — İsteğe Bağlı)</span>
+                  <ClinicalDatePicker
+                    value={itemExpiryDate}
+                    onChange={(nextIso) => setItemExpiryDate(nextIso)}
+                    placeholder="SKT varsa seçiniz"
+                  />
+                </div>
+
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Marka / Tedarikçi / Not</span>
+                  <input
+                    type="text"
+                    value={itemNotes}
+                    onChange={(e) => setItemNotes(e.target.value)}
+                    placeholder="Tedarikçi firma veya lot bilgisi…"
+                    className={clay.wellInput}
+                  />
+                </label>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => setNewItemModalOpen(false)}
+                    className={clay.ctlBtn}
+                  >
+                    <span>Vazgeç</span>
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingItem}
+                    className={clay.primaryBtn}
+                  >
+                    <Check size={15} color="#ffffff" />
+                    <span>{savingItem ? 'Kaydediliyor…' : 'Stok Kalemini Ekle'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}
@@ -1405,146 +1414,129 @@ export default function DynamicStockWorkspace() {
           <div
             className={depth.modal}
             onClick={(e) => e.stopPropagation()}
-            style={{ padding: '16px 18px' }}
+            style={{ padding: '18px 20px', borderRadius: 22 }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <strong style={{ fontSize: 14.5, color: 'var(--foreground)' }}>
-                Yeni Cihaz / Ekipman Bakımı Planla
-              </strong>
-              <button
-                type="button"
-                onClick={() => setNewMaintModalOpen(false)}
-                className={depth.btn}
-                style={{ minHeight: 28, padding: '3px 8px' }}
-              >
-                <X size={14} />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateQuickMaintenance} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                  Cihaz / Demirbaş / Ekipman Adı *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={maintTitle}
-                  onChange={(e) => setMaintTitle(e.target.value)}
-                  placeholder="Örn: Otoklav Cihazı, Kompresör, Klima, Hizmet Aracı…"
-                  className={depth.input}
-                  style={{ minHeight: 34, fontSize: 12.5 }}
-                  autoFocus
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                    Planlanan Bakım Tarihi
-                  </label>
-                  <ClinicalDatePicker
-                    value={maintScheduledDate}
-                    onChange={(nextIso) => setMaintScheduledDate(nextIso || todayIsoDate())}
-                  />
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                    Tahmini Bakım Ücreti (₺)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={maintCost}
-                    onChange={(e) => setMaintCost(e.target.value)}
-                    placeholder="0,00"
-                    className={depth.input}
-                    style={{ minHeight: 34, fontSize: 12.5 }}
-                  />
-                </div>
-              </div>
-
-              <div
-                className={depth.subcard}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 10,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={maintIsPeriodic}
-                    onClick={() => setMaintIsPeriodic((v) => !v)}
-                    className={depth.switch}
-                  />
-                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--foreground)' }}>
-                    Periyodik Tekrarlayan Bakım
+            <div className={clay.scope} style={{ gap: 12 }}>
+              <div className={clay.topBar}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipViolet}`} aria-hidden="true">
+                    <Wrench size={15} strokeWidth={2.2} color="#ffffff" />
                   </span>
+                  <h3 className={clay.cardTitle}>Yeni Cihaz / Ekipman Bakımı Planla</h3>
                 </div>
-
-                {maintIsPeriodic && (
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ fontSize: 11.5, color: 'var(--pc-muted)', fontWeight: 600 }}>
-                      Periyot (Gün):
-                    </span>
-                    <input
-                      type="number"
-                      min="1"
-                      value={maintPeriodicDays}
-                      onChange={(e) => setMaintPeriodicDays(e.target.value)}
-                      className={depth.input}
-                      style={{ width: 82, minHeight: 30, padding: '3px 8px', fontSize: 12 }}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <label style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--foreground-2)' }}>
-                  Yetkili Servis / Not
-                </label>
-                <input
-                  type="text"
-                  value={maintNotes}
-                  onChange={(e) => setMaintNotes(e.target.value)}
-                  placeholder="Servis firması veya seri numarası…"
-                  className={depth.input}
-                  style={{ minHeight: 34, fontSize: 12.5 }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
                 <button
                   type="button"
                   onClick={() => setNewMaintModalOpen(false)}
-                  className={depth.btn}
-                  style={{ minHeight: 34, padding: '6px 14px', fontSize: 12.5 }}
+                  className={clay.iconToolBtn}
+                  aria-label="Kapat"
                 >
-                  <span>Vazgeç</span>
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingMaint}
-                  className={depth.btnPrimary}
-                  style={{ minHeight: 34, padding: '6px 16px', fontSize: 12.5 }}
-                >
-                  <Check size={15} color="#ffffff" />
-                  <span style={{ color: '#ffffff' }}>
-                    {savingMaint ? 'Kaydediliyor…' : 'Bakımı Planla'}
-                  </span>
+                  <X size={15} />
                 </button>
               </div>
-            </form>
+
+              <form onSubmit={handleCreateQuickMaintenance} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Cihaz / Demirbaş / Ekipman Adı *</span>
+                  <input
+                    type="text"
+                    required
+                    value={maintTitle}
+                    onChange={(e) => setMaintTitle(e.target.value)}
+                    placeholder="Örn: Otoklav Cihazı, Kompresör, Klima, Hizmet Aracı…"
+                    className={clay.wellInput}
+                    autoFocus
+                  />
+                </label>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div className={clay.field}>
+                    <span className={clay.fieldLabel}>Planlanan Bakım Tarihi</span>
+                    <ClinicalDatePicker
+                      value={maintScheduledDate}
+                      onChange={(nextIso) => setMaintScheduledDate(nextIso || todayIsoDate())}
+                    />
+                  </div>
+                  <label className={clay.field}>
+                    <span className={clay.fieldLabel}>Tahmini Bakım Ücreti (₺)</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={maintCost}
+                      onChange={(e) => setMaintCost(e.target.value)}
+                      placeholder="0,00"
+                      className={clay.wellInput}
+                    />
+                  </label>
+                </div>
+
+                <div className={clay.subCard}>
+                  <div className={clay.topBar}>
+                    <label className={clay.row} style={{ gap: 8, cursor: 'pointer' }}>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={maintIsPeriodic}
+                        aria-label="Periyodik Tekrarlayan Bakım"
+                        onClick={() => setMaintIsPeriodic((v) => !v)}
+                        className={clay.switch}
+                      />
+                      <span style={{ fontSize: 12, fontWeight: 750, color: 'var(--foreground)' }}>
+                        Periyodik Tekrarlayan Bakım
+                      </span>
+                    </label>
+
+                    {maintIsPeriodic && (
+                      <div className={clay.row} style={{ gap: 6 }}>
+                        <span className={clay.muted} style={{ fontWeight: 600 }}>
+                          Periyot (Gün):
+                        </span>
+                        <input
+                          type="number"
+                          min="1"
+                          value={maintPeriodicDays}
+                          onChange={(e) => setMaintPeriodicDays(e.target.value)}
+                          className={clay.wellInput}
+                          style={{ width: 82, minHeight: 30, padding: '3px 8px', fontSize: 12 }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Yetkili Servis / Not</span>
+                  <input
+                    type="text"
+                    value={maintNotes}
+                    onChange={(e) => setMaintNotes(e.target.value)}
+                    placeholder="Servis firması veya seri numarası…"
+                    className={clay.wellInput}
+                  />
+                </label>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => setNewMaintModalOpen(false)}
+                    className={clay.ctlBtn}
+                  >
+                    <span>Vazgeç</span>
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingMaint}
+                    className={clay.primaryBtn}
+                  >
+                    <Check size={15} color="#ffffff" />
+                    <span>{savingMaint ? 'Kaydediliyor…' : 'Bakımı Planla'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}
     </div>
   )
 }
-

@@ -1,0 +1,175 @@
+/* Personel ve Mesai bölümü yerel ızgara ve satır düzeni — isletme-clay.module.css ile uyumlu (%100 opak, çift tema) */
+
+.sectionStack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.drawerStack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.staffCell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.staffText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.staffName {
+  display: block;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staffSpecialty {
+  font-weight: 600;
+}
+
+.staffSubRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--foreground-2);
+}
+
+.staffContact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--foreground-2);
+}
+
+.roleWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.rolePill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.loginMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.actionGroup {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.swatchRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 34%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  box-shadow:
+    2px 4px 8px rgba(2, 6, 23, 0.28),
+    inset 2px 2px 3px rgba(255, 255, 255, 0.42),
+    inset -2px -2px 4px rgba(0, 0, 0, 0.24);
+  transition: transform 0.18s var(--clay-ease-pop, cubic-bezier(0.34, 1.56, 0.64, 1)), box-shadow 0.16s ease;
+}
+
+.swatch:hover {
+  transform: translateY(-1px) scale(1.06);
+}
+
+.swatchOn {
+  composes: swatch;
+  border-color: #ffffff;
+  transform: scale(1.12);
+  box-shadow:
+    0 0 0 2px #255ee3,
+    3px 5px 10px rgba(37, 94, 227, 0.38),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.45);
+}
+
+.readonlyInput {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.checkLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.checkbox {
+  width: 15px;
+  height: 15px;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+@media (max-width: 960px) {
+  .grid3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .grid3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Açık tema ikincil metin koruması */
+:global([data-theme='light']) .staffSubRow,
+:global([data-theme='light']) .staffContact,
+:global([data-theme='light'] .admin-content) .staffSubRow,
+:global([data-theme='light'] .admin-content) .staffContact {
+  color: var(--foreground-2) !important;
+}

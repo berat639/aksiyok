@@ -4,6 +4,7 @@ import React, { Suspense, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { IMaskInput } from 'react-imask'
+import { TR_PHONE_INTL_MASK, TR_PHONE_DEFINITIONS, stripTrCountryCodeOnPaste } from '@/lib/phone-mask'
 import { CheckCircle2, Sparkles, Building2 } from 'lucide-react'
 import { ThemeToggle } from '../theme-provider'
 import { useAuth } from '@/lib/auth-context'
@@ -12,8 +13,6 @@ import InfoTooltip from '../admin/components/ui/InfoTooltip'
 import depth from '@/styles/clinic-depth.module.css'
 
 type SelectedPlan = 'demo' | 'pro' | 'kurumsal'
-
-const PHONE_INTL_MASK = '+{90} (000) 000 00 00'
 
 function extractNational10(raw: string): string {
   let digits = String(raw || '').replace(/\D/g, '')
@@ -405,13 +404,15 @@ function KayitContent() {
                 <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <span style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--foreground-2)' }}>Telefon</span>
                   <IMaskInput
-                    mask={PHONE_INTL_MASK}
+                    mask={TR_PHONE_INTL_MASK}
+                    definitions={TR_PHONE_DEFINITIONS}
+                    prepare={stripTrCountryCodeOnPaste}
                     unmask={true}
-                    value={contactPhone ? `90${contactPhone}` : ''}
+                    value={contactPhone}
                     placeholder="+90 (5XX) XXX XX XX"
                     inputMode="tel"
                     className={depth.input}
-                    onAccept={val => setContactPhone(extractNational10(String(val)))}
+                    onAccept={val => setContactPhone(String(val))}
                   />
                 </label>
               </div>
@@ -545,15 +546,17 @@ function KayitContent() {
                 <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <span style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--foreground-2)' }}>Telefon Numarası *</span>
                   <IMaskInput
-                    mask={PHONE_INTL_MASK}
+                    mask={TR_PHONE_INTL_MASK}
+                    definitions={TR_PHONE_DEFINITIONS}
+                    prepare={stripTrCountryCodeOnPaste}
                     unmask={true}
-                    value={phoneNational ? `90${phoneNational}` : ''}
+                    value={phoneNational}
                     placeholder="+90 (5XX) XXX XX XX"
                     inputMode="tel"
                     autoComplete="tel"
                     className={depth.input}
                     required
-                    onAccept={val => setPhoneNational(extractNational10(String(val)))}
+                    onAccept={val => setPhoneNational(String(val))}
                   />
                 </label>
                 <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

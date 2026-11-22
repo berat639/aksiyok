@@ -9,12 +9,32 @@ import {
   applyModuleStarterPack,
   completeDynamicMaintenance,
   createQuickDynamicFinanceEntry,
+  ensureCanonicalFinanceTables,
   getDynamicFinanceOverview,
   getDynamicStockOverview,
   migrateLegacyModuleData,
   type FinanceChartPeriod,
   type ModuleStarterPackKey,
 } from '../services/dynamic-finance-stock'
+import {
+  acknowledgePreAccountingSync,
+  exportCanonicalAccountingLedger,
+  listCanonicalAccountingEntries,
+  listPreAccountingProviders,
+  upsertPreAccountingConnection,
+} from '../services/pre-accounting'
+import {
+  evaluateKpiCards,
+  getKpiBootstrap,
+  getKpiSourcesAndPresets,
+  getSavedKpiCards,
+  saveKpiCards,
+  type KpiCardConfig,
+} from '../services/dynamic-kpi'
+import {
+  generateOfferingsWithGemini,
+  validateOfferingWithGemini,
+} from '../services/offerings-ai'
 import { buildDynamicSchemaFromScenario } from '../services/dynamic-schema-ai'
 import { hasClinicStaffPermission } from '../services/staff-invitations'
 import {
@@ -178,6 +198,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .post('/tables/clear', async ({ body, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Tabloları temizleme yetkiniz yok' }
@@ -208,6 +232,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .post('/tables', async ({ body, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Tablo oluşturma yetkiniz yok' }
@@ -231,6 +259,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .put('/tables/:tableId', async ({ params, body, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Tablo düzenleme yetkiniz yok' }
@@ -254,6 +286,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .delete('/tables/:tableId', async ({ params, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Tablo silme yetkiniz yok' }
@@ -294,6 +330,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .put('/columns/:columnId', async ({ params, body, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     const b = (body || {}) as any
     // Allow non-admin staff to resize columns visually only if they only send width, otherwise require manageDynamicTables
     const keys = Object.keys(b)
@@ -322,6 +362,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .delete('/columns/:columnId', async ({ params, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Sütun silme yetkiniz yok' }
@@ -551,6 +595,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .post('/rows/delete', async ({ body, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Kayıt silme yetkiniz bulunmuyor' }
@@ -568,6 +616,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .put('/module-configs/:tableId', async ({ params, body, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Modül bağlantısını değiştirme yetkiniz bulunmuyor' }
@@ -593,6 +645,10 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
 
   .delete('/module-configs/:tableId', async ({ params, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
     if (!(await canManageSchema(user))) {
       set.status = 403
       return { error: 'Modül bağlantısını kaldırma yetkiniz bulunmuyor' }
@@ -653,7 +709,32 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
     }
   })
 
-  // ── Dynamic Finance Engine Endpoints ─────────────────────────────────────
+  // ── Dynamic Finance Engine & Pre-Accounting Integration Endpoints ────────
+
+  .post('/finance/ensure', async ({ cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    try {
+      const ensured = await ensureCanonicalFinanceTables()
+      const [schema, allowed] = await Promise.all([getStudioSchema(), canManageSchema(user)])
+      return {
+        provisioned: ensured.provisioned,
+        upgradedColumnsCount: ensured.upgradedColumnsCount,
+        incomeTableId: ensured.incomeTable.table.id,
+        expenseTableId: ensured.expenseTable.table.id,
+        schema: {
+          ...schema,
+          canManageSchema: allowed,
+        },
+      }
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Standart finans tabloları hazırlanamadı' }
+    }
+  })
 
   .get('/finance/overview', async ({ query, cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
@@ -667,9 +748,13 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
         ? q.period
         : 'monthly'
     const status =
-      q.status === 'completed' || q.status === 'pending' || q.status === 'cancelled'
+      q.status === 'completed' ||
+      q.status === 'partial' ||
+      q.status === 'pending' ||
+      q.status === 'cancelled'
         ? q.status
         : 'all'
+    const autoEnsure = q.ensure === '1' || q.ensure === 'true'
     try {
       return await getDynamicFinanceOverview({
         period,
@@ -677,6 +762,7 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
         search: q.search,
         status,
         appointmentId: q.appointmentId,
+        autoEnsure,
       })
     } catch (err: any) {
       set.status = 400
@@ -698,16 +784,32 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
           tableId: typeof b.tableId === 'string' ? b.tableId : undefined,
           title: typeof b.title === 'string' ? b.title : '',
           amount: Number(b.amount) || 0,
+          netAmount: b.netAmount !== undefined && b.netAmount !== null && b.netAmount !== '' ? Number(b.netAmount) : undefined,
+          vatRate: b.vatRate !== undefined && b.vatRate !== null && b.vatRate !== '' ? Number(b.vatRate) : undefined,
+          vatIncluded: b.vatIncluded !== false,
+          currency: typeof b.currency === 'string' ? b.currency : undefined,
+          exchangeRate:
+            b.exchangeRate !== undefined && b.exchangeRate !== null && b.exchangeRate !== ''
+              ? Number(b.exchangeRate)
+              : undefined,
           quantity: b.quantity !== undefined ? Number(b.quantity) : undefined,
           unitCost: b.unitCost !== undefined ? Number(b.unitCost) : undefined,
           date: typeof b.date === 'string' ? b.date : undefined,
           dueDate: typeof b.dueDate === 'string' ? b.dueDate : null,
           status:
-            b.status === 'pending' || b.status === 'cancelled' || b.status === 'completed'
+            b.status === 'pending' ||
+            b.status === 'partial' ||
+            b.status === 'cancelled' ||
+            b.status === 'completed'
               ? b.status
               : 'completed',
           method: typeof b.method === 'string' ? b.method : undefined,
           category: typeof b.category === 'string' ? b.category : undefined,
+          documentType: typeof b.documentType === 'string' ? b.documentType : undefined,
+          documentNumber: typeof b.documentNumber === 'string' ? b.documentNumber : null,
+          counterpartyName: typeof b.counterpartyName === 'string' ? b.counterpartyName : null,
+          counterpartyTaxId: typeof b.counterpartyTaxId === 'string' ? b.counterpartyTaxId : null,
+          accountingCode: typeof b.accountingCode === 'string' ? b.accountingCode : null,
           notes: typeof b.notes === 'string' ? b.notes : undefined,
           personRowId: typeof b.personRowId === 'string' && b.personRowId ? b.personRowId : null,
           serviceRowIds: Array.isArray(b.serviceRowIds) ? b.serviceRowIds : undefined,
@@ -720,6 +822,164 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
     } catch (err: any) {
       set.status = 400
       return { error: err?.message || 'Finans kaydı eklenemedi' }
+    }
+  })
+
+  .get('/finance/accounting/providers', async ({ cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    try {
+      return await listPreAccountingProviders()
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Ön muhasebe sağlayıcıları alınamadı' }
+    }
+  })
+
+  .put('/finance/accounting/connections/:provider', async ({ params, body, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    if (!(await canManageSchema(user))) {
+      set.status = 403
+      return { error: 'Ön muhasebe entegrasyon ayarlarını değiştirme yetkiniz bulunmuyor' }
+    }
+    const b = (body || {}) as Record<string, any>
+    try {
+      return await upsertPreAccountingConnection(
+        params.provider,
+        {
+          status: b.status,
+          syncMode: b.syncMode,
+          externalCompanyId: b.externalCompanyId,
+          credentials: b.credentials,
+          accountMapping: b.accountMapping,
+        },
+        user?.id
+      )
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Ön muhasebe bağlantısı kaydedilemedi' }
+    }
+  })
+
+  .get('/finance/accounting/entries', async ({ query, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const q = (query || {}) as Record<string, string | undefined>
+    const direction = q.direction === 'income' || q.direction === 'expense' ? q.direction : 'all'
+    const syncStatus =
+      q.syncStatus === 'pending' ||
+      q.syncStatus === 'ready' ||
+      q.syncStatus === 'synced' ||
+      q.syncStatus === 'failed' ||
+      q.syncStatus === 'ignored'
+        ? q.syncStatus
+        : 'all'
+    try {
+      return await listCanonicalAccountingEntries({
+        direction,
+        syncStatus,
+        dateFrom: q.dateFrom,
+        dateTo: q.dateTo,
+        updatedAfter: q.updatedAfter,
+        provider: q.provider,
+        includeProviderPayload: q.includeProviderPayload === '1' || q.includeProviderPayload === 'true',
+      })
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Ön muhasebe kayıtları alınamadı' }
+    }
+  })
+
+  .get('/finance/accounting/export', async ({ query, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const q = (query || {}) as Record<string, string | undefined>
+    const format = q.format === 'csv' ? 'csv' : 'json'
+    const direction = q.direction === 'income' || q.direction === 'expense' ? q.direction : 'all'
+    const syncStatus =
+      q.syncStatus === 'pending' ||
+      q.syncStatus === 'ready' ||
+      q.syncStatus === 'synced' ||
+      q.syncStatus === 'failed' ||
+      q.syncStatus === 'ignored'
+        ? q.syncStatus
+        : 'all'
+    try {
+      const exported = await exportCanonicalAccountingLedger({
+        format,
+        direction,
+        syncStatus,
+        dateFrom: q.dateFrom,
+        dateTo: q.dateTo,
+        provider: q.provider,
+      })
+      if (exported.format === 'csv') {
+        return new Response(exported.body, {
+          status: 200,
+          headers: {
+            'Content-Type': exported.contentType,
+            'Content-Disposition': `attachment; filename="${exported.filename}"`,
+          },
+        })
+      }
+      return exported.data
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Ön muhasebe dışa aktarımı oluşturulamadı' }
+    }
+  })
+
+  .post('/finance/accounting/sync-ack', async ({ body, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    if (!(await canManageSchema(user))) {
+      set.status = 403
+      return { error: 'Senkronizasyon durumunu güncelleme yetkiniz bulunmuyor' }
+    }
+    const b = (body || {}) as Record<string, any>
+    const syncStatus =
+      b.syncStatus === 'synced' ||
+      b.syncStatus === 'failed' ||
+      b.syncStatus === 'pending' ||
+      b.syncStatus === 'ignored'
+        ? b.syncStatus
+        : null
+    if (!syncStatus) {
+      set.status = 400
+      return { error: 'Geçersiz senkronizasyon durumu' }
+    }
+    try {
+      return await acknowledgePreAccountingSync({
+        provider: String(b.provider || ''),
+        rowId: typeof b.rowId === 'string' ? b.rowId : undefined,
+        idempotencyKey: typeof b.idempotencyKey === 'string' ? b.idempotencyKey : undefined,
+        syncStatus,
+        externalDocumentId: typeof b.externalDocumentId === 'string' ? b.externalDocumentId : null,
+        externalContactId: typeof b.externalContactId === 'string' ? b.externalContactId : null,
+        externalPaymentId: typeof b.externalPaymentId === 'string' ? b.externalPaymentId : null,
+        externalDocumentNumber:
+          typeof b.externalDocumentNumber === 'string' ? b.externalDocumentNumber : null,
+        lastError: typeof b.lastError === 'string' ? b.lastError : null,
+      })
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Senkronizasyon onayı kaydedilemedi' }
     }
   })
 
@@ -795,6 +1055,137 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
     } catch (err: any) {
       set.status = 400
       return { error: err?.message || 'Bakım tamamlanamadı' }
+    }
+  })
+
+  // ── Dynamic Business KPI Engine Endpoints ───────────────────────────────
+
+  .get('/kpi/bootstrap', async ({ query, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const forceRefresh = (query as Record<string, string | undefined>)?.refresh === '1'
+    try {
+      return await getKpiBootstrap(forceRefresh)
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'KPI özeti yüklenemedi' }
+    }
+  })
+
+  .get('/kpi/sources', async ({ cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    try {
+      return await getKpiSourcesAndPresets()
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'KPI kaynakları alınamadı' }
+    }
+  })
+
+  .get('/kpi/cards', async ({ cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    try {
+      const cards = await getSavedKpiCards()
+      return { cards }
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'KPI kartları alınamadı' }
+    }
+  })
+
+  .put('/kpi/cards', async ({ body, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const raw = (body as any)?.cards
+    if (!Array.isArray(raw)) {
+      set.status = 400
+      return { error: 'Geçersiz kart listesi' }
+    }
+    try {
+      const cards = await saveKpiCards(raw as KpiCardConfig[])
+      return { cards }
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'KPI kartları kaydedilemedi' }
+    }
+  })
+
+  .post('/kpi/evaluate', async ({ body, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const raw = (body as any)?.cards
+    if (!Array.isArray(raw)) {
+      set.status = 400
+      return { error: 'Geçersiz kart listesi' }
+    }
+    try {
+      const metrics = await evaluateKpiCards(raw as KpiCardConfig[])
+      return { metrics }
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'KPI değerleri hesaplanamadı' }
+    }
+  })
+
+  // ── Offerings (Ürün ve Hizmet) Gemini Lite Kontrol & Şablon Üretici ─────
+
+  .post('/offerings/validate', async ({ body, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const b = (body || {}) as Record<string, unknown>
+    try {
+      return await validateOfferingWithGemini({
+        kind: b.kind === 'urun' ? 'urun' : 'hizmet',
+        title: typeof b.title === 'string' ? b.title : '',
+        content: typeof b.content === 'string' ? b.content : '',
+        businessName: typeof b.businessName === 'string' ? b.businessName : undefined,
+        businessCategory: typeof b.businessCategory === 'string' ? b.businessCategory : undefined,
+      })
+    } catch (err: any) {
+      set.status = 503
+      return { error: err?.message || 'Uygunluk kontrolü yapılamadı' }
+    }
+  })
+
+  .post('/offerings/ai-generate', async ({ body, cookie, request, set }) => {
+    const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
+    if (!user) {
+      set.status = 401
+      return { error: 'Oturum geçersiz' }
+    }
+    const b = (body || {}) as Record<string, unknown>
+    try {
+      return await generateOfferingsWithGemini({
+        prompt: typeof b.prompt === 'string' ? b.prompt : '',
+        businessName: typeof b.businessName === 'string' ? b.businessName : undefined,
+        businessCategory: typeof b.businessCategory === 'string' ? b.businessCategory : undefined,
+        existingTitles: Array.isArray(b.existingTitles)
+          ? b.existingTitles.filter((t): t is string => typeof t === 'string')
+          : undefined,
+      })
+    } catch (err: any) {
+      set.status = 400
+      return { error: err?.message || 'Örnek şablon oluşturulamadı' }
     }
   })
 

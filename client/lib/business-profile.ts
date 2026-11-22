@@ -12,6 +12,15 @@ export type WeeklyHours = DayHours[]
 
 export type BusinessLocation = { lat: number; lng: number; address: string }
 
+/** Ana işletmeyle aynı kategorideki ek işletme / şube kaydı. */
+export type ExtraBusiness = {
+  id: string
+  name: string
+  location: BusinessLocation | null
+  addressDirections: string
+  hours: WeeklyHours
+}
+
 export type BusinessProfile = {
   name: string
   primaryCategory: string
@@ -19,6 +28,8 @@ export type BusinessProfile = {
   location: BusinessLocation | null
   addressDirections: string
   hours: WeeklyHours
+  /** Aynı kategorideki ek işletmeler / şubeler (kategori ana işletmeden miras alınır). */
+  extraBusinesses?: ExtraBusiness[]
   updatedAt?: string
 }
 
@@ -168,6 +179,16 @@ export function validateProfile(p: BusinessProfile): ProfileIssues {
   return issues
 }
 
+export function validateExtraBusiness(b: ExtraBusiness): ProfileIssues {
+  const issues: ProfileIssues = {}
+  if (!b.name.trim()) issues.name = 'İşletme adı gerekli.'
+  if (!b.location) issues.location = 'İşletme konumunu belirleyin.'
+  const dayIssue = validateWeek(b.hours).find(Boolean)
+  if (dayIssue) issues.hours = dayIssue
+  else if (!b.hours.some((d) => d.open)) issues.hours = 'En az bir gün açık olmalı.'
+  return issues
+}
+
 /** Profil doluluk yüzdesi (ad, kategori, konum, adres tarifi, çalışma saatleri). */
 export function profileCompletion(p: BusinessProfile): number {
   const checks = [
@@ -192,23 +213,42 @@ function sanitizeHours(raw: unknown): WeeklyHours | null {
   })
 }
 
+function sanitizeLocation(loc: unknown): BusinessLocation | null {
+  const l = loc as Partial<BusinessLocation> | null | undefined
+  if (l && Number.isFinite(Number(l.lat)) && Number.isFinite(Number(l.lng))) {
+    return { lat: Number(l.lat), lng: Number(l.lng), address: String(l.address || '') }
+  }
+  return null
+}
+
+function sanitizeExtraBusinesses(raw: unknown, fallbackHours: WeeklyHours): ExtraBusiness[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((x): x is Partial<ExtraBusiness> => Boolean(x) && typeof x === 'object')
+    .map((x, idx) => ({
+      id: typeof x.id === 'string' && x.id.trim() ? x.id : `biz-${idx + 1}`,
+      name: typeof x.name === 'string' ? x.name : '',
+      location: sanitizeLocation(x.location),
+      addressDirections: typeof x.addressDirections === 'string' ? x.addressDirections : '',
+      hours: sanitizeHours(x.hours) ?? fallbackHours.map((d) => ({ open: d.open, ranges: d.ranges.map((r) => ({ ...r })) })),
+    }))
+}
+
 export function parseStoredProfile(raw: string | null): BusinessProfile | null {
   if (!raw) return null
   try {
     const data = JSON.parse(raw) as Partial<BusinessProfile>
     const hours = sanitizeHours(data.hours)
     if (!hours) return null
-    const loc = data.location
+    const extraBusinesses = sanitizeExtraBusinesses(data.extraBusinesses, hours)
     return {
       name: typeof data.name === 'string' ? data.name : '',
       primaryCategory: typeof data.primaryCategory === 'string' ? data.primaryCategory : '',
       extraCategories: Array.isArray(data.extraCategories) ? data.extraCategories.filter((c): c is string => typeof c === 'string') : [],
-      location:
-        loc && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng))
-          ? { lat: Number(loc.lat), lng: Number(loc.lng), address: String(loc.address || '') }
-          : null,
+      location: sanitizeLocation(data.location),
       addressDirections: typeof data.addressDirections === 'string' ? data.addressDirections : '',
       hours,
+      ...(extraBusinesses.length > 0 ? { extraBusinesses } : {}),
       updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
     }
   } catch {
@@ -235,6 +275,58 @@ export function parseStoredOfferings(raw: string | null): OfferingItem[] {
   }
 }
 
+/** Profilin zorunlu alanları (ad, ana kategori, konum, çalışma saatleri) dolu mu? */
+export function isBusinessProfileFilled(p: BusinessProfile | null | undefined): boolean {
+  if (!p) return false
+  return Object.keys(validateProfile(p)).length === 0
+}
+
+/**
+ * Yalnızca yerel geliştirme ortamında (localhost / 127.0.0.1) profil henüz
+ * doldurulmamışsa kullanılan Online Emlaktan örnek/seed profili.
+ * Canlı (production) ve test ortamlarında devreye girmez.
+ */
+const ONLINE_EMLAKTAN_HOURS: WeeklyHours = WEEK_DAYS.map((_, i) =>
+  i < 6
+    ? { open: true, ranges: [{ start: '09:00', end: '18:00' }] }
+    : { open: false, ranges: [{ start: '10:00', end: '16:00' }] }
+)
+
+export const ONLINE_EMLAKTAN_LOCAL_SEED: BusinessProfile = {
+  name: 'Online Emlaktan — Merkez',
+  primaryCategory: 'Emlak Ofisi',
+  extraCategories: [],
+  location: {
+    lat: 39.93021,
+    lng: 32.87358,
+    address: 'Fakülteler Mahallesi, Cemal Gürsel Caddesi No: 57/B, Çankaya / Ankara',
+  },
+  addressDirections:
+    'Fakülteler Mah. Cemal Gürsel Cad. No: 57/B, Çankaya / Ankara · Tel: +90 312 911 60 30',
+  hours: ONLINE_EMLAKTAN_HOURS,
+  extraBusinesses: [
+    {
+      id: 'online-emlaktan-sube',
+      name: 'Online Emlaktan — Yıldızevler Şube',
+      location: {
+        lat: 39.8752,
+        lng: 32.8609,
+        address: 'Yıldızevler Mahallesi, 712. Sokak No: 5 Kat: 4 Daire: 8, Çankaya / Ankara',
+      },
+      addressDirections:
+        'Yıldızevler Mah. 712. Sk. No: 5 Kat: 4 Daire: 8, 06550 Çankaya / Ankara · Tel: +90 312 911 60 30',
+      hours: ONLINE_EMLAKTAN_HOURS,
+    },
+  ],
+}
+
+function isLocalDevSeedHost(): boolean {
+  if (typeof window === 'undefined') return false
+  if (process.env.NODE_ENV !== 'development') return false
+  const host = window.location.hostname
+  return host === 'localhost' || host === '127.0.0.1'
+}
+
 const PROFILE_KEY = 'axamaz.business-profile.v1'
 const OFFERINGS_KEY = 'axamaz.business-offerings.v1'
 const scoped = (key: string, scope?: string | null) => (scope ? `${key}:${scope}` : key)
@@ -247,7 +339,12 @@ const safeStorage = (): Storage | null => {
   }
 }
 
-export const loadBusinessProfile = (scope?: string | null) => parseStoredProfile(safeStorage()?.getItem(scoped(PROFILE_KEY, scope)) ?? null)
+export const loadBusinessProfile = (scope?: string | null): BusinessProfile | null => {
+  const stored = parseStoredProfile(safeStorage()?.getItem(scoped(PROFILE_KEY, scope)) ?? null)
+  if (stored) return stored
+  if (isLocalDevSeedHost()) return ONLINE_EMLAKTAN_LOCAL_SEED
+  return null
+}
 export const saveBusinessProfile = (profile: BusinessProfile, scope?: string | null) => {
   const next = { ...profile, updatedAt: new Date().toISOString() }
   try { safeStorage()?.setItem(scoped(PROFILE_KEY, scope), JSON.stringify(next)) } catch { /* depolama dolu/kapalı */ }

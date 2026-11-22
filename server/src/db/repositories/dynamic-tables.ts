@@ -12,6 +12,7 @@ import {
   dynamicRowLinks,
   dynamicRows,
   dynamicTables,
+  financeAccountingSyncRecords,
   users,
 } from '../schema'
 import { ensureDynamicTablesSchema } from '../dynamic-tables-schema'
@@ -27,6 +28,29 @@ import {
   parseUrlLookupParts,
   type ParsedUrlLookupParts,
 } from '../../services/dynamic-link-matcher'
+import {
+  buildCanonicalAccountingEntry,
+  calculateAccountingAmounts,
+  CANONICAL_FINANCE_TABLE_DESCRIPTIONS,
+  CANONICAL_FINANCE_TABLE_NAMES,
+  isFinanceModuleRole,
+  normalizeAccountingPaymentStatus,
+  normalizeCurrencyCode,
+  normalizeDocumentType,
+  normalizeExchangeRate,
+  normalizeVatRate,
+  resolveTdhpAccountCode,
+  roundMoney,
+  STANDARD_ACCOUNTING_SYNC_OPTIONS,
+  STANDARD_CURRENCY_OPTIONS,
+  STANDARD_DOCUMENT_TYPE_OPTIONS,
+  STANDARD_EXPENSE_CATEGORY_OPTIONS,
+  STANDARD_INCOME_CATEGORY_OPTIONS,
+  STANDARD_PAYMENT_METHOD_OPTIONS,
+  STANDARD_PAYMENT_STATUS_OPTIONS,
+  STANDARD_VAT_RATE_OPTIONS,
+  syncStatusToOptionId,
+} from '../../services/pre-accounting-core'
 
 export type DynamicFieldType =
   | 'text'
@@ -99,6 +123,17 @@ export const ALLOWED_MODULE_ROLES: readonly DynamicModuleRole[] = [
 
 export interface DynamicModuleMapping {
   amountColumnId?: string | null
+  netAmountColumnId?: string | null
+  vatRateColumnId?: string | null
+  vatAmountColumnId?: string | null
+  currencyColumnId?: string | null
+  exchangeRateColumnId?: string | null
+  documentTypeColumnId?: string | null
+  documentNumberColumnId?: string | null
+  counterpartyNameColumnId?: string | null
+  counterpartyTaxIdColumnId?: string | null
+  accountingCodeColumnId?: string | null
+  accountingSyncStatusColumnId?: string | null
   dateColumnId?: string | null
   dueDateColumnId?: string | null
   statusColumnId?: string | null
@@ -122,14 +157,73 @@ export interface DynamicModuleMapping {
   actorColumnId?: string | null
 }
 
+export const CORE_PROTECTED_FINANCE_MAPPING_KEYS: ReadonlyArray<keyof DynamicModuleMapping> = [
+  'amountColumnId',
+  'netAmountColumnId',
+  'vatRateColumnId',
+  'vatAmountColumnId',
+  'currencyColumnId',
+  'exchangeRateColumnId',
+  'documentTypeColumnId',
+  'documentNumberColumnId',
+  'counterpartyNameColumnId',
+  'counterpartyTaxIdColumnId',
+  'accountingCodeColumnId',
+  'accountingSyncStatusColumnId',
+  'dateColumnId',
+  'dueDateColumnId',
+  'statusColumnId',
+  'methodColumnId',
+  'categoryColumnId',
+  'quantityColumnId',
+  'unitCostColumnId',
+  'notesColumnId',
+]
+
+const CORE_PROTECTED_FINANCE_KEY_SET = new Set<string>(CORE_PROTECTED_FINANCE_MAPPING_KEYS)
+
+function mergeFinanceMappingPreservingCore(
+  inferred: DynamicModuleMapping,
+  saved: Record<string, unknown> | null | undefined,
+  validColIds: Set<string>
+): DynamicModuleMapping {
+  const merged: DynamicModuleMapping = { ...inferred }
+  if (!saved || typeof saved !== 'object') return merged
+  for (const [k, v] of Object.entries(saved)) {
+    if (typeof v === 'string' && validColIds.has(v)) {
+      ;(merged as Record<string, unknown>)[k] = v
+    } else if (v === null && !CORE_PROTECTED_FINANCE_KEY_SET.has(k)) {
+      ;(merged as Record<string, unknown>)[k] = null
+    }
+  }
+  return merged
+}
+
+export function getProtectedFinanceColumnIds(
+  columns: Array<{ id: string; isPrimaryTitle?: boolean }>,
+  mapping: DynamicModuleMapping
+): Set<string> {
+  const locked = new Set<string>()
+  for (const col of columns) {
+    if (col.isPrimaryTitle) locked.add(col.id)
+  }
+  for (const key of CORE_PROTECTED_FINANCE_MAPPING_KEYS) {
+    const colId = mapping[key]
+    if (typeof colId === 'string' && colId) locked.add(colId)
+  }
+  return locked
+}
+
 export function inferModuleMappingForTable(
   role: DynamicModuleRole,
-  columns: Array<{ id: string; name: string; slug: string; fieldType: string; config: any }>,
+  columns: Array<{ id: string; name: string; slug: string; fieldType: string; isPrimaryTitle?: boolean; config: any }>,
   allTables?: Array<{ id: string; name: string }>
 ): DynamicModuleMapping {
   const tableById = new Map((allTables ?? []).map((t) => [t.id, t]))
-  const findCol = (regex: RegExp, fieldTypes?: string[]) =>
+  const primaryTitleIds = new Set(columns.filter((c) => c.isPrimaryTitle).map((c) => c.id))
+  const findCol = (regex: RegExp, fieldTypes?: string[], excludeIds?: Set<string>) =>
     columns.find((c) => {
+      if (excludeIds?.has(c.id)) return false
       if (fieldTypes && !fieldTypes.includes(c.fieldType)) return false
       const hay = `${c.name} ${c.slug}`.toLocaleLowerCase('tr-TR')
       return regex.test(hay)
@@ -146,7 +240,7 @@ export function inferModuleMappingForTable(
 
   if (role === 'finance_income') {
     const personRel =
-      findRelCol(/(müşteri|musteri|kişi|kisi|hasta|danışan|danisan|aday|sigortalı|sigortali|alıcı|alici|kiracı|kiraci|cari|sahip)/i) ??
+      findRelCol(/(müşteri|musteri|kişi|kisi|hasta|danışan|danisan|aday|sigortalı|sigortali|alıcı|alici|kiracı|kiraci|cari|sahip|firma|üye|uye|öğrenci|ogrenci)/i) ??
       relationCols[0]?.id ??
       null
     const serviceRel =
@@ -155,64 +249,116 @@ export function inferModuleMappingForTable(
         const targetId = (c.config as DynamicColumnConfig | undefined)?.targetTableId
         const targetName = targetId ? tableById.get(targetId)?.name ?? '' : ''
         const hay = `${c.name} ${targetName}`.toLocaleLowerCase('tr-TR')
-        return /(hizmet|tedavi|plan|ilan|portföy|portfoy|teklif|poliçe|police|paket|servis|talep|işlem|islem)/i.test(hay)
+        return /(hizmet|ürün|urun|tedavi|plan|ilan|portföy|portfoy|teklif|poliçe|police|paket|servis|talep|işlem|islem|sipariş|siparis|proje)/i.test(hay)
       })?.id ??
       relationCols.find((c) => c.id !== personRel)?.id ??
       null
 
+    const netAmountCol = findCol(/(net tutar|kdv hariç|kdv haric|matrah|ara toplam)/i, ['currency', 'number'])
+    const vatAmountCol = findCol(/(kdv tutar|vergi tutar)/i, ['currency', 'number'])
+    const vatRateCol = findCol(/(kdv oran|kdv %|vergi oran)/i, ['select', 'number', 'text'])
+    const exchangeRateCol = findCol(/(döviz kuru|doviz kuru|\bkur\b)/i, ['number'])
+    const excludedAmountIds = new Set(
+      [netAmountCol, vatAmountCol, vatRateCol, exchangeRateCol].filter((id): id is string => Boolean(id))
+    )
+    const grossAmountCol =
+      findCol(/(brüt|brut|genel toplam|toplam tutar|^tutar\b|ödenen|odenen|tahsilat|komisyon|prim|ücret|ucret|fiyat|bedel)/i, ['currency', 'number'], excludedAmountIds) ??
+      columns.find((c) => c.fieldType === 'currency' && !excludedAmountIds.has(c.id))?.id ??
+      null
+    const accountingSyncCol = findCol(/(ön muhasebe|on muhasebe|muhasebe durum|senkron)/i, ['select', 'text'])
+    const docTypeCol = findCol(/(belge türü|belge turu|fatura türü|fatura turu|evrak türü|evrak turu)/i, ['select', 'text'])
+    const excludedStatusIds = new Set(
+      [accountingSyncCol, docTypeCol].filter((id): id is string => Boolean(id))
+    )
+
+    const docNumCol = findCol(/(belge\s*\/?\s*fatura\s*no|fatura.*no|evrak.*no|fiş.*no|fis.*no|seri.*sıra|^belge\s*no)/i, ['text'], primaryTitleIds)
+    const excludedNonNoteIds = new Set(
+      [...primaryTitleIds, docNumCol].filter((id): id is string => Boolean(id))
+    )
+
     return {
-      amountColumnId:
-        findCol(/(tutar|ödenen|odenen|tahsilat|komisyon|prim|ücret|ucret|fiyat|bedel)/i, ['currency', 'number']) ??
-        columns.find((c) => c.fieldType === 'currency')?.id ??
-        null,
+      amountColumnId: grossAmountCol,
+      netAmountColumnId: netAmountCol,
+      vatRateColumnId: vatRateCol,
+      vatAmountColumnId: vatAmountCol,
+      currencyColumnId: findCol(/(para birimi|döviz cinsi|doviz cinsi|döviz|doviz|currency)/i, ['select', 'text'], primaryTitleIds),
+      exchangeRateColumnId: exchangeRateCol,
+      documentTypeColumnId: docTypeCol,
+      documentNumberColumnId: docNumCol,
+      counterpartyNameColumnId: findCol(/(cari|karşı taraf|karsi taraf|müşteri adı|musteri adi|firma|ünvan|unvan)/i, ['text'], primaryTitleIds),
+      counterpartyTaxIdColumnId: findCol(/(vkn|tckn|vergi.*no|kimlik.*no)/i, ['text'], primaryTitleIds),
+      accountingCodeColumnId: findCol(/(hesap kodu|muhasebe kodu|tdhp)/i, ['text'], primaryTitleIds),
+      accountingSyncStatusColumnId: accountingSyncCol,
       dateColumnId:
-        findCol(/(ödeme tarihi|odeme tarihi|işlem tarihi|islem tarihi|tahsilat tarihi|^tarih\b)/i, ['date']) ??
+        findCol(/(ödeme tarihi|odeme tarihi|işlem tarihi|islem tarihi|tahsilat tarihi|belge tarihi|^tarih\b)/i, ['date']) ??
         columns.find((c) => c.fieldType === 'date' && !/(vade|son)/i.test(c.name.toLocaleLowerCase('tr-TR')))?.id ??
         null,
       dueDateColumnId: findCol(/(vade|son ödeme|son odeme|beklenen)/i, ['date']),
-      statusColumnId: findCol(/(durum|statü|statu)/i, ['select', 'text']),
-      methodColumnId: findCol(/(yöntem|yontem|ödeme tipi|odeme tipi|kanal|kart|nakit)/i, ['select', 'text']),
-      categoryColumnId: findCol(/(kategori|gelir türü|gelir turu|tür|tur|kalem)/i, ['select', 'text']),
+      statusColumnId: findCol(/(tahsilat durum|ödeme durum|odeme durum|^durum\b|statü|statu)/i, ['select', 'text'], excludedStatusIds),
+      methodColumnId: findCol(/(yöntem|yontem|ödeme tipi|odeme tipi|kanal|kasa|banka|kart|nakit)/i, ['select', 'text'], primaryTitleIds),
+      categoryColumnId: findCol(/(kategori|gelir türü|gelir turu|gelir kalem|tür|tur|kalem)/i, ['select', 'text'], new Set([...primaryTitleIds, docTypeCol, accountingSyncCol].filter((id): id is string => Boolean(id)))),
       personRelationColumnId: personRel,
       serviceRelationColumnId: serviceRel,
-      notesColumnId: findCol(/(not|açıklama|aciklama|detay)/i, ['text']),
+      notesColumnId: findCol(/(not|açıklama|aciklama|detay)/i, ['text'], excludedNonNoteIds),
     }
   }
 
   if (role === 'finance_expense') {
+    const netAmountCol = findCol(/(net tutar|kdv hariç|kdv haric|matrah|ara toplam)/i, ['currency', 'number'])
+    const vatAmountCol = findCol(/(kdv tutar|vergi tutar)/i, ['currency', 'number'])
+    const vatRateCol = findCol(/(kdv oran|kdv %|vergi oran)/i, ['select', 'number', 'text'])
+    const exchangeRateCol = findCol(/(döviz kuru|doviz kuru|\bkur\b)/i, ['number'])
+    const unitCostCol = findCol(/(birim tutar|birim maliyet|birim fiyat|birim)/i, ['currency', 'number'])
+    const excludedTotalIds = new Set(
+      [netAmountCol, vatAmountCol, vatRateCol, exchangeRateCol, unitCostCol].filter((id): id is string => Boolean(id))
+    )
     const totalCol =
-      findCol(/(toplam tutar|toplam maliyet|toplam|gider tutarı|gider tutari|^tutar\b)/i, ['currency', 'number']) ??
-      findCol(/(tutar|maliyet|bedel|ücret|ucret)/i, ['currency', 'number']) ??
-      columns.find((c) => c.fieldType === 'currency')?.id ??
+      findCol(/(brüt|brut|toplam tutar|genel toplam|toplam maliyet|toplam|gider tutarı|gider tutari|^tutar\b)/i, ['currency', 'number'], excludedTotalIds) ??
+      findCol(/(tutar|maliyet|bedel|ücret|ucret)/i, ['currency', 'number'], excludedTotalIds) ??
+      columns.find((c) => c.fieldType === 'currency' && !excludedTotalIds.has(c.id))?.id ??
       null
-    const unitCostCol =
-      columns.find(
-        (c) =>
-          c.id !== totalCol &&
-          (c.fieldType === 'currency' || c.fieldType === 'number') &&
-          /(birim)/i.test(c.name.toLocaleLowerCase('tr-TR'))
-      )?.id ?? null
+    const accountingSyncCol = findCol(/(ön muhasebe|on muhasebe|muhasebe durum|senkron)/i, ['select', 'text'])
+    const docTypeCol = findCol(/(belge türü|belge turu|fatura türü|fatura turu|evrak türü|evrak turu)/i, ['select', 'text'])
+    const excludedStatusIds = new Set(
+      [...primaryTitleIds, accountingSyncCol, docTypeCol].filter((id): id is string => Boolean(id))
+    )
+    const docNumCol = findCol(/(belge\s*\/?\s*fatura\s*no|fatura.*no|evrak.*no|fiş.*no|fis.*no|seri.*sıra|^belge\s*no)/i, ['text'], primaryTitleIds)
+    const excludedNonNoteIds = new Set(
+      [...primaryTitleIds, docNumCol].filter((id): id is string => Boolean(id))
+    )
 
     return {
       amountColumnId: totalCol,
+      netAmountColumnId: netAmountCol,
+      vatRateColumnId: vatRateCol,
+      vatAmountColumnId: vatAmountCol,
+      currencyColumnId: findCol(/(para birimi|döviz cinsi|doviz cinsi|döviz|doviz|currency)/i, ['select', 'text'], primaryTitleIds),
+      exchangeRateColumnId: exchangeRateCol,
+      documentTypeColumnId: docTypeCol,
+      documentNumberColumnId: docNumCol,
+      counterpartyNameColumnId: findCol(/(tedarikçi|tedarikci|cari|karşı taraf|karsi taraf|satıcı|satici|firma|ünvan|unvan)/i, ['text'], primaryTitleIds),
+      counterpartyTaxIdColumnId: findCol(/(vkn|tckn|vergi.*no|kimlik.*no)/i, ['text'], primaryTitleIds),
+      accountingCodeColumnId: findCol(/(hesap kodu|muhasebe kodu|tdhp)/i, ['text'], primaryTitleIds),
+      accountingSyncStatusColumnId: accountingSyncCol,
       unitCostColumnId: unitCostCol,
       quantityColumnId: findCol(/(adet|miktar)/i, ['number']),
       dateColumnId:
-        findCol(/(tarih|gider tarihi|fatura tarihi)/i, ['date']) ??
-        columns.find((c) => c.fieldType === 'date')?.id ??
+        findCol(/(işlem tarihi|islem tarihi|gider tarihi|fatura tarihi|belge tarihi|^tarih\b)/i, ['date']) ??
+        columns.find((c) => c.fieldType === 'date' && !/(vade|son)/i.test(c.name.toLocaleLowerCase('tr-TR')))?.id ??
         null,
+      dueDateColumnId: findCol(/(vade|son ödeme|son odeme)/i, ['date']),
       categoryColumnId:
-        findCol(/(kategori|gider türü|gider turu|tür|tur|kalem)/i, ['select', 'text']) ??
-        columns.find((c) => c.fieldType === 'select')?.id ??
+        findCol(/(kategori|gider türü|gider turu|gider kalem|tür|tur|kalem)/i, ['select', 'text'], excludedStatusIds) ??
+        columns.find((c) => c.fieldType === 'select' && !excludedStatusIds.has(c.id))?.id ??
         null,
-      methodColumnId: findCol(/(yöntem|yontem|ödeme tipi|kanal)/i, ['select', 'text']),
-      statusColumnId: findCol(/(durum|statü|statu)/i, ['select', 'text']),
+      methodColumnId: findCol(/(yöntem|yontem|ödeme tipi|kanal|kasa|banka)/i, ['select', 'text'], primaryTitleIds),
+      statusColumnId: findCol(/(ödeme durum|odeme durum|^durum\b|statü|statu)/i, ['select', 'text'], excludedStatusIds),
       itemRelationColumnId:
         findRelCol(/(malzeme|stok|ürün|urun|envanter|cihaz|demirbaş|demirbas|bakım|bakim)/i) ??
         relationCols[0]?.id ??
         null,
-      actorColumnId: findCol(/(yapan|giren|personel|sorumlu)/i, ['text']),
-      notesColumnId: findCol(/(not|açıklama|aciklama|detay|tedarikçi|tedarikci)/i, ['text']),
+      actorColumnId: findCol(/(yapan|giren|personel|sorumlu)/i, ['text'], primaryTitleIds),
+      notesColumnId: findCol(/(not|açıklama|aciklama|detay)/i, ['text'], excludedNonNoteIds),
     }
   }
 
@@ -384,9 +530,31 @@ export function coerceColumnValue(fieldType: DynamicFieldType, raw: unknown, con
     case 'number':
     case 'currency': {
       if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
-      const normalized = String(raw).trim().replace(/\s/g, '').replace(',', '.')
-      if (!normalized) return null
-      const parsed = Number(normalized)
+      let cleaned = String(raw)
+        .trim()
+        .replace(/[₺$€£%]/g, '')
+        .replace(/\s+/g, '')
+      if (!cleaned) return null
+      // Handle Turkish / European thousands separators (e.g. "1.250,50") vs US ("1,250.50")
+      const lastDot = cleaned.lastIndexOf('.')
+      const lastComma = cleaned.lastIndexOf(',')
+      if (lastComma > -1 && lastDot > -1) {
+        if (lastComma > lastDot) {
+          cleaned = cleaned.replace(/\./g, '').replace(',', '.')
+        } else {
+          cleaned = cleaned.replace(/,/g, '')
+        }
+      } else if (lastComma > -1) {
+        const commaParts = cleaned.split(',')
+        if (commaParts.length === 2 && (commaParts[1]?.length ?? 0) <= 4) {
+          cleaned = cleaned.replace(',', '.')
+        } else {
+          cleaned = cleaned.replace(/,/g, '')
+        }
+      } else if ((cleaned.match(/\./g) || []).length > 1) {
+        cleaned = cleaned.replace(/\./g, '')
+      }
+      const parsed = Number(cleaned)
       if (!Number.isFinite(parsed)) throw new Error(`Geçersiz sayısal değer: "${raw}"`)
       return parsed
     }
@@ -398,6 +566,12 @@ export function coerceColumnValue(fieldType: DynamicFieldType, raw: unknown, con
     case 'date': {
       if (raw instanceof Date) {
         return Number.isNaN(raw.getTime()) ? null : raw.toISOString().slice(0, 10)
+      }
+      // Handle Excel numeric serial dates (days since 1899-12-30)
+      if (typeof raw === 'number' && Number.isFinite(raw) && raw > 25000 && raw < 75000) {
+        const excelEpochMs = Date.UTC(1899, 11, 30)
+        const d = new Date(excelEpochMs + Math.round(raw) * 86_400_000)
+        if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10)
       }
       const s = String(raw).trim()
       if (!s) return null
@@ -737,8 +911,28 @@ export async function updateDynamicTable(
   if (patch.name !== undefined) {
     const clean = patch.name.trim()
     if (!clean) throw new Error('Tablo adı boş olamaz')
-    updateData.name = clean
-    updateData.slug = await resolveUniqueTableSlug(clinicId, clean, tableId)
+    const [existingTable] = await db
+      .select({ id: dynamicTables.id, name: dynamicTables.name })
+      .from(dynamicTables)
+      .where(and(eq(dynamicTables.id, tableId), eq(dynamicTables.clinicId, clinicId)))
+    if (!existingTable) throw new Error('Tablo bulunamadı')
+    if (clean !== existingTable.name) {
+      const [finMod] = await db
+        .select({ moduleRole: dynamicModuleConfigs.moduleRole })
+        .from(dynamicModuleConfigs)
+        .where(
+          and(
+            eq(dynamicModuleConfigs.clinicId, clinicId),
+            eq(dynamicModuleConfigs.tableId, tableId),
+            eq(dynamicModuleConfigs.enabled, true)
+          )
+        )
+      if (finMod && isFinanceModuleRole(finMod.moduleRole)) {
+        throw new Error('Standart finans tablolarının adı değiştirilemez')
+      }
+      updateData.name = clean
+      updateData.slug = await resolveUniqueTableSlug(clinicId, clean, tableId)
+    }
   }
   if (patch.icon !== undefined) updateData.icon = patch.icon || 'table'
   if (patch.color !== undefined) updateData.color = patch.color || '#0284c7'
@@ -797,6 +991,20 @@ export async function deleteDynamicTable(tableId: string) {
   await ensureDynamicTablesSchema()
   const clinicId = requireClinicId()
 
+  const [modCfg] = await db
+    .select({ moduleRole: dynamicModuleConfigs.moduleRole, enabled: dynamicModuleConfigs.enabled })
+    .from(dynamicModuleConfigs)
+    .where(
+      and(
+        eq(dynamicModuleConfigs.clinicId, clinicId),
+        eq(dynamicModuleConfigs.tableId, tableId)
+      )
+    )
+    .limit(1)
+  if (modCfg?.enabled && isFinanceModuleRole(modCfg.moduleRole)) {
+    throw new Error('Standart finans tabloları silinemez.')
+  }
+
   const rels = await db
     .select()
     .from(dynamicRelations)
@@ -834,26 +1042,40 @@ export async function clearDynamicTables(input: {
   await ensureDynamicTablesSchema()
   const clinicId = requireClinicId()
 
-  const existing = await db
-    .select({ id: dynamicTables.id, origin: dynamicTables.origin })
-    .from(dynamicTables)
-    .where(eq(dynamicTables.clinicId, clinicId))
+  const [existing, financeConfigs] = await Promise.all([
+    db
+      .select({ id: dynamicTables.id, origin: dynamicTables.origin })
+      .from(dynamicTables)
+      .where(eq(dynamicTables.clinicId, clinicId)),
+    db
+      .select({ tableId: dynamicModuleConfigs.tableId, moduleRole: dynamicModuleConfigs.moduleRole })
+      .from(dynamicModuleConfigs)
+      .where(
+        and(
+          eq(dynamicModuleConfigs.clinicId, clinicId),
+          eq(dynamicModuleConfigs.enabled, true)
+        )
+      ),
+  ])
 
+  const protectedFinanceIds = new Set(
+    financeConfigs.filter((mc) => isFinanceModuleRole(mc.moduleRole)).map((mc) => mc.tableId)
+  )
   const existingIdSet = new Set(existing.map((t) => t.id))
   let targetIds: string[] = []
 
   if (input.mode === 'all') {
-    targetIds = existing.map((t) => t.id)
+    targetIds = existing.filter((t) => !protectedFinanceIds.has(t.id)).map((t) => t.id)
   } else if (input.mode === 'manual') {
     targetIds = existing
-      .filter((t) => (t.origin || 'manual') === 'manual')
+      .filter((t) => (t.origin || 'manual') === 'manual' && !protectedFinanceIds.has(t.id))
       .map((t) => t.id)
   } else if (Array.isArray(input.tableIds)) {
     targetIds = Array.from(
       new Set(
         input.tableIds
           .map((id) => String(id || '').trim())
-          .filter((id) => existingIdSet.has(id))
+          .filter((id) => existingIdSet.has(id) && !protectedFinanceIds.has(id))
       )
     )
   } else {
@@ -1033,6 +1255,48 @@ export async function updateDynamicColumn(
     .limit(1)
   if (!existing) throw new Error('Sütun bulunamadı')
 
+  const [modCfg] = await db
+    .select()
+    .from(dynamicModuleConfigs)
+    .where(
+      and(
+        eq(dynamicModuleConfigs.clinicId, clinicId),
+        eq(dynamicModuleConfigs.tableId, existing.tableId),
+        eq(dynamicModuleConfigs.enabled, true)
+      )
+    )
+    .limit(1)
+  if (modCfg && isFinanceModuleRole(modCfg.moduleRole)) {
+    const tableCols = await db
+      .select()
+      .from(dynamicColumns)
+      .where(and(eq(dynamicColumns.clinicId, clinicId), eq(dynamicColumns.tableId, existing.tableId)))
+    const validColIds = new Set(tableCols.map((c) => c.id))
+    const inferred = inferModuleMappingForTable(modCfg.moduleRole, tableCols)
+    const effectiveMap = mergeFinanceMappingPreservingCore(
+      inferred,
+      (modCfg.mapping ?? {}) as Record<string, unknown>,
+      validColIds
+    )
+    const protectedIds = getProtectedFinanceColumnIds(tableCols, effectiveMap)
+    if (patch.isPrimaryTitle === true && !existing.isPrimaryTitle) {
+      throw new Error('Standart finans tablolarının ana başlık sütunu değiştirilemez.')
+    }
+    if (protectedIds.has(existing.id)) {
+      if (patch.fieldType !== undefined && patch.fieldType !== existing.fieldType) {
+        throw new Error('Ön muhasebe uyumluluğu için standart finans sütununun veri türü değiştirilemez.')
+      }
+      if (
+        existing.fieldType === 'select' &&
+        patch.config &&
+        Array.isArray(patch.config.options) &&
+        patch.config.options.length === 0
+      ) {
+        throw new Error('Standart finans seçim sütununun seçenek listesi boş bırakılamaz.')
+      }
+    }
+  }
+
   const updateData: Record<string, unknown> = {}
   if (patch.name !== undefined) {
     const clean = patch.name.trim()
@@ -1091,6 +1355,35 @@ export async function deleteDynamicColumn(columnId: string) {
     .where(and(eq(dynamicColumns.id, columnId), eq(dynamicColumns.clinicId, clinicId)))
     .limit(1)
   if (!col) throw new Error('Sütun bulunamadı')
+
+  const [modCfg] = await db
+    .select()
+    .from(dynamicModuleConfigs)
+    .where(
+      and(
+        eq(dynamicModuleConfigs.clinicId, clinicId),
+        eq(dynamicModuleConfigs.tableId, col.tableId),
+        eq(dynamicModuleConfigs.enabled, true)
+      )
+    )
+    .limit(1)
+  if (modCfg && isFinanceModuleRole(modCfg.moduleRole)) {
+    const tableCols = await db
+      .select()
+      .from(dynamicColumns)
+      .where(and(eq(dynamicColumns.clinicId, clinicId), eq(dynamicColumns.tableId, col.tableId)))
+    const validColIds = new Set(tableCols.map((c) => c.id))
+    const inferred = inferModuleMappingForTable(modCfg.moduleRole, tableCols)
+    const effectiveMap = mergeFinanceMappingPreservingCore(
+      inferred,
+      (modCfg.mapping ?? {}) as Record<string, unknown>,
+      validColIds
+    )
+    const protectedIds = getProtectedFinanceColumnIds(tableCols, effectiveMap)
+    if (protectedIds.has(col.id)) {
+      throw new Error('Ön muhasebe uyumluluğu için standart finans sütunları silinemez.')
+    }
+  }
 
   if (col.fieldType === 'relation') {
     const cfg = (col.config || {}) as DynamicColumnConfig
@@ -1445,6 +1738,7 @@ export async function upsertModuleConfig(input: {
   moduleRole: DynamicModuleRole
   enabled?: boolean
   mapping?: DynamicModuleMapping
+  allowSystemFinanceBinding?: boolean
 }) {
   await ensureDynamicTablesSchema()
   const clinicId = requireClinicId()
@@ -1460,7 +1754,7 @@ export async function upsertModuleConfig(input: {
     .limit(1)
   if (!table) throw new Error('Tablo bulunamadı')
 
-  const [allTables, cols, existingRows] = await Promise.all([
+  const [allTables, cols, clinicModConfigs] = await Promise.all([
     db.select().from(dynamicTables).where(eq(dynamicTables.clinicId, clinicId)),
     db
       .select()
@@ -1470,16 +1764,40 @@ export async function upsertModuleConfig(input: {
     db
       .select()
       .from(dynamicModuleConfigs)
-      .where(
-        and(
-          eq(dynamicModuleConfigs.clinicId, clinicId),
-          eq(dynamicModuleConfigs.tableId, table.id)
-        )
-      )
-      .limit(1),
+      .where(eq(dynamicModuleConfigs.clinicId, clinicId)),
   ])
 
-  const existing = existingRows[0] ?? null
+  const existing = clinicModConfigs.find((mc) => mc.tableId === table.id) ?? null
+
+  const isAlreadySameFinanceRole = Boolean(
+    existing && existing.enabled && isFinanceModuleRole(existing.moduleRole) && existing.moduleRole === input.moduleRole
+  )
+
+  // Enforce fixed canonical finance tables: no extra finance tables, no detaching/re-roling standard finance tables
+  if (existing && existing.enabled && isFinanceModuleRole(existing.moduleRole)) {
+    if (existing.moduleRole !== input.moduleRole) {
+      throw new Error('Standart finans tablosunun rolü değiştirilemez.')
+    }
+    if (input.enabled === false) {
+      throw new Error('Standart finans tabloları devre dışı bırakılamaz.')
+    }
+  }
+  if (isFinanceModuleRole(input.moduleRole)) {
+    const otherSameFinanceRole = clinicModConfigs.find(
+      (mc) => mc.enabled && mc.moduleRole === input.moduleRole && mc.tableId !== table.id
+    )
+    if (otherSameFinanceRole && !isAlreadySameFinanceRole) {
+      throw new Error(
+        'Finans modülünde ekstra tablo oluşturulamaz veya bağlanamaz. Yalnızca standart Gelir & Tahsilat ve Gider & Masraf tabloları kullanılır.'
+      )
+    }
+    if (!input.allowSystemFinanceBinding && (!existing || existing.moduleRole !== input.moduleRole)) {
+      throw new Error(
+        'Finans tabloları standart ve sabittir; harici veya ekstra bir tablo finans modülüne bağlanamaz.'
+      )
+    }
+  }
+
   const validColIds = new Set(cols.map((c) => c.id))
   const inferred = inferModuleMappingForTable(input.moduleRole, cols, allTables)
   const existingMap =
@@ -1493,11 +1811,27 @@ export async function upsertModuleConfig(input: {
   }
   for (const [k, v] of Object.entries(existingMap)) {
     if (typeof v === 'string' && validColIds.has(v)) merged[k] = v
-    else if (v === null) merged[k] = null
+    else if (v === null && (!isFinanceModuleRole(input.moduleRole) || !CORE_PROTECTED_FINANCE_KEY_SET.has(k))) {
+      merged[k] = null
+    }
   }
   if (input.mapping) {
     for (const [k, v] of Object.entries(input.mapping)) {
       if (v === undefined) continue
+      if (
+        isFinanceModuleRole(input.moduleRole) &&
+        !input.allowSystemFinanceBinding &&
+        CORE_PROTECTED_FINANCE_KEY_SET.has(k)
+      ) {
+        const currentMapped = merged[k] ?? null
+        const requested = v === null || v === '' ? null : String(v)
+        if (currentMapped && requested !== currentMapped) {
+          throw new Error(
+            'Ön muhasebe uyumluluğu için standart finans sütun eşlemeleri değiştirilemez veya kaldırılamaz.'
+          )
+        }
+        continue
+      }
       if (v === null || v === '') merged[k] = null
       else if (typeof v === 'string' && validColIds.has(v)) merged[k] = v
     }
@@ -1532,6 +1866,19 @@ export async function upsertModuleConfig(input: {
 export async function deleteModuleConfig(tableId: string) {
   await ensureDynamicTablesSchema()
   const clinicId = requireClinicId()
+  const [existing] = await db
+    .select({ moduleRole: dynamicModuleConfigs.moduleRole, enabled: dynamicModuleConfigs.enabled })
+    .from(dynamicModuleConfigs)
+    .where(
+      and(
+        eq(dynamicModuleConfigs.clinicId, clinicId),
+        eq(dynamicModuleConfigs.tableId, tableId)
+      )
+    )
+    .limit(1)
+  if (existing?.enabled && isFinanceModuleRole(existing.moduleRole)) {
+    throw new Error('Standart finans tablolarının modül bağlantısı kaldırılamaz.')
+  }
   await db
     .delete(dynamicModuleConfigs)
     .where(
@@ -1870,6 +2217,350 @@ async function validateAndPrepareValues(
   return merged
 }
 
+async function getFinanceModuleForTable(
+  clinicId: string,
+  tableId: string,
+  cols: Array<typeof dynamicColumns.$inferSelect>
+): Promise<{ role: 'finance_income' | 'finance_expense'; mapping: DynamicModuleMapping } | null> {
+  const [modCfg] = await db
+    .select()
+    .from(dynamicModuleConfigs)
+    .where(
+      and(
+        eq(dynamicModuleConfigs.clinicId, clinicId),
+        eq(dynamicModuleConfigs.tableId, tableId),
+        eq(dynamicModuleConfigs.enabled, true)
+      )
+    )
+    .limit(1)
+  if (!modCfg || !isFinanceModuleRole(modCfg.moduleRole)) return null
+  const inferred = inferModuleMappingForTable(modCfg.moduleRole, cols)
+  const validColIds = new Set(cols.map((c) => c.id))
+  const saved = (modCfg.mapping ?? {}) as Record<string, unknown>
+  const merged = mergeFinanceMappingPreservingCore(inferred, saved, validColIds)
+  return { role: modCfg.moduleRole, mapping: merged }
+}
+
+function resolveOptionLabelForAccounting(
+  col: { fieldType: string; config: unknown } | undefined,
+  raw: unknown
+): string | null {
+  if (raw === null || raw === undefined || raw === '') return null
+  const str = String(raw).trim()
+  if (!str) return null
+  if (col && (col.fieldType === 'select' || col.fieldType === 'multiselect')) {
+    const opts = ((col.config as DynamicColumnConfig | undefined)?.options ?? []) as SelectOptionItem[]
+    const found = opts.find(
+      (o) => o.id === str || o.label.toLocaleLowerCase('tr-TR') === str.toLocaleLowerCase('tr-TR')
+    )
+    if (found) return found.label
+  }
+  return str
+}
+
+function reconcileFinanceRowValues(
+  role: 'finance_income' | 'finance_expense',
+  cols: Array<typeof dynamicColumns.$inferSelect>,
+  mapping: DynamicModuleMapping,
+  preparedValues: Record<string, unknown>,
+  incomingValues: Record<string, unknown>,
+  previousValues?: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...preparedValues }
+  const direction = role === 'finance_expense' ? 'expense' : 'income'
+
+  const didFieldChange = (colId: string | null): boolean => {
+    if (!colId || !(colId in incomingValues)) return false
+    if (!previousValues) return true
+    const nextVal = out[colId]
+    const prevVal = previousValues[colId]
+    if (nextVal === prevVal) return false
+    if (
+      (nextVal === null || nextVal === undefined || nextVal === '') &&
+      (prevVal === null || prevVal === undefined || prevVal === '')
+    ) {
+      return false
+    }
+    if (typeof nextVal === 'number' && typeof prevVal === 'number') {
+      return Math.abs(nextVal - prevVal) > 1e-6
+    }
+    return String(nextVal ?? '') !== String(prevVal ?? '')
+  }
+
+  // Currency & Exchange Rate defaults
+  const currency = mapping.currencyColumnId
+    ? normalizeCurrencyCode(out[mapping.currencyColumnId])
+    : 'TRY'
+  if (mapping.currencyColumnId && (!out[mapping.currencyColumnId] || String(out[mapping.currencyColumnId]).trim() === '')) {
+    out[mapping.currencyColumnId] = currency
+  }
+  const exchangeRate = mapping.exchangeRateColumnId
+    ? normalizeExchangeRate(out[mapping.exchangeRateColumnId], currency)
+    : 1
+  if (mapping.exchangeRateColumnId) {
+    if (currency === 'TRY') {
+      out[mapping.exchangeRateColumnId] = 1
+    } else if (out[mapping.exchangeRateColumnId] === null || out[mapping.exchangeRateColumnId] === undefined || out[mapping.exchangeRateColumnId] === '') {
+      out[mapping.exchangeRateColumnId] = exchangeRate
+    }
+  }
+
+  // Document type default
+  if (mapping.documentTypeColumnId && (!out[mapping.documentTypeColumnId] || String(out[mapping.documentTypeColumnId]).trim() === '')) {
+    out[mapping.documentTypeColumnId] = 'belgesiz'
+  }
+
+  // Status default
+  if (mapping.statusColumnId && (!out[mapping.statusColumnId] || String(out[mapping.statusColumnId]).trim() === '')) {
+    out[mapping.statusColumnId] = 'tamamlandi'
+  }
+
+  // Quantity & Gross/Net/VAT reconciliation
+  const amountColId = mapping.amountColumnId ?? null
+  const netColId = mapping.netAmountColumnId ?? null
+  const vatRateColId = mapping.vatRateColumnId ?? null
+  const vatAmountColId = mapping.vatAmountColumnId ?? null
+  const qtyColId = mapping.quantityColumnId ?? null
+  const unitCostColId = mapping.unitCostColumnId ?? null
+
+  const qtyRaw = qtyColId ? Number(out[qtyColId]) : 1
+  const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1
+  const unitCostRaw = unitCostColId ? Number(out[unitCostColId]) : NaN
+
+  let amountChanged = didFieldChange(amountColId)
+  const netChanged = didFieldChange(netColId)
+  const vatRateChanged = didFieldChange(vatRateColId)
+  const qtyChanged = didFieldChange(qtyColId)
+  const unitCostChanged = didFieldChange(unitCostColId)
+
+  // For expense rows where user entered/updated quantity & unitCost without directly editing total amount
+  const amountMissing =
+    amountColId !== null &&
+    (out[amountColId] === null || out[amountColId] === undefined || out[amountColId] === '')
+  if (
+    amountColId &&
+    Number.isFinite(unitCostRaw) &&
+    unitCostRaw !== 0 &&
+    (amountMissing || ((qtyChanged || unitCostChanged) && !amountChanged && !netChanged))
+  ) {
+    out[amountColId] = roundMoney(qty * unitCostRaw)
+    amountChanged = true
+  }
+
+  const vatRate = vatRateColId ? normalizeVatRate(out[vatRateColId]) : 0
+  if (vatRateColId && (out[vatRateColId] === null || out[vatRateColId] === undefined || out[vatRateColId] === '')) {
+    const vatCol = cols.find((c) => c.id === vatRateColId)
+    out[vatRateColId] = vatCol?.fieldType === 'number' ? 0 : '0'
+  }
+
+  const grossVal = amountColId && out[amountColId] !== null && out[amountColId] !== undefined ? Number(out[amountColId]) : NaN
+  const netVal = netColId && out[netColId] !== null && out[netColId] !== undefined ? Number(out[netColId]) : NaN
+  const vatVal = vatAmountColId && out[vatAmountColId] !== null && out[vatAmountColId] !== undefined ? Number(out[vatAmountColId]) : NaN
+
+  if (netChanged && !amountChanged && Number.isFinite(netVal)) {
+    const calc = calculateAccountingAmounts({
+      netAmount: netVal,
+      vatRate,
+      vatIncluded: false,
+      currency,
+      exchangeRate,
+    })
+    if (netColId) out[netColId] = calc.netAmount
+    if (vatAmountColId) out[vatAmountColId] = calc.vatAmount
+    if (amountColId) out[amountColId] = calc.grossAmount
+    if (unitCostColId && !unitCostChanged && qty > 0) {
+      out[unitCostColId] = roundMoney(calc.grossAmount / qty)
+    }
+  } else if (
+    Number.isFinite(grossVal) &&
+    (amountChanged || vatRateChanged || !Number.isFinite(netVal) || !Number.isFinite(vatVal))
+  ) {
+    const calc = calculateAccountingAmounts({
+      grossAmount: grossVal,
+      vatRate,
+      vatIncluded: true,
+      currency,
+      exchangeRate,
+    })
+    if (amountColId) out[amountColId] = calc.grossAmount
+    if (netColId) out[netColId] = calc.netAmount
+    if (vatAmountColId) out[vatAmountColId] = calc.vatAmount
+  }
+
+  // TDHP default account code
+  if (mapping.accountingCodeColumnId && (!out[mapping.accountingCodeColumnId] || String(out[mapping.accountingCodeColumnId]).trim() === '')) {
+    const catVal = mapping.categoryColumnId ? String(out[mapping.categoryColumnId] ?? '') : ''
+    out[mapping.accountingCodeColumnId] = resolveTdhpAccountCode(direction, catVal)
+  }
+
+  return out
+}
+
+async function upsertFinanceAccountingSyncForRow(params: {
+  clinicId: string
+  tableId: string
+  rowId: string
+  role: 'finance_income' | 'finance_expense'
+  cols: Array<typeof dynamicColumns.$inferSelect>
+  mapping: DynamicModuleMapping
+  displayTitle: string
+  values: Record<string, unknown>
+  relations?: Record<string, LinkedRowSummary[]>
+  createdAt?: Date | string
+}) {
+  try {
+    const colById = new Map(params.cols.map((c) => [c.id, c]))
+    const m = params.mapping
+    const v = params.values
+    const direction = params.role === 'finance_expense' ? 'expense' : 'income'
+
+    const grossAmount = m.amountColumnId ? Number(v[m.amountColumnId] ?? 0) : 0
+    const netAmount = m.netAmountColumnId && v[m.netAmountColumnId] != null ? Number(v[m.netAmountColumnId]) : null
+    const vatAmount = m.vatAmountColumnId && v[m.vatAmountColumnId] != null ? Number(v[m.vatAmountColumnId]) : null
+    const qty = m.quantityColumnId && Number(v[m.quantityColumnId]) > 0 ? Number(v[m.quantityColumnId]) : 1
+
+    const rawDate = m.dateColumnId ? v[m.dateColumnId] : null
+    const issueDate =
+      typeof rawDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rawDate)
+        ? rawDate.slice(0, 10)
+        : new Date(params.createdAt ?? new Date()).toISOString().slice(0, 10)
+    const rawDue = m.dueDateColumnId ? v[m.dueDateColumnId] : null
+    const dueDate =
+      typeof rawDue === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rawDue) ? rawDue.slice(0, 10) : null
+
+    const statusCol = m.statusColumnId ? colById.get(m.statusColumnId) : undefined
+    const statusLabel = m.statusColumnId ? resolveOptionLabelForAccounting(statusCol, v[m.statusColumnId]) : null
+    const paymentStatus = m.statusColumnId
+      ? normalizeAccountingPaymentStatus(v[m.statusColumnId], statusLabel)
+      : 'completed'
+
+    const methodCol = m.methodColumnId ? colById.get(m.methodColumnId) : undefined
+    const methodCode = m.methodColumnId && v[m.methodColumnId] ? String(v[m.methodColumnId]) : 'nakit'
+    const methodLabel = (m.methodColumnId ? resolveOptionLabelForAccounting(methodCol, v[m.methodColumnId]) : null) ?? 'Nakit (Kasa)'
+
+    const catCol = m.categoryColumnId ? colById.get(m.categoryColumnId) : undefined
+    const catCode = m.categoryColumnId && v[m.categoryColumnId] ? String(v[m.categoryColumnId]) : (direction === 'income' ? 'hizmet_geliri' : 'diger_gider')
+    const catLabel = (m.categoryColumnId ? resolveOptionLabelForAccounting(catCol, v[m.categoryColumnId]) : null) ?? (direction === 'income' ? 'Hizmet / İşlem Geliri' : 'Diğer İşletme Giderleri')
+
+    const linkedPersons = (m.personRelationColumnId ? params.relations?.[m.personRelationColumnId] : undefined) ?? []
+    const linkedServices = (m.serviceRelationColumnId ? params.relations?.[m.serviceRelationColumnId] : undefined) ?? []
+    const linkedItems = (m.itemRelationColumnId ? params.relations?.[m.itemRelationColumnId] : undefined) ?? []
+
+    const explicitCounterparty = m.counterpartyNameColumnId && v[m.counterpartyNameColumnId]
+      ? String(v[m.counterpartyNameColumnId]).trim()
+      : null
+    const counterpartyName = explicitCounterparty || linkedPersons[0]?.displayTitle || null
+    const counterpartyTaxId = m.counterpartyTaxIdColumnId && v[m.counterpartyTaxIdColumnId]
+      ? String(v[m.counterpartyTaxIdColumnId]).trim()
+      : null
+
+    const canonical = buildCanonicalAccountingEntry({
+      clinicId: params.clinicId,
+      tableId: params.tableId,
+      rowId: params.rowId,
+      direction,
+      title: params.displayTitle,
+      description: m.notesColumnId && v[m.notesColumnId] ? String(v[m.notesColumnId]) : null,
+      issueDate,
+      dueDate,
+      quantity: qty,
+      grossAmount: Number.isFinite(grossAmount) ? grossAmount : 0,
+      netAmount: Number.isFinite(netAmount ?? NaN) ? netAmount : null,
+      vatRate: m.vatRateColumnId ? v[m.vatRateColumnId] : 0,
+      vatAmount: Number.isFinite(vatAmount ?? NaN) ? vatAmount : null,
+      currency: m.currencyColumnId ? v[m.currencyColumnId] : 'TRY',
+      exchangeRate: m.exchangeRateColumnId ? v[m.exchangeRateColumnId] : 1,
+      paymentStatus,
+      paymentMethodCode: methodCode,
+      paymentMethodLabel: methodLabel,
+      categoryCode: catCode,
+      categoryLabel: catLabel,
+      accountingAccountCode: m.accountingCodeColumnId && v[m.accountingCodeColumnId] ? String(v[m.accountingCodeColumnId]) : null,
+      documentType: m.documentTypeColumnId ? normalizeDocumentType(v[m.documentTypeColumnId]) : 'belgesiz',
+      documentNumber: m.documentNumberColumnId && v[m.documentNumberColumnId] ? String(v[m.documentNumberColumnId]) : null,
+      counterpartyLinkedRowId: linkedPersons[0]?.id ?? null,
+      counterpartyName,
+      counterpartyTaxId,
+      linkedItems: [...linkedServices, ...linkedItems].map((li) => ({
+        rowId: li.id,
+        tableId: li.tableId,
+        title: li.displayTitle,
+      })),
+    })
+
+    const nextSyncStatus = canonical.sync.status
+    const nextOptionId = syncStatusToOptionId(nextSyncStatus)
+
+    await db
+      .insert(financeAccountingSyncRecords)
+      .values({
+        clinicId: params.clinicId,
+        rowId: params.rowId,
+        tableId: params.tableId,
+        direction,
+        provider: 'local',
+        idempotencyKey: canonical.idempotencyKey,
+        syncStatus: nextSyncStatus,
+        payloadHash: canonical.payloadHash,
+        canonicalSnapshot: canonical as unknown as Record<string, unknown>,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [
+          financeAccountingSyncRecords.clinicId,
+          financeAccountingSyncRecords.rowId,
+          financeAccountingSyncRecords.provider,
+        ],
+        set: {
+          direction,
+          syncStatus: nextSyncStatus,
+          payloadHash: canonical.payloadHash,
+          canonicalSnapshot: canonical as unknown as Record<string, unknown>,
+          updatedAt: new Date(),
+        },
+      })
+
+    // If any external pre-accounting provider had already synced an older payloadHash, flag it as pending re-sync
+    const dirtiedExternal = await db
+      .update(financeAccountingSyncRecords)
+      .set({
+        syncStatus: 'pending',
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(financeAccountingSyncRecords.clinicId, params.clinicId),
+          eq(financeAccountingSyncRecords.rowId, params.rowId),
+          ne(financeAccountingSyncRecords.provider, 'local'),
+          eq(financeAccountingSyncRecords.syncStatus, 'synced'),
+          ne(financeAccountingSyncRecords.payloadHash, canonical.payloadHash)
+        )
+      )
+      .returning({ id: financeAccountingSyncRecords.id })
+
+    // Mirror readiness/pending status into dynamic row column (including when an externally synced row is dirtied!)
+    if (m.accountingSyncStatusColumnId) {
+      const currentStatusRaw = String(v[m.accountingSyncStatusColumnId] ?? '').trim()
+      const targetOptionId = dirtiedExternal.length > 0 ? 'bekliyor' : nextOptionId
+      const shouldMirror =
+        dirtiedExternal.length > 0 ||
+        !currentStatusRaw ||
+        currentStatusRaw === 'bekliyor' ||
+        currentStatusRaw === 'hazir' ||
+        currentStatusRaw === 'kapsam_disi'
+      if (shouldMirror && currentStatusRaw !== targetOptionId) {
+        const nextVals = { ...v, [m.accountingSyncStatusColumnId]: targetOptionId }
+        await db
+          .update(dynamicRows)
+          .set({ values: nextVals })
+          .where(and(eq(dynamicRows.id, params.rowId), eq(dynamicRows.clinicId, params.clinicId)))
+      }
+    }
+  } catch (err) {
+    console.warn('[PreAccounting] Sync record upsert skipped:', err)
+  }
+}
+
 export async function createDynamicRow(
   tableId: string,
   input: {
@@ -1888,12 +2579,22 @@ export async function createDynamicRow(
     .orderBy(asc(dynamicColumns.sortOrder))
   if (cols.length === 0) throw new Error('Tablo bulunamadı veya sütun tanımlı değil')
 
-  const preparedValues = await validateAndPrepareValues(
+  const financeMod = await getFinanceModuleForTable(clinicId, tableId, cols)
+  const validatedValues = await validateAndPrepareValues(
     clinicId,
     tableId,
     cols,
     input.values || {}
   )
+  const preparedValues = financeMod
+    ? reconcileFinanceRowValues(
+        financeMod.role,
+        cols,
+        financeMod.mapping,
+        validatedValues,
+        input.values || {}
+      )
+    : validatedValues
   const displayTitle = computeDisplayTitle(cols as any, preparedValues)
 
   const [created] = await db
@@ -1913,8 +2614,31 @@ export async function createDynamicRow(
     await syncRowLinksForColumns(clinicId, tableId, created.id, input.relations)
   }
 
-  const hydrated = await listDynamicRows(tableId)
-  return hydrated.find((r) => r.id === created.id) ?? { ...created, relations: {}, appointmentCount: 0 }
+  let hydrated = await listDynamicRows(tableId)
+  let hydratedRow = hydrated.find((r) => r.id === created.id) ?? {
+    ...created,
+    relations: {},
+    appointmentCount: 0,
+  }
+
+  if (financeMod) {
+    await upsertFinanceAccountingSyncForRow({
+      clinicId,
+      tableId,
+      rowId: created.id,
+      role: financeMod.role,
+      cols,
+      mapping: financeMod.mapping,
+      displayTitle: hydratedRow.displayTitle,
+      values: (hydratedRow.values || {}) as Record<string, unknown>,
+      relations: hydratedRow.relations,
+      createdAt: created.createdAt,
+    })
+    hydrated = await listDynamicRows(tableId)
+    hydratedRow = hydrated.find((r) => r.id === created.id) ?? hydratedRow
+  }
+
+  return hydratedRow
 }
 
 export async function updateDynamicRow(
@@ -1940,7 +2664,9 @@ export async function updateDynamicRow(
     .where(and(eq(dynamicColumns.clinicId, clinicId), eq(dynamicColumns.tableId, existing.tableId)))
     .orderBy(asc(dynamicColumns.sortOrder))
 
-  const nextValues = input.values
+  const financeMod = await getFinanceModuleForTable(clinicId, existing.tableId, cols)
+
+  const validatedValues = input.values
     ? await validateAndPrepareValues(
         clinicId,
         existing.tableId,
@@ -1950,6 +2676,18 @@ export async function updateDynamicRow(
         rowId
       )
     : ((existing.values || {}) as Record<string, unknown>)
+
+  const nextValues =
+    financeMod && input.values
+      ? reconcileFinanceRowValues(
+          financeMod.role,
+          cols,
+          financeMod.mapping,
+          validatedValues,
+          input.values,
+          (existing.values || {}) as Record<string, unknown>
+        )
+      : validatedValues
 
   const displayTitle = computeDisplayTitle(cols as any, nextValues)
 
@@ -1967,8 +2705,30 @@ export async function updateDynamicRow(
     await syncRowLinksForColumns(clinicId, existing.tableId, rowId, input.relations)
   }
 
-  const hydrated = await listDynamicRows(existing.tableId, { archived: existing.isArchived })
-  return hydrated.find((r) => r.id === rowId) ?? updated
+  let hydrated = await listDynamicRows(existing.tableId, { archived: existing.isArchived })
+  let hydratedRow = hydrated.find((r) => r.id === rowId) ?? updated
+
+  if (financeMod && hydratedRow) {
+    await upsertFinanceAccountingSyncForRow({
+      clinicId,
+      tableId: existing.tableId,
+      rowId,
+      role: financeMod.role,
+      cols,
+      mapping: financeMod.mapping,
+      displayTitle: hydratedRow.displayTitle,
+      values: (hydratedRow.values || {}) as Record<string, unknown>,
+      relations:
+        'relations' in hydratedRow
+          ? (hydratedRow.relations as Record<string, LinkedRowSummary[]>)
+          : undefined,
+      createdAt: existing.createdAt,
+    })
+    hydrated = await listDynamicRows(existing.tableId, { archived: existing.isArchived })
+    hydratedRow = hydrated.find((r) => r.id === rowId) ?? hydratedRow
+  }
+
+  return hydratedRow
 }
 
 export async function bulkImportDynamicRows(
@@ -2010,13 +2770,18 @@ export async function bulkImportDynamicRows(
     targetTitleLookup.set(cfg.targetTableId, map)
   }
 
+  const financeMod = await getFinanceModuleForTable(clinicId, tableId, cols)
+
   let importedCount = 0
   const errors: string[] = []
 
   for (let i = 0; i < rawRows.length; i++) {
     const item = rawRows[i]!
     try {
-      const prepared = await validateAndPrepareValues(clinicId, tableId, cols, item.values || {})
+      const validated = await validateAndPrepareValues(clinicId, tableId, cols, item.values || {})
+      const prepared = financeMod
+        ? reconcileFinanceRowValues(financeMod.role, cols, financeMod.mapping, validated, item.values || {})
+        : validated
       const displayTitle = computeDisplayTitle(cols as any, prepared)
       const [inserted] = await db
         .insert(dynamicRows)
@@ -2029,22 +2794,49 @@ export async function bulkImportDynamicRows(
         })
         .returning({ id: dynamicRows.id })
 
+      let resolvedRelationsSummary: Record<string, LinkedRowSummary[]> | undefined
       if (inserted && item.relationTitles) {
         const resolvedRelIds: Record<string, string[]> = {}
+        const summaryMap: Record<string, LinkedRowSummary[]> = {}
         for (const rc of relCols) {
           const titles = item.relationTitles[rc.id]
           const cfg = (rc.config || {}) as DynamicColumnConfig
           if (!titles?.length || !cfg.targetTableId) continue
           const map = targetTitleLookup.get(cfg.targetTableId)
           if (!map) continue
-          const ids = titles
-            .map((t) => map.get(t.trim().toLocaleLowerCase('tr-TR')))
-            .filter((id): id is string => Boolean(id))
-          if (ids.length > 0) resolvedRelIds[rc.id] = ids
+          const matchedEntries: LinkedRowSummary[] = []
+          for (const rawTitle of titles) {
+            const matchedId = map.get(rawTitle.trim().toLocaleLowerCase('tr-TR'))
+            if (matchedId) {
+              matchedEntries.push({
+                id: matchedId,
+                tableId: cfg.targetTableId,
+                displayTitle: rawTitle.trim(),
+              })
+            }
+          }
+          if (matchedEntries.length > 0) {
+            resolvedRelIds[rc.id] = matchedEntries.map((m) => m.id)
+            summaryMap[rc.id] = matchedEntries
+          }
         }
         if (Object.keys(resolvedRelIds).length > 0) {
           await syncRowLinksForColumns(clinicId, tableId, inserted.id, resolvedRelIds)
+          resolvedRelationsSummary = summaryMap
         }
+      }
+      if (inserted && financeMod) {
+        await upsertFinanceAccountingSyncForRow({
+          clinicId,
+          tableId,
+          rowId: inserted.id,
+          role: financeMod.role,
+          cols,
+          mapping: financeMod.mapping,
+          displayTitle,
+          values: prepared,
+          relations: resolvedRelationsSummary,
+        })
       }
       importedCount++
     } catch (err: any) {
@@ -2129,6 +2921,25 @@ export async function deleteDynamicRows(rowIds: string[]) {
     )
   const cascadeTargetIds = cascadeLinks.map((c) => c.targetRowId).filter((id) => !validIds.includes(id))
   const allToDelete = Array.from(new Set([...validIds, ...cascadeTargetIds]))
+
+  // Preserve external pre-accounting audit trail: externally synced finance rows cannot be hard-deleted
+  const syncedExternalRows = await db
+    .select({ id: financeAccountingSyncRecords.id })
+    .from(financeAccountingSyncRecords)
+    .where(
+      and(
+        eq(financeAccountingSyncRecords.clinicId, clinicId),
+        inArray(financeAccountingSyncRecords.rowId, allToDelete),
+        ne(financeAccountingSyncRecords.provider, 'local'),
+        eq(financeAccountingSyncRecords.syncStatus, 'synced')
+      )
+    )
+    .limit(1)
+  if (syncedExternalRows.length > 0) {
+    throw new Error(
+      'Ön muhasebe yazılımına aktarılmış finans kayıtları kalıcı olarak silinemez; durumunu "İptal" olarak güncelleyebilir veya arşivleyebilirsiniz.'
+    )
+  }
 
   const deleted = await db
     .delete(dynamicRows)
@@ -2670,18 +3481,321 @@ function offsetDateIso(daysOffset: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-export const STANDARD_PAYMENT_STATUS_OPTIONS: SelectOptionItem[] = [
-  { id: 'tamamlandi', label: 'Tamamlandı', color: '#15803d' },
-  { id: 'bekliyor', label: 'Bekliyor', color: '#d97706' },
-  { id: 'iptal', label: 'İptal', color: '#ef4444' },
-]
+export {
+  CANONICAL_FINANCE_TABLE_DESCRIPTIONS,
+  CANONICAL_FINANCE_TABLE_NAMES,
+  isFinanceModuleRole,
+  STANDARD_ACCOUNTING_SYNC_OPTIONS,
+  STANDARD_CURRENCY_OPTIONS,
+  STANDARD_DOCUMENT_TYPE_OPTIONS,
+  STANDARD_EXPENSE_CATEGORY_OPTIONS,
+  STANDARD_INCOME_CATEGORY_OPTIONS,
+  STANDARD_PAYMENT_METHOD_OPTIONS,
+  STANDARD_PAYMENT_STATUS_OPTIONS,
+  STANDARD_VAT_RATE_OPTIONS,
+}
 
-export const STANDARD_PAYMENT_METHOD_OPTIONS: SelectOptionItem[] = [
-  { id: 'nakit', label: 'Nakit', color: '#15803d' },
-  { id: 'kredi_karti', label: 'Kredi Kartı', color: '#2563eb' },
-  { id: 'havale_eft', label: 'Havale / EFT', color: '#0284c7' },
-  { id: 'taksit_senet', label: 'Taksit / Vadeli', color: '#0d9488' },
-]
+export interface CanonicalFinanceColumnSpec {
+  mappingKey: keyof DynamicModuleMapping | 'primaryTitle'
+  column: InitialColumnInput
+}
+
+export function getCanonicalFinanceColumnSpecs(
+  role: 'finance_income' | 'finance_expense'
+): CanonicalFinanceColumnSpec[] {
+  if (role === 'finance_income') {
+    return [
+      {
+        mappingKey: 'primaryTitle',
+        column: {
+          name: 'İşlem / Tahsilat Başlığı',
+          fieldType: 'text',
+          isPrimaryTitle: true,
+          isRequired: true,
+          width: 235,
+        },
+      },
+      {
+        mappingKey: 'counterpartyNameColumnId',
+        column: { name: 'Cari / Müşteri', fieldType: 'text', width: 175 },
+      },
+      {
+        mappingKey: 'amountColumnId',
+        column: { name: 'Tutar (Brüt)', fieldType: 'currency', width: 145, config: { currencySymbol: '₺' } },
+      },
+      {
+        mappingKey: 'vatRateColumnId',
+        column: { name: 'KDV Oranı', fieldType: 'select', width: 115, config: { options: STANDARD_VAT_RATE_OPTIONS } },
+      },
+      {
+        mappingKey: 'dateColumnId',
+        column: { name: 'İşlem Tarihi', fieldType: 'date', width: 135 },
+      },
+      {
+        mappingKey: 'dueDateColumnId',
+        column: { name: 'Vade Tarihi', fieldType: 'date', width: 135 },
+      },
+      {
+        mappingKey: 'statusColumnId',
+        column: {
+          name: 'Tahsilat Durumu',
+          fieldType: 'select',
+          width: 165,
+          config: { options: STANDARD_PAYMENT_STATUS_OPTIONS },
+        },
+      },
+      {
+        mappingKey: 'methodColumnId',
+        column: {
+          name: 'Ödeme Yöntemi',
+          fieldType: 'select',
+          width: 175,
+          config: { options: STANDARD_PAYMENT_METHOD_OPTIONS },
+        },
+      },
+      {
+        mappingKey: 'categoryColumnId',
+        column: {
+          name: 'Gelir Kategorisi',
+          fieldType: 'select',
+          width: 185,
+          config: { options: STANDARD_INCOME_CATEGORY_OPTIONS },
+        },
+      },
+      {
+        mappingKey: 'documentTypeColumnId',
+        column: {
+          name: 'Belge Türü',
+          fieldType: 'select',
+          width: 165,
+          config: { options: STANDARD_DOCUMENT_TYPE_OPTIONS },
+        },
+      },
+      {
+        mappingKey: 'documentNumberColumnId',
+        column: { name: 'Belge / Fatura No', fieldType: 'text', width: 155 },
+      },
+      {
+        mappingKey: 'netAmountColumnId',
+        column: {
+          name: 'Net Tutar (KDV Hariç)',
+          fieldType: 'currency',
+          showInTable: false,
+          width: 155,
+          config: { currencySymbol: '₺' },
+        },
+      },
+      {
+        mappingKey: 'vatAmountColumnId',
+        column: {
+          name: 'KDV Tutarı',
+          fieldType: 'currency',
+          showInTable: false,
+          width: 135,
+          config: { currencySymbol: '₺' },
+        },
+      },
+      {
+        mappingKey: 'currencyColumnId',
+        column: {
+          name: 'Para Birimi',
+          fieldType: 'select',
+          showInTable: false,
+          width: 115,
+          config: { options: STANDARD_CURRENCY_OPTIONS },
+        },
+      },
+      {
+        mappingKey: 'exchangeRateColumnId',
+        column: { name: 'Döviz Kuru', fieldType: 'number', showInTable: false, width: 115 },
+      },
+      {
+        mappingKey: 'counterpartyTaxIdColumnId',
+        column: { name: 'VKN / TCKN', fieldType: 'text', showInTable: false, width: 145 },
+      },
+      {
+        mappingKey: 'accountingCodeColumnId',
+        column: { name: 'Muhasebe Hesap Kodu', fieldType: 'text', showInTable: false, width: 155 },
+      },
+      {
+        mappingKey: 'accountingSyncStatusColumnId',
+        column: {
+          name: 'Ön Muhasebe Durumu',
+          fieldType: 'select',
+          showInTable: false,
+          width: 165,
+          config: { options: STANDARD_ACCOUNTING_SYNC_OPTIONS },
+        },
+      },
+      {
+        mappingKey: 'notesColumnId',
+        column: { name: 'Açıklama / Not', fieldType: 'text', width: 215 },
+      },
+    ]
+  }
+
+  return [
+    {
+      mappingKey: 'primaryTitle',
+      column: {
+        name: 'Gider Kalemi / Açıklama',
+        fieldType: 'text',
+        isPrimaryTitle: true,
+        isRequired: true,
+        width: 235,
+      },
+    },
+    {
+      mappingKey: 'counterpartyNameColumnId',
+      column: { name: 'Tedarikçi / Cari', fieldType: 'text', width: 175 },
+    },
+    {
+      mappingKey: 'categoryColumnId',
+      column: {
+        name: 'Gider Kategorisi',
+        fieldType: 'select',
+        width: 190,
+        config: { options: STANDARD_EXPENSE_CATEGORY_OPTIONS },
+      },
+    },
+    {
+      mappingKey: 'quantityColumnId',
+      column: { name: 'Adet', fieldType: 'number', width: 95 },
+    },
+    {
+      mappingKey: 'unitCostColumnId',
+      column: { name: 'Birim Tutar', fieldType: 'currency', width: 135, config: { currencySymbol: '₺' } },
+    },
+    {
+      mappingKey: 'amountColumnId',
+      column: { name: 'Toplam Tutar (Brüt)', fieldType: 'currency', width: 155, config: { currencySymbol: '₺' } },
+    },
+    {
+      mappingKey: 'vatRateColumnId',
+      column: { name: 'KDV Oranı', fieldType: 'select', width: 115, config: { options: STANDARD_VAT_RATE_OPTIONS } },
+    },
+    {
+      mappingKey: 'dateColumnId',
+      column: { name: 'İşlem Tarihi', fieldType: 'date', width: 135 },
+    },
+    {
+      mappingKey: 'dueDateColumnId',
+      column: { name: 'Vade Tarihi', fieldType: 'date', width: 135 },
+    },
+    {
+      mappingKey: 'statusColumnId',
+      column: {
+        name: 'Ödeme Durumu',
+        fieldType: 'select',
+        width: 160,
+        config: { options: STANDARD_PAYMENT_STATUS_OPTIONS },
+      },
+    },
+    {
+      mappingKey: 'methodColumnId',
+      column: {
+        name: 'Ödeme Yöntemi',
+        fieldType: 'select',
+        width: 175,
+        config: { options: STANDARD_PAYMENT_METHOD_OPTIONS },
+      },
+    },
+    {
+      mappingKey: 'documentTypeColumnId',
+      column: {
+        name: 'Belge Türü',
+        fieldType: 'select',
+        width: 165,
+        config: { options: STANDARD_DOCUMENT_TYPE_OPTIONS },
+      },
+    },
+    {
+      mappingKey: 'documentNumberColumnId',
+      column: { name: 'Belge / Fatura No', fieldType: 'text', width: 155 },
+    },
+    {
+      mappingKey: 'netAmountColumnId',
+      column: {
+        name: 'Net Tutar (KDV Hariç)',
+        fieldType: 'currency',
+        showInTable: false,
+        width: 155,
+        config: { currencySymbol: '₺' },
+      },
+    },
+    {
+      mappingKey: 'vatAmountColumnId',
+      column: {
+        name: 'KDV Tutarı',
+        fieldType: 'currency',
+        showInTable: false,
+        width: 135,
+        config: { currencySymbol: '₺' },
+      },
+    },
+    {
+      mappingKey: 'currencyColumnId',
+      column: {
+        name: 'Para Birimi',
+        fieldType: 'select',
+        showInTable: false,
+        width: 115,
+        config: { options: STANDARD_CURRENCY_OPTIONS },
+      },
+    },
+    {
+      mappingKey: 'exchangeRateColumnId',
+      column: { name: 'Döviz Kuru', fieldType: 'number', showInTable: false, width: 115 },
+    },
+    {
+      mappingKey: 'counterpartyTaxIdColumnId',
+      column: { name: 'VKN / TCKN', fieldType: 'text', showInTable: false, width: 145 },
+    },
+    {
+      mappingKey: 'accountingCodeColumnId',
+      column: { name: 'Muhasebe Hesap Kodu', fieldType: 'text', showInTable: false, width: 155 },
+    },
+    {
+      mappingKey: 'accountingSyncStatusColumnId',
+      column: {
+        name: 'Ön Muhasebe Durumu',
+        fieldType: 'select',
+        showInTable: false,
+        width: 165,
+        config: { options: STANDARD_ACCOUNTING_SYNC_OPTIONS },
+      },
+    },
+    {
+      mappingKey: 'notesColumnId',
+      column: { name: 'Not / Detay', fieldType: 'text', width: 215 },
+    },
+  ]
+}
+
+function mapLegacySampleCategoryToUniversal(
+  role: 'finance_income' | 'finance_expense',
+  rawCategory: string
+): string {
+  const k = rawCategory.toLocaleLowerCase('tr-TR').trim()
+  if (role === 'finance_income') {
+    if (/(komisyon|prim|kasko|trafik|saglik|acente)/i.test(k)) return 'komisyon_prim'
+    if (/(kapora|on_odeme|avans)/i.test(k)) return 'on_odeme_kapora'
+    if (/(paket|sozlesme|abonelik)/i.test(k)) return 'abonelik_paket'
+    if (/(urun|satis|mal)/i.test(k) && !/(hizmet)/i.test(k)) return 'urun_satis'
+    if (/(diger)/i.test(k)) return 'diger_gelir'
+    return 'hizmet_geliri'
+  }
+  if (/(stok|malzeme|urun|hammadde)/i.test(k)) return 'stok_malzeme'
+  if (/(bakim|onarim|servis)/i.test(k)) return 'bakim_onarim'
+  if (/(kira|aidat|fatura|ofis_kira|sabit)/i.test(k)) return 'kira_fatura'
+  if (/(pazarlama|ilan|reklam|afis|portal)/i.test(k)) return 'pazarlama'
+  if (/(yazilim|lisans|abonelik)/i.test(k)) return 'yazilim_abonelik'
+  if (/(kargo|lojistik|ulasim)/i.test(k)) return 'lojistik_ulasim'
+  if (/(personel|maas|sgk)/i.test(k)) return 'personel'
+  if (/(vergi|resmi|harc)/i.test(k)) return 'vergi_resmi'
+  if (/(iade|mahsup)/i.test(k)) return 'iade_mahsup'
+  return 'diger_gider'
+}
 
 export const STANDARD_MAINTENANCE_STATUS_OPTIONS: SelectOptionItem[] = [
   { id: 'planlandi', label: 'Planlandı', color: '#0284c7' },
@@ -2993,72 +4107,172 @@ export async function seedSectorFinanceAndStockTables(spec: SectorFinanceStockSe
     }
   }
 
-  // 4) Finance Income / Collections Table
+  // 4) Finance Income / Collections Table (Canonical, Universal, Pre-Accounting Ready)
   if (includeFinance && spec.income) {
-    const inc = await createDynamicTable({
-      name: spec.income.tableName,
-      icon: 'credit-card',
-      color: '#15803d',
-      origin: 'template',
-      canvasX: baseX,
-      canvasY: baseY,
-      initialColumns: [
-        { name: 'Tahsilat / İşlem Başlığı', fieldType: 'text', isPrimaryTitle: true, isRequired: true, width: 235 },
-        { name: 'Tutar (₺)', fieldType: 'currency', width: 150, config: { currencySymbol: '₺' } },
-        { name: 'İşlem Tarihi', fieldType: 'date', width: 145 },
-        { name: 'Vade Tarihi', fieldType: 'date', width: 145 },
-        { name: 'Tahsilat Durumu', fieldType: 'select', width: 155, config: { options: STANDARD_PAYMENT_STATUS_OPTIONS } },
-        { name: 'Ödeme Yöntemi', fieldType: 'select', width: 155, config: { options: STANDARD_PAYMENT_METHOD_OPTIONS } },
-        { name: 'Gelir Kalemi', fieldType: 'select', width: 175, config: { options: spec.income.categories } },
-        { name: 'Açıklama / Not', fieldType: 'text', width: 225 },
-      ],
-    })
+    const clinicId = requireClinicId()
+    const existingIncCfg = await db
+      .select()
+      .from(dynamicModuleConfigs)
+      .where(
+        and(
+          eq(dynamicModuleConfigs.clinicId, clinicId),
+          eq(dynamicModuleConfigs.moduleRole, 'finance_income'),
+          eq(dynamicModuleConfigs.enabled, true)
+        )
+      )
+      .limit(1)
 
+    let incTableId: string
+    let incColsByKey: Partial<Record<keyof DynamicModuleMapping | 'primaryTitle', string>> = {}
     let personRelColId: string | null = null
     let serviceRelColId: string | null = null
 
-    if (spec.personTable) {
-      const relP = await createDynamicRelation({
-        sourceTableId: inc.id,
-        targetTableId: spec.personTable.id,
-        sourceColumnName: spec.personTable.relationLabel,
-        inverseColumnName: spec.personTable.inverseLabel,
-        createInverseColumn: true,
-        cardinality: 'many_to_many',
+    if (existingIncCfg[0]) {
+      incTableId = existingIncCfg[0].tableId
+      const existingCols = await db
+        .select()
+        .from(dynamicColumns)
+        .where(and(eq(dynamicColumns.clinicId, clinicId), eq(dynamicColumns.tableId, incTableId)))
+      const validColIds = new Set(existingCols.map((c) => c.id))
+      const inferred = inferModuleMappingForTable('finance_income', existingCols)
+      const mergedMap: DynamicModuleMapping = mergeFinanceMappingPreservingCore(
+        inferred,
+        (existingIncCfg[0].mapping ?? {}) as Record<string, unknown>,
+        validColIds
+      )
+      const specs = getCanonicalFinanceColumnSpecs('finance_income')
+      let mappingTouched = false
+      for (const sp of specs) {
+        if (sp.mappingKey === 'primaryTitle') continue
+        if (mergedMap[sp.mappingKey]) continue
+        const byName = existingCols.find(
+          (c) => c.name.toLocaleLowerCase('tr-TR') === sp.column.name.toLocaleLowerCase('tr-TR')
+        )
+        if (byName) {
+          ;(mergedMap as Record<string, string | null>)[sp.mappingKey] = byName.id
+          mappingTouched = true
+          continue
+        }
+        const createdCol = await createDynamicColumn(incTableId, {
+          name: sp.column.name,
+          fieldType: sp.column.fieldType,
+          isPrimaryTitle: false,
+          isRequired: false,
+          showInTable: sp.column.showInTable ?? false,
+          width: sp.column.width,
+          config: sp.column.config,
+        })
+        if (createdCol?.id) {
+          ;(mergedMap as Record<string, string | null>)[sp.mappingKey] = createdCol.id
+          mappingTouched = true
+        }
+      }
+      if (!mergedMap.personRelationColumnId && spec.personTable) {
+        const relP = await createDynamicRelation({
+          sourceTableId: incTableId,
+          targetTableId: spec.personTable.id,
+          sourceColumnName: spec.personTable.relationLabel,
+          inverseColumnName: spec.personTable.inverseLabel,
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        if (relP?.sourceColumnId) {
+          mergedMap.personRelationColumnId = relP.sourceColumnId
+          mappingTouched = true
+        }
+      }
+      if (!mergedMap.serviceRelationColumnId && spec.serviceTable) {
+        const relS = await createDynamicRelation({
+          sourceTableId: incTableId,
+          targetTableId: spec.serviceTable.id,
+          sourceColumnName: spec.serviceTable.relationLabel,
+          inverseColumnName: spec.serviceTable.inverseLabel,
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        if (relS?.sourceColumnId) {
+          mergedMap.serviceRelationColumnId = relS.sourceColumnId
+          mappingTouched = true
+        }
+      }
+      if (mappingTouched) {
+        await upsertModuleConfig({
+          tableId: incTableId,
+          moduleRole: 'finance_income',
+          enabled: true,
+          mapping: mergedMap,
+          allowSystemFinanceBinding: true,
+        })
+      }
+      incColsByKey = {
+        primaryTitle: existingCols.find((c) => c.isPrimaryTitle && c.fieldType !== 'relation')?.id,
+        ...mergedMap,
+      } as Partial<Record<keyof DynamicModuleMapping | 'primaryTitle', string>>
+      personRelColId = mergedMap.personRelationColumnId ?? null
+      serviceRelColId = mergedMap.serviceRelationColumnId ?? null
+    } else {
+      const specs = getCanonicalFinanceColumnSpecs('finance_income')
+      const inc = await createDynamicTable({
+        name: CANONICAL_FINANCE_TABLE_NAMES.finance_income,
+        description: CANONICAL_FINANCE_TABLE_DESCRIPTIONS.finance_income,
+        icon: 'credit-card',
+        color: '#15803d',
+        origin: 'system',
+        canvasX: baseX,
+        canvasY: baseY,
+        initialColumns: specs.map((sp) => sp.column),
       })
-      personRelColId = relP?.sourceColumnId ?? null
-    }
-
-    if (spec.serviceTable) {
-      const relS = await createDynamicRelation({
-        sourceTableId: inc.id,
-        targetTableId: spec.serviceTable.id,
-        sourceColumnName: spec.serviceTable.relationLabel,
-        inverseColumnName: spec.serviceTable.inverseLabel,
-        createInverseColumn: true,
-        cardinality: 'many_to_many',
+      incTableId = inc.id
+      specs.forEach((sp, i) => {
+        const colId = inc.columns[i]?.id
+        if (colId) incColsByKey[sp.mappingKey] = colId
       })
-      serviceRelColId = relS?.sourceColumnId ?? null
-    }
 
-    await upsertModuleConfig({
-      tableId: inc.id,
-      moduleRole: 'finance_income',
-      enabled: true,
-      mapping: {
-        amountColumnId: inc.columns[1]?.id ?? null,
-        dateColumnId: inc.columns[2]?.id ?? null,
-        dueDateColumnId: inc.columns[3]?.id ?? null,
-        statusColumnId: inc.columns[4]?.id ?? null,
-        methodColumnId: inc.columns[5]?.id ?? null,
-        categoryColumnId: inc.columns[6]?.id ?? null,
-        notesColumnId: inc.columns[7]?.id ?? null,
+      if (spec.personTable) {
+        const relP = await createDynamicRelation({
+          sourceTableId: inc.id,
+          targetTableId: spec.personTable.id,
+          sourceColumnName: spec.personTable.relationLabel,
+          inverseColumnName: spec.personTable.inverseLabel,
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        personRelColId = relP?.sourceColumnId ?? null
+      }
+
+      if (spec.serviceTable) {
+        const relS = await createDynamicRelation({
+          sourceTableId: inc.id,
+          targetTableId: spec.serviceTable.id,
+          sourceColumnName: spec.serviceTable.relationLabel,
+          inverseColumnName: spec.serviceTable.inverseLabel,
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        serviceRelColId = relS?.sourceColumnId ?? null
+      }
+
+      const mappingPayload: DynamicModuleMapping = {
         personRelationColumnId: personRelColId,
         serviceRelationColumnId: serviceRelColId,
-      },
-    })
+      }
+      for (const sp of specs) {
+        if (sp.mappingKey !== 'primaryTitle' && incColsByKey[sp.mappingKey]) {
+          ;(mappingPayload as Record<string, string | null>)[sp.mappingKey] =
+            incColsByKey[sp.mappingKey] ?? null
+        }
+      }
 
-    const iTitle = inc.columns[0]?.id
+      await upsertModuleConfig({
+        tableId: inc.id,
+        moduleRole: 'finance_income',
+        enabled: true,
+        mapping: mappingPayload,
+        allowSystemFinanceBinding: true,
+      })
+    }
+
+    const iTitle = incColsByKey.primaryTitle
     if (iTitle) {
       for (const s of spec.income.samples) {
         const relPayload: Record<string, string[]> = {}
@@ -3069,18 +4283,23 @@ export async function seedSectorFinanceAndStockTables(spec: SectorFinanceStockSe
         if (personRelColId && pRowId) relPayload[personRelColId] = [pRowId]
         if (serviceRelColId && sRowId) relPayload[serviceRelColId] = [sRowId]
 
-        await createDynamicRow(inc.id, {
+        const universalCat = mapLegacySampleCategoryToUniversal('finance_income', s.category)
+        await createDynamicRow(incTableId, {
           values: {
             [iTitle]: s.title,
-            ...(inc.columns[1]?.id ? { [inc.columns[1].id]: s.amount } : {}),
-            ...(inc.columns[2]?.id ? { [inc.columns[2].id]: offsetDateIso(s.daysOffset) } : {}),
-            ...(inc.columns[3]?.id && s.dueDaysOffset !== undefined
-              ? { [inc.columns[3].id]: offsetDateIso(s.dueDaysOffset) }
+            ...(incColsByKey.amountColumnId ? { [incColsByKey.amountColumnId]: s.amount } : {}),
+            ...(incColsByKey.vatRateColumnId ? { [incColsByKey.vatRateColumnId]: '20' } : {}),
+            ...(incColsByKey.dateColumnId ? { [incColsByKey.dateColumnId]: offsetDateIso(s.daysOffset) } : {}),
+            ...(incColsByKey.dueDateColumnId && s.dueDaysOffset !== undefined
+              ? { [incColsByKey.dueDateColumnId]: offsetDateIso(s.dueDaysOffset) }
               : {}),
-            ...(inc.columns[4]?.id ? { [inc.columns[4].id]: s.status } : {}),
-            ...(inc.columns[5]?.id ? { [inc.columns[5].id]: s.method } : {}),
-            ...(inc.columns[6]?.id ? { [inc.columns[6].id]: s.category } : {}),
-            ...(inc.columns[7]?.id && s.notes ? { [inc.columns[7].id]: s.notes } : {}),
+            ...(incColsByKey.statusColumnId ? { [incColsByKey.statusColumnId]: s.status } : {}),
+            ...(incColsByKey.methodColumnId ? { [incColsByKey.methodColumnId]: s.method } : {}),
+            ...(incColsByKey.categoryColumnId ? { [incColsByKey.categoryColumnId]: universalCat } : {}),
+            ...(incColsByKey.currencyColumnId ? { [incColsByKey.currencyColumnId]: 'TRY' } : {}),
+            ...(incColsByKey.exchangeRateColumnId ? { [incColsByKey.exchangeRateColumnId]: 1 } : {}),
+            ...(incColsByKey.documentTypeColumnId ? { [incColsByKey.documentTypeColumnId]: 'earsiv' } : {}),
+            ...(incColsByKey.notesColumnId && s.notes ? { [incColsByKey.notesColumnId]: s.notes } : {}),
           },
           relations: relPayload,
         })
@@ -3088,69 +4307,161 @@ export async function seedSectorFinanceAndStockTables(spec: SectorFinanceStockSe
     }
   }
 
-  // 5) Finance Expense Table
+  // 5) Finance Expense Table (Canonical, Universal, Pre-Accounting Ready)
   if (includeFinance && spec.expense) {
-    const exp = await createDynamicTable({
-      name: spec.expense.tableName,
-      icon: 'trending-down',
-      color: '#2563eb',
-      origin: 'template',
-      canvasX: baseX + 430,
-      canvasY: baseY,
-      initialColumns: [
-        { name: 'Gider Kalemi / Açıklama', fieldType: 'text', isPrimaryTitle: true, isRequired: true, width: 235 },
-        { name: 'Kategori', fieldType: 'select', width: 175, config: { options: spec.expense.categories } },
-        { name: 'Adet', fieldType: 'number', width: 110 },
-        { name: 'Birim Tutar (₺)', fieldType: 'currency', width: 145, config: { currencySymbol: '₺' } },
-        { name: 'Toplam Tutar (₺)', fieldType: 'currency', width: 155, config: { currencySymbol: '₺' } },
-        { name: 'Tarih', fieldType: 'date', width: 145 },
-        { name: 'Ödeme Yöntemi', fieldType: 'select', width: 155, config: { options: STANDARD_PAYMENT_METHOD_OPTIONS } },
-        { name: 'Not / Belge No', fieldType: 'text', width: 220 },
-      ],
-    })
+    const clinicId = requireClinicId()
+    const existingExpCfg = await db
+      .select()
+      .from(dynamicModuleConfigs)
+      .where(
+        and(
+          eq(dynamicModuleConfigs.clinicId, clinicId),
+          eq(dynamicModuleConfigs.moduleRole, 'finance_expense'),
+          eq(dynamicModuleConfigs.enabled, true)
+        )
+      )
+      .limit(1)
 
+    let expTableId: string
+    let expColsByKey: Partial<Record<keyof DynamicModuleMapping | 'primaryTitle', string>> = {}
     let expItemRelColId: string | null = null
-    if (inventoryTableId) {
-      const relExpItem = await createDynamicRelation({
-        sourceTableId: exp.id,
-        targetTableId: inventoryTableId,
-        sourceColumnName: 'İlgili Stok / Envanter',
-        inverseColumnName: 'Alım & Gider Kayıtları',
-        createInverseColumn: true,
-        cardinality: 'many_to_many',
+
+    if (existingExpCfg[0]) {
+      expTableId = existingExpCfg[0].tableId
+      const existingCols = await db
+        .select()
+        .from(dynamicColumns)
+        .where(and(eq(dynamicColumns.clinicId, clinicId), eq(dynamicColumns.tableId, expTableId)))
+      const validColIds = new Set(existingCols.map((c) => c.id))
+      const inferred = inferModuleMappingForTable('finance_expense', existingCols)
+      const mergedMap: DynamicModuleMapping = mergeFinanceMappingPreservingCore(
+        inferred,
+        (existingExpCfg[0].mapping ?? {}) as Record<string, unknown>,
+        validColIds
+      )
+      const specs = getCanonicalFinanceColumnSpecs('finance_expense')
+      let mappingTouched = false
+      for (const sp of specs) {
+        if (sp.mappingKey === 'primaryTitle') continue
+        if (mergedMap[sp.mappingKey]) continue
+        const byName = existingCols.find(
+          (c) => c.name.toLocaleLowerCase('tr-TR') === sp.column.name.toLocaleLowerCase('tr-TR')
+        )
+        if (byName) {
+          ;(mergedMap as Record<string, string | null>)[sp.mappingKey] = byName.id
+          mappingTouched = true
+          continue
+        }
+        const createdCol = await createDynamicColumn(expTableId, {
+          name: sp.column.name,
+          fieldType: sp.column.fieldType,
+          isPrimaryTitle: false,
+          isRequired: false,
+          showInTable: sp.column.showInTable ?? false,
+          width: sp.column.width,
+          config: sp.column.config,
+        })
+        if (createdCol?.id) {
+          ;(mergedMap as Record<string, string | null>)[sp.mappingKey] = createdCol.id
+          mappingTouched = true
+        }
+      }
+      if (!mergedMap.itemRelationColumnId && inventoryTableId) {
+        const relExpItem = await createDynamicRelation({
+          sourceTableId: expTableId,
+          targetTableId: inventoryTableId,
+          sourceColumnName: 'İlgili Stok / Envanter',
+          inverseColumnName: 'Alım & Gider Kayıtları',
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        if (relExpItem?.sourceColumnId) {
+          mergedMap.itemRelationColumnId = relExpItem.sourceColumnId
+          mappingTouched = true
+        }
+      }
+      if (mappingTouched) {
+        await upsertModuleConfig({
+          tableId: expTableId,
+          moduleRole: 'finance_expense',
+          enabled: true,
+          mapping: mergedMap,
+          allowSystemFinanceBinding: true,
+        })
+      }
+      expColsByKey = {
+        primaryTitle: existingCols.find((c) => c.isPrimaryTitle && c.fieldType !== 'relation')?.id,
+        ...mergedMap,
+      } as Partial<Record<keyof DynamicModuleMapping | 'primaryTitle', string>>
+      expItemRelColId = mergedMap.itemRelationColumnId ?? null
+    } else {
+      const specs = getCanonicalFinanceColumnSpecs('finance_expense')
+      const exp = await createDynamicTable({
+        name: CANONICAL_FINANCE_TABLE_NAMES.finance_expense,
+        description: CANONICAL_FINANCE_TABLE_DESCRIPTIONS.finance_expense,
+        icon: 'trending-down',
+        color: '#2563eb',
+        origin: 'system',
+        canvasX: baseX + 430,
+        canvasY: baseY,
+        initialColumns: specs.map((sp) => sp.column),
       })
-      expItemRelColId = relExpItem?.sourceColumnId ?? null
+      expTableId = exp.id
+      specs.forEach((sp, i) => {
+        const colId = exp.columns[i]?.id
+        if (colId) expColsByKey[sp.mappingKey] = colId
+      })
+
+      if (inventoryTableId) {
+        const relExpItem = await createDynamicRelation({
+          sourceTableId: exp.id,
+          targetTableId: inventoryTableId,
+          sourceColumnName: 'İlgili Stok / Envanter',
+          inverseColumnName: 'Alım & Gider Kayıtları',
+          createInverseColumn: true,
+          cardinality: 'many_to_many',
+        })
+        expItemRelColId = relExpItem?.sourceColumnId ?? null
+      }
+
+      const mappingPayload: DynamicModuleMapping = {
+        itemRelationColumnId: expItemRelColId,
+      }
+      for (const sp of specs) {
+        if (sp.mappingKey !== 'primaryTitle' && expColsByKey[sp.mappingKey]) {
+          ;(mappingPayload as Record<string, string | null>)[sp.mappingKey] =
+            expColsByKey[sp.mappingKey] ?? null
+        }
+      }
+
+      await upsertModuleConfig({
+        tableId: exp.id,
+        moduleRole: 'finance_expense',
+        enabled: true,
+        mapping: mappingPayload,
+        allowSystemFinanceBinding: true,
+      })
     }
 
-    await upsertModuleConfig({
-      tableId: exp.id,
-      moduleRole: 'finance_expense',
-      enabled: true,
-      mapping: {
-        categoryColumnId: exp.columns[1]?.id ?? null,
-        quantityColumnId: exp.columns[2]?.id ?? null,
-        unitCostColumnId: exp.columns[3]?.id ?? null,
-        amountColumnId: exp.columns[4]?.id ?? null,
-        dateColumnId: exp.columns[5]?.id ?? null,
-        methodColumnId: exp.columns[6]?.id ?? null,
-        notesColumnId: exp.columns[7]?.id ?? null,
-        itemRelationColumnId: expItemRelColId,
-      },
-    })
-
-    const eTitle = exp.columns[0]?.id
+    const eTitle = expColsByKey.primaryTitle
     if (eTitle) {
       for (const s of spec.expense.samples) {
-        await createDynamicRow(exp.id, {
+        const universalCat = mapLegacySampleCategoryToUniversal('finance_expense', s.category)
+        await createDynamicRow(expTableId, {
           values: {
             [eTitle]: s.title,
-            ...(exp.columns[1]?.id ? { [exp.columns[1].id]: s.category } : {}),
-            ...(exp.columns[2]?.id ? { [exp.columns[2].id]: s.qty } : {}),
-            ...(exp.columns[3]?.id ? { [exp.columns[3].id]: s.unitCost } : {}),
-            ...(exp.columns[4]?.id ? { [exp.columns[4].id]: s.qty * s.unitCost } : {}),
-            ...(exp.columns[5]?.id ? { [exp.columns[5].id]: offsetDateIso(s.daysOffset) } : {}),
-            ...(exp.columns[6]?.id ? { [exp.columns[6].id]: 'havale_eft' } : {}),
-            ...(exp.columns[7]?.id && s.notes ? { [exp.columns[7].id]: s.notes } : {}),
+            ...(expColsByKey.categoryColumnId ? { [expColsByKey.categoryColumnId]: universalCat } : {}),
+            ...(expColsByKey.quantityColumnId ? { [expColsByKey.quantityColumnId]: s.qty } : {}),
+            ...(expColsByKey.unitCostColumnId ? { [expColsByKey.unitCostColumnId]: s.unitCost } : {}),
+            ...(expColsByKey.amountColumnId ? { [expColsByKey.amountColumnId]: s.qty * s.unitCost } : {}),
+            ...(expColsByKey.vatRateColumnId ? { [expColsByKey.vatRateColumnId]: '20' } : {}),
+            ...(expColsByKey.dateColumnId ? { [expColsByKey.dateColumnId]: offsetDateIso(s.daysOffset) } : {}),
+            ...(expColsByKey.statusColumnId ? { [expColsByKey.statusColumnId]: 'tamamlandi' } : {}),
+            ...(expColsByKey.methodColumnId ? { [expColsByKey.methodColumnId]: 'havale_eft' } : {}),
+            ...(expColsByKey.currencyColumnId ? { [expColsByKey.currencyColumnId]: 'TRY' } : {}),
+            ...(expColsByKey.exchangeRateColumnId ? { [expColsByKey.exchangeRateColumnId]: 1 } : {}),
+            ...(expColsByKey.documentTypeColumnId ? { [expColsByKey.documentTypeColumnId]: 'efatura' } : {}),
+            ...(expColsByKey.notesColumnId && s.notes ? { [expColsByKey.notesColumnId]: s.notes } : {}),
           },
         })
       }
@@ -5371,7 +6682,7 @@ export async function applyStarterBlueprint(blueprint: StarterBlueprintKey) {
   await db
     .update(dynamicTables)
     .set({ origin: 'template' })
-    .where(eq(dynamicTables.clinicId, clinicId))
+    .where(and(eq(dynamicTables.clinicId, clinicId), ne(dynamicTables.origin, 'system')))
   const schema = await getStudioSchema()
   await syncClinicFlowsWithDynamicTables(clinicId, { forceRebuild: true }).catch((err) => {
     console.warn('[applyStarterBlueprint] Akış senkronizasyonu atlandı:', err)

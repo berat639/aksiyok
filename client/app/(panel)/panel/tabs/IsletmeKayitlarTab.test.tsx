@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('../../../admin/components/PaymentsTab', () => ({ default: () => <div>finans-calisma-alani</div> }))
-vi.mock('../../../../lib/auth-context', () => ({ useAuth: () => ({ user: { id: 'admin', role: 'yonetici', clinicId: 'c1' } }) }))
+vi.mock('../../../admin/components/IntegrationsTab', () => ({ default: () => <div>ayarlar-entegrasyon-alani</div> }))
+vi.mock('../../../../lib/auth-context', () => ({ useAuth: () => ({ user: { id: 'admin', role: 'yonetici', clinicId: 'c1' }, refreshUser: vi.fn() }) }))
 vi.mock('react-hot-toast', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 import IsletmeKayitlarTab, { type IsletmeSection, type SectionAccess } from './IsletmeKayitlarTab'
@@ -106,18 +107,25 @@ function mockFetch() {
                     ? { nextQuantity: 4 }
                     : url.startsWith('/api/dynamic-tables/stock/complete-maintenance')
                       ? { computedNextDate: '2027-02-20' }
-                      : {}
+                      : url.startsWith('/api/dynamic-tables/offerings/validate')
+                        ? { approved: true, reason: 'Uygun.' }
+                        : {}
     return { ok: true, json: async () => body } as Response
   })
 }
 
-function Harness({ access, onLocked = () => {} }: { access: Record<IsletmeSection, SectionAccess>; onLocked?: (t: string) => void }) {
+function Harness({ access, onLocked = () => {} }: { access: Partial<Record<IsletmeSection, SectionAccess>>; onLocked?: (t: string) => void }) {
   const [section, setSection] = useState<IsletmeSection>('genel')
   return <IsletmeKayitlarTab section={section} onSectionChange={setSection} access={access} onLocked={onLocked} scope="c1" />
 }
 
-const allOpen: Record<IsletmeSection, SectionAccess> = {
-  genel: { visible: true }, urunler: { visible: true }, personel: { visible: true }, finans: { visible: true }, stok: { visible: true },
+const allOpen: Partial<Record<IsletmeSection, SectionAccess>> = {
+  genel: { visible: true },
+  urunler: { visible: true },
+  personel: { visible: true },
+  finans: { visible: true },
+  stok: { visible: true },
+  ayarlar: { visible: true },
 }
 
 let container: HTMLDivElement
@@ -147,20 +155,30 @@ afterEach(() => {
 })
 
 describe('İşletme ve Kayıtlar', () => {
-  it('soldaki 5 bölüm sekmesi ve varsayılan Genel İşletme Bilgileri açılır', async () => {
+  it('soldaki bölüm sekmeleri (Ayarlar ve Entegrasyonlar dahil) ve varsayılan Genel İşletme Bilgileri açılır', async () => {
     await act(async () => root.render(<Harness access={allOpen} />))
     await flush()
     const tabs = Array.from(container.querySelectorAll('[role="tab"]')).map((t) => t.textContent)
-    expect(tabs.slice(0, 5).map((t) => t?.replace(/%\d+/, ''))).toEqual([
-      '1.Genel İşletme Bilgileri', '2.Ürün ve Hizmet Bilgileri', '3.Personel ve Mesai', '4.Finans ve Raporlama', '5.Stok ve Bakım',
+    expect(tabs.slice(0, 6).map((t) => t?.replace(/%\d+/, ''))).toEqual([
+      '1.Genel İşletme Bilgileri',
+      '2.Ürün ve Hizmet Bilgileri',
+      '3.Personel ve Mesai',
+      '4.Finans ve Raporlama',
+      '5.Stok ve Bakım',
+      '6.Ayarlar ve Entegrasyonlar',
     ])
     expect(container.querySelector('#isletme-adi')).toBeTruthy()
     expect(container.querySelector('#isletme-adres-tarifi')).toBeTruthy()
     expect(container.textContent).toContain('İşletme konumu')
     expect(container.textContent).toContain('Cmt')
+    expect(container.querySelector('[aria-label="İşletme logosu yükle"]')).toBeTruthy()
+
+    await click(container.querySelectorAll('[role="tab"]')[5])
+    await flush()
+    expect(container.textContent).toContain('ayarlar-entegrasyon-alani')
   })
 
-  it('kategori alanı Google gibi popüler grup → alt kategori ve arama ile çalışır', async () => {
+  it('kategori alanı Google gibi tek kategori seçer ve arama ile değiştirilebilir', async () => {
     await act(async () => root.render(<Harness access={allOpen} />))
     await flush()
     const input = container.querySelector<HTMLInputElement>('input[role="combobox"]')!
@@ -168,11 +186,13 @@ describe('İşletme ve Kayıtlar', () => {
     expect(container.textContent).toContain('Popüler kategorileri keşfedin')
     await click(byText('Hizmetler'))
     await click(byText('Çilingir'))
-    expect(container.textContent).toContain('Çilingir · Birincil')
+    expect(container.textContent).toContain('Çilingir')
+    expect(container.textContent).not.toContain('· Birincil')
 
     await type(container.querySelector<HTMLInputElement>('input[role="combobox"]')!, 'kuaf')
     await click(Array.from(container.querySelectorAll('[role="option"]')).find((o) => o.textContent?.startsWith('Kuaför')))
     expect(container.textContent).toContain('Kuaför')
+    expect(container.textContent).not.toContain('Çilingir')
   })
 
   it('eksik alanlarla kaydetmeye izin vermez; ad ve kategori hataları gösterilir', async () => {
@@ -196,17 +216,23 @@ describe('İşletme ve Kayıtlar', () => {
     expect(container.textContent).toContain('Pazartesi')
   })
 
-  it('ürün ve hizmet başlık + içerik olarak eklenir', async () => {
+  it('ürün ve hizmet başlık + içerik olarak eklenir; tekrarlanan AI kutuları yoktur ve boşken sektör şablonu butonu görünür', async () => {
     await act(async () => root.render(<Harness access={allOpen} />))
     await flush()
     await click(container.querySelectorAll('[role="tab"]')[1])
+    expect(container.textContent).not.toContain('AI ile Örnek Ekle')
+    expect(container.textContent).not.toContain('AI ile Şablon Ekle')
+    expect(container.textContent).toContain('Sektöre Uygun Şablon Ekle')
+
     await type(container.querySelector<HTMLInputElement>('#teklif-baslik')!, 'Saç kesimi')
     await type(container.querySelector<HTMLTextAreaElement>('#teklif-icerik')!, '30 dakika, 400 ₺')
     await click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '+ Süre & fiyat'))
     expect(container.querySelector<HTMLTextAreaElement>('#teklif-icerik')!.value).toContain('Ücret:')
     await click(container.querySelector('button[type="submit"]'))
+    await flush()
     expect(container.querySelector('h4')?.textContent).toBe('Saç kesimi')
     expect(window.localStorage.getItem('axamaz.business-offerings.v1:c1')).toContain('Saç kesimi')
+    expect(container.textContent).not.toContain('Sektöre Uygun Şablon Ekle')
 
     await click(container.querySelector('[aria-label="Saç kesimi kopyala"]'))
     expect(container.textContent).toContain('Saç kesimi (Kopya)')
@@ -215,19 +241,18 @@ describe('İşletme ve Kayıtlar', () => {
     expect(container.textContent).toContain('Eşleşen kayıt bulunamadı')
   })
 
-  it('personel ve mesai: işletme mesaisi yok, çalışan mesaisi ve yetkiler sade görünür', async () => {
+  it('personel ve mesai: tek tabloda mesai ve yetkiler birlikte düzenlenir', async () => {
     await act(async () => root.render(<Harness access={allOpen} />))
     await flush()
     await click(container.querySelectorAll('[role="tab"]')[2])
     await flush()
-    expect(container.textContent).toContain('Çalışanlara göre mesai')
+    expect(container.textContent).toContain('Personeller ve Mesai')
     expect(container.textContent).not.toContain('İşletme genel mesai')
     expect(container.textContent).toContain('Can Öz')
     expect(container.textContent).toContain('1 çalışan takvimde görünüyor')
-    await click(container.querySelectorAll('[aria-expanded="false"]')[0])
+    await click(container.querySelector('[aria-label="Can Öz mesaisini düzenle"]'))
     expect(container.querySelector('[aria-label="Çalışma günleri"]')).toBeTruthy()
 
-    await click(Array.from(container.querySelectorAll('[role="tab"]')).find((t) => t.textContent?.startsWith('Personeller')))
     await click(container.querySelector('[aria-label="Can Öz yetkilerini düzenle"]'))
     expect(container.querySelector('[aria-label="Can Öz — Takvimde görünsün"]')).toBeTruthy()
     expect(container.querySelector('[aria-label="Can Öz — Finans ve Raporlama"]')).toBeTruthy()
@@ -289,5 +314,175 @@ describe('İşletme ve Kayıtlar', () => {
 
     await click(Array.from(container.querySelectorAll('[role="tab"]')).find((t) => t.textContent?.startsWith('Geçmiş')))
     expect(container.textContent).toContain('Elif Yılmaz')
+  })
+
+  it('İşletme Özet: Analiz Kartı Ekle, sabit Paket ve Abonelik kartı gösterir; Yeni hareket/trend rozetleri göstermez', async () => {
+    window.localStorage.setItem(
+      'axamaz.business-profile.v1:c1',
+      JSON.stringify({
+        name: 'Örnek Emlak Ofisi',
+        primaryCategory: 'Emlak Ofisi',
+        extraCategories: [],
+        location: { lat: 39.91, lng: 32.86, address: 'Çankaya, Ankara' },
+        addressDirections: 'Kat 2',
+        hours: Array.from({ length: 7 }, () => ({ open: true, ranges: [{ start: '09:00', end: '18:00' }] })),
+        extraBusinesses: [],
+      }),
+    )
+
+    const kpiBootstrap = {
+      sources: [
+        { id: 'builtin:finance', kind: 'builtin', name: 'Finans', group: 'İşletme Modülleri', rowCount: 12, columns: [] },
+      ],
+      presets: [],
+      cards: [
+        {
+          id: 'c-1',
+          title: 'Aylık Ciro',
+          sourceId: 'builtin:finance',
+          kind: 'time',
+          aggregation: 'sum',
+          dateRange: '30d',
+          chart: 'number',
+          icon: 'wallet',
+          chip: 'brand',
+        },
+      ],
+      metrics: {
+        'c-1': {
+          id: 'c-1',
+          title: 'Aylık Ciro',
+          tooltip: 'Toplam gelir',
+          sourceName: 'Finans',
+          icon: 'wallet',
+          chip: 'brand',
+          unit: { suffix: ' ₺', decimals: 0 },
+          goodDirection: 'up',
+          previous: 0,
+          compareLabel: 'önceki dönem',
+          upWord: 'artış',
+          downWord: 'düşüş',
+          defaultChart: 'number',
+          supports: ['number'],
+          kind: 'time',
+          headline: 'sum',
+          points: [{ label: 'Bu Ay', value: 45000 }],
+        },
+      },
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const body = url.startsWith('/api/dynamic-tables/kpi/bootstrap')
+          ? kpiBootstrap
+          : url.startsWith('/api/billing/subscription')
+            ? {
+                entitlements: {
+                  planId: 'demo',
+                  planName: 'Demo Paket',
+                  planStatus: 'trial',
+                  maxUsers: 2,
+                  activeUsersCount: 1,
+                  trialDaysRemaining: 5,
+                },
+              }
+            : url.startsWith('/api/admin/users')
+              ? users
+              : url.startsWith('/api/admin/settings/branding')
+                ? { logoUrl: '' }
+                : {}
+        return { ok: true, json: async () => body } as Response
+      }),
+    )
+
+    function OzetHarness() {
+      const [section, setSection] = useState<IsletmeSection>('ozet')
+      return <IsletmeKayitlarTab section={section} onSectionChange={setSection} access={{ ozet: { visible: true }, ...allOpen }} onLocked={() => {}} scope="c1" />
+    }
+
+    await act(async () => root.render(<OzetHarness />))
+    await flush()
+
+    const text = container.textContent || ''
+    expect(text).toContain('Analiz Kartı Ekle')
+    expect(text).not.toContain('KPI Kartı Ekle')
+    expect(text).toContain('Paket ve Abonelik Bilgileri')
+    expect(text).toContain('Aylık Ciro')
+    expect(text).toContain('45.000 ₺')
+    expect(text).not.toContain('Yeni hareket')
+    expect(text).not.toContain('önceki dönem')
+    expect(text).not.toContain('artış')
+  })
+
+  it('Ürün ve Hizmet: sektör dışı kayıt tek sade uyarı ile reddedilir; boş katalogda şablon ekleme çalışır', async () => {
+    window.localStorage.setItem(
+      'axamaz.business-profile.v1:c1',
+      JSON.stringify({
+        name: 'Örnek Emlak Ofisi',
+        primaryCategory: 'Emlak Ofisi',
+        extraCategories: [],
+        location: { lat: 39.91, lng: 32.86, address: 'Çankaya, Ankara' },
+        addressDirections: '',
+        hours: Array.from({ length: 7 }, () => ({ open: true, ranges: [{ start: '09:00', end: '18:00' }] })),
+        extraBusinesses: [],
+      }),
+    )
+
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (url.startsWith('/api/dynamic-tables/offerings/validate')) {
+        return {
+          ok: true,
+          json: async () => ({
+            approved: false,
+            reason: 'Bu kayıt seçili Emlak Ofisi kategorinizle uyumlu görünmüyor.',
+          }),
+        } as Response
+      }
+      if (url.startsWith('/api/dynamic-tables/offerings/ai-generate')) {
+        return {
+          ok: true,
+          json: async () => ({
+            reply: '3 şablon eklendi.',
+            items: [
+              { kind: 'hizmet', title: 'Konut Kiralama Danışmanlığı', content: 'Süreç yönetimi ve kira sözleşmesi.' },
+              { kind: 'hizmet', title: 'Gayrimenkul Ekspertiz', content: 'Bölgesel piyasa değerleme raporu.' },
+            ],
+          }),
+        } as Response
+      }
+      return { ok: true, json: async () => ({}) } as Response
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+
+    function UrunHarness() {
+      const [section, setSection] = useState<IsletmeSection>('urunler')
+      return <IsletmeKayitlarTab section={section} onSectionChange={setSection} access={{ ozet: { visible: true }, ...allOpen }} onLocked={() => {}} scope="c1" />
+    }
+
+    await act(async () => root.render(<UrunHarness />))
+    await flush()
+
+    await type(container.querySelector<HTMLInputElement>('#teklif-baslik')!, 'Alakasız ürün')
+    await type(container.querySelector<HTMLTextAreaElement>('#teklif-icerik')!, 'Sektör dışı test')
+    await click(container.querySelector('button[type="submit"]'))
+    await flush()
+
+    const alerts = container.querySelectorAll('[role="alert"]')
+    expect(alerts.length).toBe(1)
+    expect(alerts[0].textContent).toContain('Emlak Ofisi kategorinizle uyumlu görünmüyor')
+    expect(container.textContent).not.toContain('AI önerisini uygula')
+    expect(container.querySelectorAll('h4').length).toBe(0)
+
+    const tplBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Emlak Ofisi İçin Şablon Ekle'),
+    )
+    expect(tplBtn).toBeTruthy()
+    await click(tplBtn)
+    await flush()
+
+    expect(container.textContent).toContain('Konut Kiralama Danışmanlığı')
+    expect(container.textContent).toContain('Gayrimenkul Ekspertiz')
+    expect(container.textContent).not.toContain('Emlak Ofisi İçin Şablon Ekle')
   })
 })

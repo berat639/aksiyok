@@ -3,9 +3,15 @@
 import { useState } from 'react'
 import { SlidersHorizontal } from 'lucide-react'
 import { WEEK_DAYS, WEEK_DAYS_SHORT, validateDay, type WeeklyHours } from '@/lib/business-profile'
-import depth from '@/styles/clinic-depth.module.css'
 import TimeSelect from './TimeSelect'
 import s from './isletme.module.css'
+
+const HOUR_PRESETS: { label: string; start: string; end: string }[] = [
+  { label: '09:00–18:00', start: '09:00', end: '18:00' },
+  { label: '08:30–19:30', start: '08:30', end: '19:30' },
+  { label: '10:00–22:00', start: '10:00', end: '22:00' },
+  { label: '24 Saat', start: '00:00', end: '24:00' },
+]
 
 const hasDifferentDayHours = (hours: WeeklyHours) => {
   const open = hours.filter((d) => d.open)
@@ -16,8 +22,8 @@ const hasDifferentDayHours = (hours: WeeklyHours) => {
 }
 
 /**
- * Sade çalışma saatleri seçicisi (Mesai Planı ile aynı yapı):
- * üstte Pzt–Paz gün düğmeleri ve Açılış–Kapanış aralığı; istenirse günlere özel saat açılır.
+ * Verimli ve kompakt çalışma saatleri seçicisi:
+ * Pzt–Paz gün düğmeleri + satır içi dijital/çark saat seçici + tek tık hazır saat aralıkları.
  */
 export default function WorkingHoursEditor({ value, onChange }: { value: WeeklyHours; onChange: (next: WeeklyHours) => void }) {
   const [perDay, setPerDay] = useState(() => hasDifferentDayHours(value))
@@ -92,20 +98,38 @@ export default function WorkingHoursEditor({ value, onChange }: { value: WeeklyH
         </div>
       </div>
 
-      {openIndices.length > 1 && (
-        <div className={s.row} style={{ justifyContent: 'flex-start' }}>
+      <div className={s.hoursPresetBar}>
+        <div className={s.row} style={{ gap: 5 }}>
+          {HOUR_PRESETS.map((preset) => {
+            const active = !perDay && common.start === preset.start && common.end === preset.end
+            return (
+              <button
+                key={preset.label}
+                type="button"
+                className={active ? s.timeQuickChipOn : s.timeQuickChip}
+                onClick={() => applyCommonRange(preset.start, preset.end)}
+              >
+                {preset.label}
+              </button>
+            )
+          })}
+        </div>
+
+        {openIndices.length > 1 && (
           <button
             type="button"
-            className={perDay ? depth.btnPale : depth.btn}
-            style={{ minHeight: 28, padding: '3px 10px', fontSize: '0.74rem' }}
+            className={perDay ? s.genelCtlBtnOn : s.genelCtlBtn}
+            style={{ minHeight: 28, padding: '3px 10px', fontSize: '11px' }}
             aria-expanded={perDay}
             onClick={() => setPerDay((v) => !v)}
           >
-            <SlidersHorizontal size={12} />
-            {perDay ? 'Günlere özel saatleri gizle' : 'Günlere özel saat belirle'}
+            <SlidersHorizontal size={11} color={perDay ? '#ffffff' : undefined} />
+            <span style={perDay ? { color: '#ffffff' } : undefined}>
+              {perDay ? 'Günlere özel saatleri gizle' : 'Günlere özel saat belirle'}
+            </span>
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {perDay && openIndices.length > 0 && (
         <div className={s.perDayList}>

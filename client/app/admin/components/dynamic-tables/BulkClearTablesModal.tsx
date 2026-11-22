@@ -6,6 +6,7 @@ import { toast } from 'react-hot-toast'
 import { useBackdropDismiss } from '@/hooks/useBackdropDismiss'
 import depth from '@/styles/clinic-depth.module.css'
 import {
+  isFinanceModuleRole,
   MODULE_ROLE_META,
   TABLE_ORIGIN_META,
   type DynamicAppointmentConfigDef,
@@ -44,12 +45,26 @@ export default function BulkClearTablesModal({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [clearing, setClearing] = useState(false)
 
+  const protectedFinanceIds = useMemo(() => {
+    const set = new Set<string>()
+    for (const cfg of moduleConfigs) {
+      if (cfg.enabled && isFinanceModuleRole(cfg.moduleRole)) set.add(cfg.tableId)
+    }
+    return set
+  }, [moduleConfigs])
+
   const manualTableIds = useMemo(
-    () => tables.filter((t) => resolveTableOrigin(t) === 'manual').map((t) => t.id),
-    [tables]
+    () =>
+      tables
+        .filter((t) => resolveTableOrigin(t) === 'manual' && !protectedFinanceIds.has(t.id))
+        .map((t) => t.id),
+    [tables, protectedFinanceIds]
   )
 
-  const allTableIds = useMemo(() => tables.map((t) => t.id), [tables])
+  const allTableIds = useMemo(
+    () => tables.filter((t) => !protectedFinanceIds.has(t.id)).map((t) => t.id),
+    [tables, protectedFinanceIds]
+  )
 
   // Smart default: when both manual and template/AI/system tables exist, pre-select only manual tables
   useEffect(() => {
@@ -94,7 +109,7 @@ export default function BulkClearTablesModal({
   }, [moduleConfigs])
 
   const selectedCount = selectedIds.size
-  const isAllSelected = tables.length > 0 && selectedCount === tables.length
+  const isAllSelected = allTableIds.length > 0 && selectedCount === allTableIds.length
   const isExactManualSelected =
     manualTableIds.length > 0 &&
     selectedCount === manualTableIds.length &&
@@ -122,6 +137,7 @@ export default function BulkClearTablesModal({
   if (!isOpen) return null
 
   const toggleTable = (tableId: string) => {
+    if (protectedFinanceIds.has(tableId)) return
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (next.has(tableId)) next.delete(tableId)
@@ -277,12 +293,12 @@ export default function BulkClearTablesModal({
             </button>
             <button
               type="button"
-              disabled={tables.length === 0 || clearing}
+              disabled={allTableIds.length === 0 || clearing}
               onClick={() => setSelectedIds(new Set(allTableIds))}
               className={isAllSelected ? depth.btnPrimary : depth.btn}
               style={{ minHeight: 29, padding: '4px 10px', fontSize: 12 }}
             >
-              <span>Tüm Tablolar ({tables.length})</span>
+              <span>Tüm Tablolar ({allTableIds.length})</span>
             </button>
             <button
               type="button"
@@ -311,7 +327,8 @@ export default function BulkClearTablesModal({
             }}
           >
             {tables.map((table) => {
-              const checked = selectedIds.has(table.id)
+              const isProtected = protectedFinanceIds.has(table.id)
+              const checked = !isProtected && selectedIds.has(table.id)
               const origin = resolveTableOrigin(table)
               const originLabel = TABLE_ORIGIN_META[origin].label
               const apptBadge = apptRoleByTableId.get(table.id)
@@ -327,7 +344,8 @@ export default function BulkClearTablesModal({
                     alignItems: 'center',
                     gap: 10,
                     padding: '8px 10px',
-                    cursor: clearing ? 'not-allowed' : 'pointer',
+                    cursor: clearing || isProtected ? 'not-allowed' : 'pointer',
+                    opacity: isProtected ? 0.72 : 1,
                     borderColor: checked ? 'var(--danger)' : 'var(--input-border)',
                     background: checked ? 'var(--flow-danger-bg)' : 'var(--card-bg)',
                   }}
@@ -335,13 +353,13 @@ export default function BulkClearTablesModal({
                   <input
                     type="checkbox"
                     checked={checked}
-                    disabled={clearing}
+                    disabled={clearing || isProtected}
                     onChange={() => toggleTable(table.id)}
                     style={{
                       width: 16,
                       height: 16,
                       accentColor: '#dc2626',
-                      cursor: clearing ? 'not-allowed' : 'pointer',
+                      cursor: clearing || isProtected ? 'not-allowed' : 'pointer',
                       flexShrink: 0,
                     }}
                   />
@@ -396,6 +414,14 @@ export default function BulkClearTablesModal({
                           style={{ fontSize: 10, padding: '1px 6px' }}
                         >
                           {modBadge}
+                        </span>
+                      )}
+                      {isProtected && (
+                        <span
+                          className={depth.badge}
+                          style={{ fontSize: 10, padding: '1px 6px' }}
+                        >
+                          Korumalı
                         </span>
                       )}
                       <span style={{ fontSize: 11, color: 'var(--foreground-3)' }}>

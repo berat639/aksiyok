@@ -103,8 +103,25 @@ export type DynamicModuleRole =
   | 'stock_movement'
   | 'asset_maintenance'
 
+export function isFinanceModuleRole(
+  role: string | null | undefined
+): role is 'finance_income' | 'finance_expense' {
+  return role === 'finance_income' || role === 'finance_expense'
+}
+
 export interface DynamicModuleMapping {
   amountColumnId?: string | null
+  netAmountColumnId?: string | null
+  vatRateColumnId?: string | null
+  vatAmountColumnId?: string | null
+  currencyColumnId?: string | null
+  exchangeRateColumnId?: string | null
+  documentTypeColumnId?: string | null
+  documentNumberColumnId?: string | null
+  counterpartyNameColumnId?: string | null
+  counterpartyTaxIdColumnId?: string | null
+  accountingCodeColumnId?: string | null
+  accountingSyncStatusColumnId?: string | null
   dateColumnId?: string | null
   dueDateColumnId?: string | null
   statusColumnId?: string | null
@@ -126,6 +143,47 @@ export interface DynamicModuleMapping {
   itemRelationColumnId?: string | null
   actorColumnId?: string | null
   notesColumnId?: string | null
+}
+
+export const CORE_PROTECTED_FINANCE_MAPPING_KEYS: ReadonlyArray<keyof DynamicModuleMapping> = [
+  'amountColumnId',
+  'netAmountColumnId',
+  'vatRateColumnId',
+  'vatAmountColumnId',
+  'currencyColumnId',
+  'exchangeRateColumnId',
+  'documentTypeColumnId',
+  'documentNumberColumnId',
+  'counterpartyNameColumnId',
+  'counterpartyTaxIdColumnId',
+  'accountingCodeColumnId',
+  'accountingSyncStatusColumnId',
+  'dateColumnId',
+  'dueDateColumnId',
+  'statusColumnId',
+  'methodColumnId',
+  'categoryColumnId',
+  'quantityColumnId',
+  'unitCostColumnId',
+  'notesColumnId',
+]
+
+export function getProtectedFinanceColumnIds(
+  table: DynamicTableDef | null | undefined,
+  mapping: DynamicModuleMapping | null | undefined
+): string[] {
+  if (!table) return []
+  const locked = new Set<string>()
+  for (const col of table.columns) {
+    if (col.isPrimaryTitle) locked.add(col.id)
+  }
+  if (mapping) {
+    for (const key of CORE_PROTECTED_FINANCE_MAPPING_KEYS) {
+      const colId = mapping[key]
+      if (typeof colId === 'string' && colId) locked.add(colId)
+    }
+  }
+  return Array.from(locked)
 }
 
 export interface DynamicModuleConfigDef {

@@ -1015,12 +1015,59 @@ export const dynamicModuleConfigs = pgTable('dynamic_module_configs', {
   index('dynamic_module_configs_clinic_role_idx').on(t.clinicId, t.moduleRole, t.enabled),
 ])
 
+export const financeAccountingConnections = pgTable('finance_accounting_connections', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  status: text('status').notNull().default('disconnected'),
+  syncMode: text('sync_mode').notNull().default('manual'),
+  externalCompanyId: text('external_company_id'),
+  credentialsEncrypted: text('credentials_encrypted'),
+  accountMapping: jsonb('account_mapping').notNull().default({}),
+  lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+  lastError: text('last_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('finance_accounting_connections_clinic_provider_unique').on(t.clinicId, t.provider),
+  index('finance_accounting_connections_clinic_status_idx').on(t.clinicId, t.status),
+])
+
+export const financeAccountingSyncRecords = pgTable('finance_accounting_sync_records', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  clinicId: uuid('clinic_id').notNull().references(() => clinics.id, { onDelete: 'cascade' }),
+  rowId: uuid('row_id').notNull().references(() => dynamicRows.id, { onDelete: 'cascade' }),
+  tableId: uuid('table_id').notNull().references(() => dynamicTables.id, { onDelete: 'cascade' }),
+  direction: text('direction').notNull(),
+  provider: text('provider').notNull().default('local'),
+  idempotencyKey: text('idempotency_key').notNull(),
+  externalDocumentId: text('external_document_id'),
+  externalContactId: text('external_contact_id'),
+  externalPaymentId: text('external_payment_id'),
+  externalDocumentNumber: text('external_document_number'),
+  syncStatus: text('sync_status').notNull().default('pending'),
+  payloadHash: text('payload_hash'),
+  canonicalSnapshot: jsonb('canonical_snapshot').notNull().default({}),
+  retryCount: integer('retry_count').notNull().default(0),
+  lastError: text('last_error'),
+  lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex('finance_accounting_sync_clinic_row_provider_unique').on(t.clinicId, t.rowId, t.provider),
+  index('finance_accounting_sync_clinic_status_idx').on(t.clinicId, t.syncStatus, t.updatedAt),
+  index('finance_accounting_sync_external_idx').on(t.clinicId, t.provider, t.externalDocumentId),
+  uniqueIndex('finance_accounting_sync_idempotency_idx').on(t.clinicId, t.provider, t.idempotencyKey),
+])
+
 export type DynamicTable = typeof dynamicTables.$inferSelect
 export type DynamicColumn = typeof dynamicColumns.$inferSelect
 export type DynamicRelation = typeof dynamicRelations.$inferSelect
 export type DynamicRow = typeof dynamicRows.$inferSelect
 export type DynamicAppointmentConfig = typeof dynamicAppointmentConfigs.$inferSelect
 export type DynamicModuleConfig = typeof dynamicModuleConfigs.$inferSelect
+export type FinanceAccountingConnection = typeof financeAccountingConnections.$inferSelect
+export type FinanceAccountingSyncRecord = typeof financeAccountingSyncRecords.$inferSelect
 
 export const flowAiMessages = pgTable('flow_ai_messages', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),

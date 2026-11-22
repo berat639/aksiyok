@@ -53,15 +53,17 @@ import {
   createDynamicTableWithPurpose,
   type TablePurpose,
 } from './tableSetupHelpers'
-import type {
-  DynamicAppointmentConfigDef,
-  DynamicColumnDef,
-  DynamicModuleConfigDef,
-  DynamicModuleRole,
-  DynamicRelationDef,
-  DynamicRowItem,
-  DynamicTableDef,
-  LinkedRowSummary,
+import {
+  getProtectedFinanceColumnIds,
+  isFinanceModuleRole,
+  type DynamicAppointmentConfigDef,
+  type DynamicColumnDef,
+  type DynamicModuleConfigDef,
+  type DynamicModuleRole,
+  type DynamicRelationDef,
+  type DynamicRowItem,
+  type DynamicTableDef,
+  type LinkedRowSummary,
 } from './types'
 
 const gridFeatures = tableFeatures({
@@ -85,6 +87,12 @@ interface DynamicDataGridPanelProps {
   appointmentConfigs: DynamicAppointmentConfigDef[]
   moduleConfigs?: DynamicModuleConfigDef[]
   defaultNewTableModuleRole?: DynamicModuleRole
+  allowCreateTable?: boolean
+  allowDeleteTable?: boolean
+  allowRenameTable?: boolean
+  allowChangeModuleRole?: boolean
+  allowCreateRelatedTable?: boolean
+  lockedColumnIds?: string[]
   externalSearch?: string
   selectedTableId: string | null
   canManageSchema: boolean
@@ -104,6 +112,12 @@ export default function DynamicDataGridPanel({
   appointmentConfigs,
   moduleConfigs = [],
   defaultNewTableModuleRole,
+  allowCreateTable = true,
+  allowDeleteTable = true,
+  allowRenameTable = true,
+  allowChangeModuleRole = true,
+  allowCreateRelatedTable = true,
+  lockedColumnIds,
   externalSearch,
   selectedTableId,
   canManageSchema,
@@ -174,6 +188,21 @@ export default function DynamicDataGridPanel({
         : null,
     [activeTable, moduleConfigs]
   )
+  const isActiveFinanceTable = Boolean(
+    activeModuleConfig?.enabled && isFinanceModuleRole(activeModuleConfig.moduleRole)
+  )
+  const effectiveAllowRename = allowRenameTable && !isActiveFinanceTable
+  const effectiveAllowDelete = allowDeleteTable && !isActiveFinanceTable
+  const effectiveAllowChangeRole = allowChangeModuleRole && !isActiveFinanceTable
+  const effectiveLockedColumnIdSet = useMemo(() => {
+    const ids = new Set<string>(lockedColumnIds || [])
+    if (isActiveFinanceTable && activeTable && activeModuleConfig) {
+      for (const id of getProtectedFinanceColumnIds(activeTable, activeModuleConfig.mapping)) {
+        ids.add(id)
+      }
+    }
+    return ids
+  }, [lockedColumnIds, isActiveFinanceTable, activeTable, activeModuleConfig])
   const appointmentLinked = Boolean(activeApptConfig)
 
   useEffect(() => {
@@ -267,6 +296,10 @@ export default function DynamicDataGridPanel({
 
   const handleSubmitInlineTable = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!allowCreateTable) {
+      toast.error('Bu alanda yeni tablo oluşturulamaz')
+      return
+    }
     const clean = newTableName.trim()
     if (!clean) {
       toast.error('Lütfen liste adını yazınız')
@@ -408,12 +441,13 @@ export default function DynamicDataGridPanel({
           return
         }
         setRows((curr) => curr.map((r) => (r.id === row.id ? updated : r)))
+        onDataMutated()
       } catch {
         toast.error('Hücre güncellenirken hata oluştu')
         setRows((curr) => curr.map((r) => (r.id === row.id ? { ...r, values: prevValues } : r)))
       }
     },
-    []
+    [onDataMutated]
   )
 
   const handleInlineRelationChange = useCallback(
@@ -1003,7 +1037,7 @@ export default function DynamicDataGridPanel({
         <span style={{ fontSize: 13, color: 'var(--pc-muted)', maxWidth: 400 }}>
           Yukarıdaki hazır örnek şablonlardan birini yükleyebilir veya aşağıya ilk tablonuzun adını yazıp başlayabilirsiniz.
         </span>
-        {canManageSchema && (
+        {canManageSchema && allowCreateTable && (
           <form
             onSubmit={handleSubmitInlineTable}
             style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}
@@ -1075,7 +1109,7 @@ export default function DynamicDataGridPanel({
                     ({t.rowCount})
                   </span>
                 </button>
-                {canManageSchema && active && (
+                {canManageSchema && effectiveAllowRename && active && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1093,7 +1127,7 @@ export default function DynamicDataGridPanel({
             )
           })}
 
-          {canManageSchema && !addingTableInline && (
+          {canManageSchema && allowCreateTable && !addingTableInline && (
             <button
               type="button"
               onClick={() => {
@@ -1150,7 +1184,7 @@ export default function DynamicDataGridPanel({
       </div>
 
       {/* Inline New Table Strip */}
-      {addingTableInline && canManageSchema && (
+      {allowCreateTable && addingTableInline && canManageSchema && (
         <form
           onSubmit={handleSubmitInlineTable}
           style={{
@@ -1233,6 +1267,9 @@ export default function DynamicDataGridPanel({
           allAppointmentConfigs={appointmentConfigs}
           appointmentConfig={activeApptConfig}
           moduleConfig={activeModuleConfig}
+          allowDeleteTable={effectiveAllowDelete}
+          allowRenameTable={effectiveAllowRename}
+          allowChangeModuleRole={effectiveAllowChangeRole}
           onClose={() => setOpenTableProperties(false)}
           onMutated={onDataMutated}
           onTableDeleted={() => {
@@ -1392,6 +1429,7 @@ export default function DynamicDataGridPanel({
           activeTable={activeTable}
           allTables={effectiveAllTables}
           relations={relations}
+          allowCreateNewTable={allowCreateRelatedTable}
           onClose={() => setOpenConnectionsBar(false)}
           onMutated={onDataMutated}
         />
@@ -1403,6 +1441,11 @@ export default function DynamicDataGridPanel({
           table={activeTable}
           allTables={effectiveAllTables}
           editingColumn={columnComposer.editing}
+          allowCreateNewTable={allowCreateRelatedTable}
+          allowChangePrimaryTitle={!isActiveFinanceTable}
+          isSystemLocked={Boolean(
+            columnComposer.editing && effectiveLockedColumnIdSet.has(columnComposer.editing.id)
+          )}
           onClose={() => setColumnComposer({ open: false, editing: null })}
           onSaved={onDataMutated}
         />

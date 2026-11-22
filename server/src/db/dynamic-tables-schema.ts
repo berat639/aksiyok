@@ -137,6 +137,54 @@ export const dynamicTablesDDL = [
   )`,
   `CREATE INDEX IF NOT EXISTS dynamic_module_configs_clinic_role_idx
     ON dynamic_module_configs (clinic_id, module_role, enabled)`,
+
+  // Pre-accounting integration foundation (Paraşüt, Logo İşbaşı, Bizim Hesap, KolayBi', Mikro, Uyumsoft, Dia, Custom Webhook)
+  `CREATE TABLE IF NOT EXISTS finance_accounting_connections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    clinic_id UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'disconnected',
+    sync_mode TEXT NOT NULL DEFAULT 'manual',
+    external_company_id TEXT,
+    credentials_encrypted TEXT,
+    account_mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_synced_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (clinic_id, provider)
+  )`,
+  `CREATE INDEX IF NOT EXISTS finance_accounting_connections_clinic_status_idx
+    ON finance_accounting_connections (clinic_id, status)`,
+
+  `CREATE TABLE IF NOT EXISTS finance_accounting_sync_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    clinic_id UUID NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+    row_id UUID NOT NULL REFERENCES dynamic_rows(id) ON DELETE CASCADE,
+    table_id UUID NOT NULL REFERENCES dynamic_tables(id) ON DELETE CASCADE,
+    direction TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'local',
+    idempotency_key TEXT NOT NULL,
+    external_document_id TEXT,
+    external_contact_id TEXT,
+    external_payment_id TEXT,
+    external_document_number TEXT,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    payload_hash TEXT,
+    canonical_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (clinic_id, row_id, provider)
+  )`,
+  `CREATE INDEX IF NOT EXISTS finance_accounting_sync_clinic_status_idx
+    ON finance_accounting_sync_records (clinic_id, sync_status, updated_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS finance_accounting_sync_external_idx
+    ON finance_accounting_sync_records (clinic_id, provider, external_document_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS finance_accounting_sync_idempotency_idx
+    ON finance_accounting_sync_records (clinic_id, provider, idempotency_key)`,
 ]
 
 let dynamicSchemaPromise: Promise<void> | undefined

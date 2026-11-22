@@ -32,3 +32,11 @@
 .tableRow { background: var(--card-bg); border-bottom: 1px solid var(--pc-border); transition: background .12s ease; }
 .tableRow:hover { background: var(--pc-tint); }
 .pager { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--input-border); border-radius: 12px; background: var(--card-bg); color: var(--foreground); font-size: 12px; box-shadow: var(--pc-neo-subcard); }
+:global([data-theme="light"]) .btnPrimary,
+:global([data-theme="light"]) .btnPrimary *,
+:global([data-theme="light"] .admin-content) .btnPrimary,
+:global([data-theme="light"] .admin-content) .btnPrimary *,
+:global([data-theme="light"]) .segmentActive,
+:global([data-theme="light"]) .segmentActive *,
+:global([data-theme="light"] .admin-content) .segmentActive,
+:global([data-theme="light"] .admin-content) .segmentActive * { color: #ffffff !important; }

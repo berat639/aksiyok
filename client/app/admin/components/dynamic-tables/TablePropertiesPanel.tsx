@@ -7,6 +7,7 @@ import depth from '@/styles/clinic-depth.module.css'
 import InfoTooltip from '../ui/InfoTooltip'
 import { samplePreviewTitle } from './tableSetupHelpers'
 import {
+  isFinanceModuleRole,
   MODULE_ROLE_META,
   type DynamicAppointmentConfigDef,
   type DynamicModuleConfigDef,
@@ -27,6 +28,9 @@ interface TablePropertiesPanelProps {
   allAppointmentConfigs?: DynamicAppointmentConfigDef[]
   appointmentConfig: DynamicAppointmentConfigDef | null
   moduleConfig?: DynamicModuleConfigDef | null
+  allowDeleteTable?: boolean
+  allowRenameTable?: boolean
+  allowChangeModuleRole?: boolean
   onClose: () => void
   onMutated: () => void
   onTableDeleted: (deletedTableId: string) => void
@@ -39,10 +43,19 @@ export default function TablePropertiesPanel({
   allAppointmentConfigs = [],
   appointmentConfig,
   moduleConfig = null,
+  allowDeleteTable = true,
+  allowRenameTable = true,
+  allowChangeModuleRole = true,
   onClose,
   onMutated,
   onTableDeleted,
 }: TablePropertiesPanelProps) {
+  const isProtectedFinanceTable = Boolean(
+    moduleConfig?.enabled && isFinanceModuleRole(moduleConfig.moduleRole)
+  )
+  const effectiveAllowDelete = allowDeleteTable && !isProtectedFinanceTable
+  const effectiveAllowRename = allowRenameTable && !isProtectedFinanceTable
+  const effectiveAllowChangeRole = allowChangeModuleRole && !isProtectedFinanceTable
   const [tableName, setTableName] = useState(activeTable.name)
   const [tableDescription, setTableDescription] = useState(activeTable.description || '')
   const [savingGeneral, setSavingGeneral] = useState(false)
@@ -384,10 +397,11 @@ export default function TablePropertiesPanel({
               <input
                 type="text"
                 value={tableName}
+                disabled={!effectiveAllowRename}
                 onChange={(e) => setTableName(e.target.value)}
                 className={depth.input}
-                style={{ minHeight: 32, fontSize: 12.5 }}
-                placeholder="Örn: Müşteriler, Portföy İlanları, Sigorta Teklifleri…"
+                style={{ minHeight: 32, fontSize: 12.5, opacity: effectiveAllowRename ? 1 : 0.72 }}
+                placeholder="Örn: Müşteriler, Ürünler, Hizmetler…"
               />
             </div>
 
@@ -416,7 +430,11 @@ export default function TablePropertiesPanel({
               marginTop: 4,
             }}
           >
-            {!confirmDeleteTable ? (
+            {!effectiveAllowDelete ? (
+              <span className={depth.badge} style={{ fontSize: 11, padding: '3px 9px' }}>
+                Standart Finans Tablosu (Korumalı)
+              </span>
+            ) : !confirmDeleteTable ? (
               <button
                 type="button"
                 onClick={() => setConfirmDeleteTable(true)}
@@ -798,28 +816,39 @@ export default function TablePropertiesPanel({
             <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--foreground-2)' }}>
               Bu tablo hangi modülü beslesin?
             </label>
-            <select
-              value={moduleRole}
-              disabled={savingModule}
-              onChange={(e) => {
-                const val = e.target.value as 'none' | DynamicModuleRole
-                void persistModuleSettings(val, {})
-              }}
-              className={depth.input}
-              style={{ minHeight: 32, fontSize: 12 }}
-            >
-              <option value="none">Standart Tablo (Özel Modül Bağlantısı Yok)</option>
-              {(Object.keys(MODULE_ROLE_META) as DynamicModuleRole[]).map((rk) => (
-                <option key={rk} value={rk}>
-                  {MODULE_ROLE_META[rk].label}
-                </option>
-              ))}
-            </select>
+            {isProtectedFinanceTable ? (
+              <div
+                className={depth.badge}
+                style={{ fontSize: 11.5, padding: '6px 10px', justifyContent: 'flex-start' }}
+              >
+                {MODULE_ROLE_META[moduleConfig!.moduleRole].label} (Sabit)
+              </div>
+            ) : (
+              <select
+                value={moduleRole}
+                disabled={savingModule || !effectiveAllowChangeRole}
+                onChange={(e) => {
+                  const val = e.target.value as 'none' | DynamicModuleRole
+                  void persistModuleSettings(val, {})
+                }}
+                className={depth.input}
+                style={{ minHeight: 32, fontSize: 12 }}
+              >
+                <option value="none">Standart Tablo (Özel Modül Bağlantısı Yok)</option>
+                {(Object.keys(MODULE_ROLE_META) as DynamicModuleRole[])
+                  .filter((rk) => !isFinanceModuleRole(rk))
+                  .map((rk) => (
+                    <option key={rk} value={rk}>
+                      {MODULE_ROLE_META[rk].label}
+                    </option>
+                  ))}
+              </select>
+            )}
           </div>
 
           {moduleRole === 'none' ? (
             <div style={{ fontSize: 11.5, color: 'var(--pc-muted)', lineHeight: 1.45 }}>
-              Ödemeler, komisyonlar, primler, giderler, malzeme stoku veya periyodik bakım listelerinizi buradan ilgili modüle tek tıkla bağlayabilirsiniz.
+              Malzeme stoku, envanter veya periyodik bakım listelerinizi buradan ilgili modüle tek tıkla bağlayabilirsiniz. Finans tabloları sistem tarafından standart ve sabit olarak yönetilir.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -828,6 +857,47 @@ export default function TablePropertiesPanel({
               </div>
 
               {(moduleRole === 'finance_income' || moduleRole === 'finance_expense') && (
+                isProtectedFinanceTable ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 5,
+                      padding: '8px 10px',
+                      borderRadius: 10,
+                      background: 'var(--card-inner, var(--card-bg))',
+                      border: '1px solid var(--pc-border)',
+                      fontSize: 11.5,
+                      color: 'var(--foreground-2)',
+                    }}
+                  >
+                    <strong style={{ fontSize: 11.5, color: 'var(--foreground)' }}>
+                      Standart Ön Muhasebe Sütun Eşlemesi (Korumalı)
+                    </strong>
+                    <span>
+                      Tutar:{' '}
+                      <strong>
+                        {activeTable.columns.find((c) => c.id === moduleMapping.amountColumnId)?.name ||
+                          'Standart Tutar'}
+                      </strong>{' '}
+                      · Tarih:{' '}
+                      <strong>
+                        {activeTable.columns.find((c) => c.id === moduleMapping.dateColumnId)?.name ||
+                          'İşlem Tarihi'}
+                      </strong>
+                      {moduleRole === 'finance_income' && (
+                        <>
+                          {' '}
+                          · Durum:{' '}
+                          <strong>
+                            {activeTable.columns.find((c) => c.id === moduleMapping.statusColumnId)?.name ||
+                              'Tahsilat Durumu'}
+                          </strong>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                     <label style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--pc-muted)' }}>
@@ -904,6 +974,7 @@ export default function TablePropertiesPanel({
                     </div>
                   )}
                 </div>
+                )
               )}
 
               {moduleRole === 'stock_inventory' && (

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { IMask } from 'react-imask'
 import {
   TR_PHONE_MASK,
+  TR_PHONE_INTL_MASK,
   TR_PHONE_DEFINITIONS,
   normalizeTrPhone,
   formatTrPhoneDisplay,
@@ -74,5 +75,52 @@ describe('phone-mask utilities & IMask integration', () => {
     expect(matchesPhoneSearch('05321234567', '532 123')).toBe(true)
     expect(matchesPhoneSearch('05321234567', '8503096119')).toBe(false)
     expect(matchesPhoneSearch('08503096119', 'ahmet')).toBe(false)
+  })
+})
+
+
+describe('signup international phone mask', () => {
+  const createMask = () => IMask.createMask({
+    mask: TR_PHONE_INTL_MASK,
+    definitions: TR_PHONE_DEFINITIONS,
+    prepare: stripTrCountryCodeOnPaste,
+  })
+
+  it('keeps the country code fixed during controlled character-by-character entry', () => {
+    const mask = createMask()
+    let national = ''
+    for (const digit of '5321234567') {
+      mask.append(digit, { input: true })
+      national += digit
+      expect(mask.unmaskedValue).toBe(national)
+      // React feeds the accepted value back after every keystroke.
+      mask.unmaskedValue = national
+      expect(mask.unmaskedValue).toBe(national)
+    }
+    expect(mask.value).toBe('+90 (532) 123 45 67')
+  })
+
+  it.each(['5321234567', '05321234567', '+90 (532) 123 45 67', '905321234567', '00905321234567'])(
+    'accepts a pasted number: %s', (phone) => {
+      const mask = createMask()
+      mask.append(phone, { input: true })
+      expect(mask.value).toBe('+90 (532) 123 45 67')
+      expect(mask.unmaskedValue).toBe('5321234567')
+    },
+  )
+
+  it('allows deleting, replacing, and clearing the number without retaining a country code', () => {
+    const mask = createMask()
+    mask.unmaskedValue = '5321234567'
+    mask.remove(mask.value.length - 1)
+    const shortened = mask.unmaskedValue
+    expect(shortened).toBe('532123456')
+    mask.unmaskedValue = shortened
+    mask.append('8', { input: true })
+    expect(mask.value).toBe('+90 (532) 123 45 68')
+    mask.unmaskedValue = ''
+    expect(mask.unmaskedValue).toBe('')
+    mask.append('5', { input: true })
+    expect(mask.unmaskedValue).toBe('5')
   })
 })

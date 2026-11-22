@@ -44,6 +44,9 @@ interface InlineColumnComposerProps {
   allTables: DynamicTableDef[]
   editingColumn: DynamicColumnDef | null
   initialFieldType?: DynamicFieldType
+  allowCreateNewTable?: boolean
+  allowChangePrimaryTitle?: boolean
+  isSystemLocked?: boolean
   onClose: () => void
   onSaved: () => void
 }
@@ -53,6 +56,9 @@ export default function InlineColumnComposer({
   allTables,
   editingColumn,
   initialFieldType = 'text',
+  allowCreateNewTable = true,
+  allowChangePrimaryTitle = true,
+  isSystemLocked = false,
   onClose,
   onSaved,
 }: InlineColumnComposerProps) {
@@ -72,7 +78,9 @@ export default function InlineColumnComposer({
   const [newOptionLabel, setNewOptionLabel] = useState('')
 
   // When fieldType === 'relation'
-  const [targetTableId, setTargetTableId] = useState<string>(otherTables[0]?.id || '__new__')
+  const [targetTableId, setTargetTableId] = useState<string>(
+    otherTables[0]?.id || (allowCreateNewTable ? '__new__' : '')
+  )
   const [newTargetTableName, setNewTargetTableName] = useState('')
   const [relationChoice, setRelationChoice] = useState<HumanRelationChoice>('both_many')
 
@@ -105,12 +113,12 @@ export default function InlineColumnComposer({
         { id: 'aktif', label: 'Aktif' },
         { id: 'beklemede', label: 'Beklemede' },
       ])
-      setTargetTableId(otherTables[0]?.id || '__new__')
+      setTargetTableId(otherTables[0]?.id || (allowCreateNewTable ? '__new__' : ''))
       setNewTargetTableName('')
       setRelationChoice('both_many')
     }
     setNewOptionLabel('')
-  }, [editingColumn, initialFieldType, table.id, table.columns.length])
+  }, [editingColumn, initialFieldType, table.id, table.columns.length, allowCreateNewTable])
 
   const isEditingRelationCol = editingColumn?.fieldType === 'relation'
 
@@ -142,6 +150,10 @@ export default function InlineColumnComposer({
           otherTables.find((t) => t.id === targetTableId)?.name || 'Bağlı Tablo'
 
         if (targetTableId === '__new__') {
+          if (!allowCreateNewTable) {
+            toast.error('Bu alanda yeni tablo oluşturulamaz; mevcut bir tabloyu seçebilirsiniz')
+            return
+          }
           const cleanNewTbl = newTargetTableName.trim() || name.trim()
           if (!cleanNewTbl) {
             toast.error('Bağlanacak tablonun adını yazınız')
@@ -164,6 +176,11 @@ export default function InlineColumnComposer({
           }
           resolvedOtherId = created.id
           resolvedOtherName = created.name
+        }
+
+        if (!resolvedOtherId || resolvedOtherId === '__new__') {
+          toast.error('Lütfen bağlanacak mevcut bir tabloyu seçiniz')
+          return
         }
 
         const sourceTableId =
@@ -359,7 +376,12 @@ export default function InlineColumnComposer({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          {editingColumn && !confirmDelete && (
+          {editingColumn && isSystemLocked && (
+            <span className={depth.badge} style={{ fontSize: 11, padding: '2px 8px' }}>
+              Standart Ön Muhasebe Alanı (Silinemez)
+            </span>
+          )}
+          {editingColumn && !isSystemLocked && !confirmDelete && (
             <button
               type="button"
               disabled={saving}
@@ -371,7 +393,7 @@ export default function InlineColumnComposer({
               <span>{isEditingRelationCol ? 'Bağlantıyı Kaldır' : 'Alanı Sil'}</span>
             </button>
           )}
-          {editingColumn && confirmDelete && (
+          {editingColumn && !isSystemLocked && confirmDelete && (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
               <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--danger)' }}>Emin misiniz?</span>
               <button
@@ -417,7 +439,7 @@ export default function InlineColumnComposer({
       </div>
 
       {/* Quick Type Pills */}
-      {!isEditingRelationCol && (
+      {!isEditingRelationCol && !(editingColumn && isSystemLocked) && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--pc-muted)' }}>Tür:</span>
           {(editingColumn ? NON_RELATION_FIELD_TYPES : ORDERED_COMPOSER_TYPES).map((ft) => {
@@ -530,16 +552,23 @@ export default function InlineColumnComposer({
                 {t.name}
               </button>
             ))}
-            <button
-              type="button"
-              onClick={() => setTargetTableId('__new__')}
-              className={targetTableId === '__new__' ? depth.btnPrimary : depth.btnPale}
-              style={{ minHeight: 27, padding: '2px 10px', fontSize: 12 }}
-            >
-              <Plus size={12} color={targetTableId === '__new__' ? '#ffffff' : undefined} />
-              <span>Yeni Tablo Oluşturup Bağla</span>
-            </button>
-            {targetTableId === '__new__' && (
+            {allowCreateNewTable && (
+              <button
+                type="button"
+                onClick={() => setTargetTableId('__new__')}
+                className={targetTableId === '__new__' ? depth.btnPrimary : depth.btnPale}
+                style={{ minHeight: 27, padding: '2px 10px', fontSize: 12 }}
+              >
+                <Plus size={12} color={targetTableId === '__new__' ? '#ffffff' : undefined} />
+                <span>Yeni Tablo Oluşturup Bağla</span>
+              </button>
+            )}
+            {!allowCreateNewTable && otherTables.length === 0 && (
+              <span style={{ fontSize: 12, color: 'var(--pc-muted)' }}>
+                Bağlanabilecek mevcut başka bir tablo bulunmuyor.
+              </span>
+            )}
+            {allowCreateNewTable && targetTableId === '__new__' && (
               <input
                 type="text"
                 value={newTargetTableName}
@@ -596,7 +625,7 @@ export default function InlineColumnComposer({
           className={depth.subcard}
           style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', padding: '7px 12px', background: 'var(--card-bg)' }}
         >
-          {!isEditingRelationCol && (
+          {!isEditingRelationCol && allowChangePrimaryTitle && (
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
               <button
                 type="button"

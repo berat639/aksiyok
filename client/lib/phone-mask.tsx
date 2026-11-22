@@ -4,6 +4,8 @@ import React from 'react'
 import { IMaskInput } from 'react-imask'
 
 export const TR_PHONE_MASK = '{\\0} (N00) 000 00 00'
+// Escaped country digits are fixed display text and excluded from unmaskedValue.
+export const TR_PHONE_INTL_MASK = '+\\9\\0 (N00) 000 00 00'
 export const TR_PHONE_DEFINITIONS = { N: /[1-9]/ }
 
 /**

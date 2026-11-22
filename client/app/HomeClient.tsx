@@ -487,7 +487,14 @@ export default function Home() {
               src={sessionConfig.branding.logoUrl}
               alt="Logo"
               onError={() => setLogoError(true)}
-              style={{ height: 24, width: 'auto', filter: 'var(--logo-filter)' }}
+              style={{
+                height: 28,
+                width: 28,
+                borderRadius: '50%',
+                objectFit: 'cover',
+                background: '#ffffff',
+                border: '1px solid var(--input-border)',
+              }}
             />
           ) : (
             <div style={{
@@ -534,11 +541,19 @@ export default function Home() {
           marginBottom: '1rem'
         }}>
           {sessionConfig?.branding?.logoUrl && !logoError && (
-            <img 
-              src={sessionConfig.branding.logoUrl} 
-              alt="Logo" 
+            <img
+              src={sessionConfig.branding.logoUrl}
+              alt="Logo"
               onError={() => setLogoError(true)}
-              style={{ width: 72, height: 72, objectFit: 'contain', filter: 'var(--logo-filter)' }}
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: '50%',
+                objectFit: 'cover',
+                background: '#ffffff',
+                border: '2px solid var(--input-border)',
+                flexShrink: 0,
+              }}
             />
           )}
           <div style={{ textAlign: sessionConfig?.branding?.logoUrl && !logoError ? 'left' : 'center' }}>

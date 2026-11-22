@@ -1,0 +1,403 @@
+/* Dinamik Finans Çalışma Alanı — İşletme Özet Neomorph/Claymorph Düzen Stilleri (%100 opak, blur yok, çift tema) */
+
+.heroTextCol {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.heroMetaStrong {
+  font-weight: 850;
+  color: #ffffff;
+}
+
+.bannerLead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.bannerText {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--foreground);
+  line-height: 1.45;
+}
+
+.ensureSub {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--foreground-2);
+  line-height: 1.45;
+}
+
+.ensureActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ── 2 Sütunlu Analitik Satırı ───────────────────────────────────────────── */
+.analyticsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.chartLegend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--foreground-2);
+}
+
+.legendDotIncome,
+.legendDotExpense {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  box-shadow: inset 1px 1px 2px rgba(255, 255, 255, 0.45);
+}
+
+.legendDotIncome {
+  background: var(--clay-c1);
+}
+
+.legendDotExpense {
+  background: var(--clay-c5);
+}
+
+.chartWrap {
+  width: 100%;
+  height: 228px;
+  min-width: 0;
+}
+
+.chartTipRows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.chartTipRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 750;
+  color: #ffffff;
+  line-height: 1.3;
+}
+
+.chartTipAmount {
+  margin-left: auto;
+  padding-left: 10px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: #ffffff;
+}
+
+.chartTipDotIncome,
+.chartTipDotExpense {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.chartTipDotIncome {
+  background: var(--clay-c1);
+}
+
+.chartTipDotExpense {
+  background: var(--clay-c5);
+}
+
+/* ── Cari / Karşı Taraf Bazlı Özet Listesi ───────────────────────────────── */
+.personRowMain {
+  min-width: 0;
+  flex: 1;
+}
+
+.personName {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personMeta {
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--foreground-2);
+  margin-top: 2px;
+}
+
+.personPending {
+  color: var(--clay-danger);
+  font-weight: 800;
+}
+
+.personActionBtn {
+  flex-shrink: 0;
+}
+
+.gridHeadBadges {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+/* ── 460px Clay/Neo Hızlı Giriş Modalı ───────────────────────────────────── */
+.modalShell {
+  border-radius: 22px !important;
+  border-color: var(--clay-border, var(--input-border)) !important;
+}
+
+.modalSurface {
+  background: var(--clay-surface);
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.modalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modalTitleGroup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.segmentFill {
+  flex: 1;
+}
+
+.modalForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.serviceChipsWell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 104px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: 14px;
+  background: var(--clay-well);
+  border: 1px solid var(--clay-border);
+  box-shadow: var(--clay-inset-sh);
+}
+
+.serviceChipBtn {
+  min-height: 29px !important;
+  padding: 0 10px !important;
+  border-radius: 11px !important;
+  font-size: 11.5px !important;
+}
+
+.formGridExpense {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 10px;
+}
+
+.formGrid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.formGridAmount {
+  display: grid;
+  grid-template-columns: 1.45fr 0.8fr 0.85fr;
+  gap: 8px;
+}
+
+.amountInput {
+  font-size: 13.5px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.taxPreviewStrip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 11px;
+  border-radius: 12px;
+  background: var(--clay-well);
+  border: 1px solid var(--clay-border);
+  box-shadow: var(--clay-inset-sh);
+  font-size: 11.5px;
+}
+
+.taxPreviewItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--foreground-2);
+  font-weight: 650;
+}
+
+.taxPreviewVal {
+  color: var(--foreground);
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.accountingToggleBtn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--clay-border);
+  background: var(--clay-ctl-bg);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  box-shadow: var(--clay-ctl-sh);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.accountingToggleBtn:hover {
+  border-color: var(--pc-blue);
+}
+
+.accountingToggleLeft {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.accountingPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  background: var(--clay-well);
+  border: 1px solid var(--clay-border);
+  box-shadow: var(--clay-inset-sh);
+}
+
+.taxHintWarn {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--clay-watch);
+  margin-top: 2px;
+}
+
+.datePickerWrap > button {
+  min-height: 36px !important;
+  padding: 6px 11px !important;
+  border-radius: 12px !important;
+  border: 1px solid var(--clay-border) !important;
+  background: var(--clay-well) !important;
+  box-shadow: var(--clay-inset-sh) !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+}
+
+.datePickerWrap > button:focus {
+  border-color: var(--pc-blue) !important;
+  box-shadow: var(--clay-inset-sh), 0 0 0 3px rgba(37, 94, 227, 0.18) !important;
+}
+
+.modalFooter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ── Açık Tema Kontrast Korumaları ───────────────────────────────────────── */
+:global([data-theme='light']) .heroMetaStrong,
+:global([data-theme='light'] .admin-content) .heroMetaStrong,
+:global([data-theme='light']) .chartTipRows,
+:global([data-theme='light']) .chartTipRow,
+:global([data-theme='light']) .chartTipRow span,
+:global([data-theme='light']) .chartTipAmount,
+:global([data-theme='light'] .admin-content) .chartTipRows,
+:global([data-theme='light'] .admin-content) .chartTipRow,
+:global([data-theme='light'] .admin-content) .chartTipRow span,
+:global([data-theme='light'] .admin-content) .chartTipAmount {
+  color: #ffffff !important;
+}
+
+:global([data-theme='light']) .ensureSub,
+:global([data-theme='light']) .legendItem,
+:global([data-theme='light']) .personMeta,
+:global([data-theme='light']) .taxPreviewItem,
+:global([data-theme='light'] .admin-content) .ensureSub,
+:global([data-theme='light'] .admin-content) .legendItem,
+:global([data-theme='light'] .admin-content) .personMeta,
+:global([data-theme='light'] .admin-content) .taxPreviewItem {
+  color: var(--foreground-2) !important;
+}
+
+:global([data-theme='light']) .taxPreviewVal,
+:global([data-theme='light']) .accountingToggleBtn,
+:global([data-theme='light'] .admin-content) .taxPreviewVal,
+:global([data-theme='light'] .admin-content) .accountingToggleBtn {
+  color: var(--foreground) !important;
+}
+
+:global([data-theme='light']) .personPending,
+:global([data-theme='light'] .admin-content) .personPending {
+  color: var(--clay-danger) !important;
+}
+
+:global([data-theme='light']) .taxHintWarn,
+:global([data-theme='light'] .admin-content) .taxHintWarn {
+  color: var(--clay-watch) !important;
+}
+
+:global([data-theme='light']) .datePickerWrap > button {
+  background: var(--clay-well) !important;
+  border-color: var(--clay-border) !important;
+}
+
+@media (max-width: 560px) {
+  .formGridExpense,
+  .formGrid2,
+  .formGridAmount {
+    grid-template-columns: 1fr;
+  }
+}

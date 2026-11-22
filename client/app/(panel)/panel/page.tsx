@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { Lock, Sparkles, AlertTriangle, CheckCircle2, CreditCard } from 'lucide-react'
+import { Lock, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { useAuth, type AuthUser } from '../../../lib/auth-context'
 import { ThemeToggle } from '../../theme-provider'
 import depth from '@/styles/clinic-depth.module.css'
@@ -10,7 +10,6 @@ import CalendarTab from '../../admin/components/CalendarTab'
 import PatientsTab from '../../admin/components/PatientsTab'
 import StatsBar from '../../admin/components/StatsBar'
 import KnowledgeTab from '../../admin/components/KnowledgeTab'
-import IntegrationsTab from '../../admin/components/IntegrationsTab'
 import SubscriptionCheckoutModal, {
   type SubscriptionModalMode,
   type UpgradeRequestType,
@@ -21,24 +20,29 @@ import IsletmeKayitlarTab, { type IsletmeSection, type SectionAccess } from './t
 
 type Tab = 'isletme' | 'calendar' | 'patients' | 'payments' | 'stok' | 'knowledge' | 'klinik' | 'integrations' | 'vip' | 'platform-clinics'
 
-// Üst sekme çubuğu. "Ödemeler & Finans" (payments), "İşletme Personeli" (klinik) ve "Stok & Bakım" (stok)
-// artık "İşletme ve Kayıtlar" altında; yetki anahtarları geriye dönük uyumluluk için korunur.
+// Üst sekme çubuğu. "Ödemeler & Finans" (payments), "İşletme Personeli" (klinik), "Stok & Bakım" (stok)
+// ve "Ayarlar ve Entegrasyonlar" (integrations) artık "İşletme ve Kayıtlar" altında; yetki anahtarları geriye dönük uyumluluk için korunur.
 const BASE_TABS: { id: Tab; label: string }[] = [
   { id: 'isletme', label: 'İşletme ve Kayıtlar' },
   { id: 'calendar', label: 'Takvim' },
   { id: 'patients', label: 'Veri Tabloları' },
   { id: 'knowledge', label: 'Bilgi Tabanı' },
-  { id: 'integrations', label: 'Entegrasyonlar (Ayarlar)' },
 ]
 
 /** İşletme ve Kayıtlar içine taşınan eski sekmeler → ilgili bölüm. */
-const NESTED_TAB_SECTION: Partial<Record<Tab, IsletmeSection>> = { klinik: 'personel', payments: 'finans', stok: 'stok' }
-const YONETICI_TABS: Tab[] = [...BASE_TABS.map(t => t.id), 'klinik', 'payments', 'stok']
+const NESTED_TAB_SECTION: Partial<Record<Tab, IsletmeSection>> = {
+  klinik: 'personel',
+  payments: 'finans',
+  stok: 'stok',
+  integrations: 'ayarlar',
+}
+const YONETICI_TABS: Tab[] = [...BASE_TABS.map(t => t.id), 'klinik', 'payments', 'stok', 'integrations']
 const TAB_LABELS: Record<string, string> = {
   ...Object.fromEntries(BASE_TABS.map(t => [t.id, t.label])),
   klinik: 'Personel ve Mesai',
   payments: 'Finans ve Raporlama',
   stok: 'Stok ve Bakım',
+  integrations: 'Ayarlar ve Entegrasyonlar',
 }
 
 const DEMO_LOCKED_CANDIDATES: Tab[] = ['payments', 'stok', 'klinik']
@@ -75,7 +79,7 @@ function resolveInitialPanelTab(allowed: Tab[], defaultTab: Tab, user: AuthUser 
 export default function YoneticiPage() {
   const { user, logout, refreshUser } = useAuth()
   const [tab, setTabState] = useState<Tab | null>(null)
-  const [isletmeSection, setIsletmeSection] = useState<IsletmeSection>('genel')
+  const [isletmeSection, setIsletmeSection] = useState<IsletmeSection>('ozet')
   const [allowedTabs, setAllowedTabs] = useState<Tab[] | null>(null)
   const [dynamicTabLabel, setDynamicTabLabel] = useState<string>('Veri Tabloları')
   const [paymentBanner, setPaymentBanner] = useState<'success' | 'failed' | null>(null)
@@ -185,7 +189,6 @@ export default function YoneticiPage() {
 
   const isModerator = user?.role === 'moderator'
   const isDemoNonPlatform = Boolean(user?.plan?.planId === 'demo' && !user?.canManagePlatform)
-  const showTrialBanner = Boolean((user?.plan?.planId === 'demo' || user?.plan?.isTrialExpired) && !user?.canManagePlatform)
 
   const roleTabs = isModerator
     ? [{ id: 'vip' as Tab, label: '🌟 Özel Asistan (VIP)' }, ...BASE_TABS]
@@ -233,8 +236,8 @@ export default function YoneticiPage() {
               ? perms.effectiveAllowedTabs
               : perms?.[user.role] || perms?.calisan || (user.role === 'host' ? perms?.sekreter : undefined)) || ['calendar']
           const rolePerms = Array.from(new Set(rawRolePerms.map(aliasToPanelTab).filter((t): t is Tab => Boolean(t))))
-          // Personel, finans veya stok yetkisi olan çalışan bu bölümlere İşletme ve Kayıtlar üzerinden ulaşır.
-          if (!rolePerms.includes('isletme') && (rolePerms.includes('klinik') || rolePerms.includes('payments') || rolePerms.includes('stok'))) rolePerms.push('isletme')
+          // Personel, finans, stok veya ayarlar yetkisi olan çalışan bu bölümlere İşletme ve Kayıtlar üzerinden ulaşır.
+          if (!rolePerms.includes('isletme') && (rolePerms.includes('klinik') || rolePerms.includes('payments') || rolePerms.includes('stok') || rolePerms.includes('integrations'))) rolePerms.push('isletme')
           const safeRolePerms: Tab[] = rolePerms.length > 0 ? rolePerms : ['calendar']
           setAllowedTabs(safeRolePerms)
           setTabState(prev => (prev && safeRolePerms.includes(prev) && !isTabLockedByPlan(prev, user) ? prev : resolveInitialPanelTab(safeRolePerms, safeRolePerms[0] || 'calendar', user)))
@@ -272,11 +275,13 @@ export default function YoneticiPage() {
   const canEditBusiness = Boolean(user && (user.role === 'yonetici' || user.canManagePlatform))
   const hasTab = (t: Tab) => Boolean(allowedTabs?.includes(t))
   const isletmeAccess: Record<IsletmeSection, SectionAccess> = {
+    ozet: { visible: canEditBusiness || hasTab('payments') || hasTab('stok') || hasTab('klinik') },
     genel: { visible: canEditBusiness },
     urunler: { visible: canEditBusiness },
     personel: { visible: hasTab('klinik') || isDemoNonPlatform, locked: isTabLockedByPlan('klinik', user) },
     finans: { visible: hasTab('payments') || isDemoNonPlatform, locked: isTabLockedByPlan('payments', user) },
     stok: { visible: hasTab('stok') || isDemoNonPlatform, locked: isTabLockedByPlan('stok', user) },
+    ayarlar: { visible: canEditBusiness || hasTab('integrations') },
   }
   const openLockedFeature = useCallback((featureTitle: string) => {
     setSubModal({ open: true, mode: 'LockedFeature', featureTitle, requestType: 'pro_upgrade' })
@@ -337,69 +342,6 @@ export default function YoneticiPage() {
             )}
             <button type="button" className={depth.btn} onClick={() => setPaymentBanner(null)}>
               Kapat
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Demo / Trial Status Banner */}
-      {showTrialBanner && user?.plan && (
-        <div
-          className={depth.card}
-          style={{
-            width: '100%',
-            marginBottom: 16,
-            padding: '12px 16px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: 12,
-            borderColor: user.plan.isTrialExpired ? 'var(--danger)' : 'var(--input-border)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span
-              className={depth.badge}
-              style={
-                user.plan.isTrialExpired
-                  ? { background: 'var(--flow-danger-bg)', borderColor: 'var(--danger)', color: 'var(--danger)' }
-                  : undefined
-              }
-            >
-              {user.plan.isTrialExpired ? (
-                <>
-                  <AlertTriangle size={13} />
-                  <span>Deneme Süresi Sona Erdi</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles size={13} />
-                  <span>7 Günlük Ücretsiz Demo</span>
-                </>
-              )}
-            </span>
-            <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--foreground)' }}>
-              {user.plan.isTrialExpired
-                ? 'Deneme süreniz sona erdi · Verileriniz korunuyor; kesintisiz kullanım için Pro pakete geçin.'
-                : `Kalan: ${user.plan.trialDaysRemaining ?? 7} gün · ${user.plan.maxUsers || 2} Yönetici · Web Asistanı aktif`}
-            </span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className={depth.btn}
-              onClick={() => setSubModal({ open: true, mode: 'RequestAssistant', requestType: 'whatsapp' })}
-            >
-              Diğer Asistanları Talep Et
-            </button>
-            <button
-              type="button"
-              className={depth.btnPrimary}
-              onClick={() => setSubModal({ open: true, mode: 'Checkout', requestType: 'pro_upgrade' })}
-            >
-              <CreditCard size={14} color="#ffffff" />
-              <span style={{ color: '#ffffff' }}>Pro Pakete Geç</span>
             </button>
           </div>
         </div>
@@ -472,7 +414,6 @@ export default function YoneticiPage() {
           {tab === 'calendar' && <CalendarTab onNavigateToClinicStaff={() => setTab('klinik')} />}
           {tab === 'patients' && <PatientsTab />}
           {tab === 'knowledge' && <KnowledgeTab />}
-          {tab === 'integrations' && <IntegrationsTab apiPrefix="/api/yonetici/integrations" />}
           {tab === 'vip' && <VipAssistantTab />}
           {tab === 'platform-clinics' && user?.canManagePlatform && <PlatformClinicsTab />}
         </div>

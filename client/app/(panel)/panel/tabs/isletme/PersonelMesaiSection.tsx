@@ -4,13 +4,16 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'react-hot-toast'
 import {
   CalendarDays,
+  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
   Clock,
   Copy,
+  Mail,
   Pencil,
+  Phone,
   Play,
   Plus,
   Repeat,
@@ -18,6 +21,7 @@ import {
   ShieldCheck,
   Snowflake,
   Trash2,
+  UserCheck,
   Users,
 } from 'lucide-react'
 import { useAuth } from '../../../../../lib/auth-context'
@@ -32,7 +36,6 @@ import {
   weekdayIndex,
   WEEK_DAYS_SHORT,
 } from '@/lib/business-profile'
-import depth from '@/styles/clinic-depth.module.css'
 import ConfirmModal from '../../../../admin/components/ConfirmModal'
 import {
   DEFAULT_ROLE_STAFF_PERMS,
@@ -41,8 +44,11 @@ import {
   getPresetForRole,
   type StaffGranularPermissions,
 } from '../../../../admin/components/StaffRolePermissionsSection'
+import InfoTooltip from '../../../../admin/components/ui/InfoTooltip'
 import TimeSelect from './TimeSelect'
+import clay from './isletme-clay.module.css'
 import s from './isletme.module.css'
+import pm from './PersonelMesaiSection.module.css'
 
 type StaffUser = {
   id: string
@@ -50,9 +56,11 @@ type StaffUser = {
   name: string
   role: string
   active: boolean
-  phone?: string
-  specialty?: string
-  color?: string
+  phone?: string | null
+  specialty?: string | null
+  color?: string | null
+  lastLoginAt?: string | null
+  createdAt?: string | null
   allowedTabs?: string[]
   staffPermissions?: StaffGranularPermissions
 }
@@ -62,15 +70,38 @@ type Smtp = { ready: boolean; message: string }
 type EffectivePerms = { editShifts?: boolean; manageStaff?: boolean }
 type RepeatMode = 'week' | 'month'
 type Editor = { userId: string; days: number[]; start: string; end: string; repeat: RepeatMode }
+type ProfileEditor = {
+  userId: string
+  name: string
+  email: string
+  phone: string
+  specialty: string
+  role: string
+  color: string
+  password: string
+}
+
+const STAFF_COLORS = ['#0284c7', '#2563eb', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#ef4444', '#0d9488']
+const EDITABLE_ROLES = [
+  { id: 'calisan', label: 'Çalışan' },
+  { id: 'hekim', label: 'Uzman / Danışman' },
+  { id: 'sekreter', label: 'Karşılama / Sekreter' },
+  { id: 'asistan', label: 'Asistan' },
+]
 
 const initials = (n: string) => n.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toLocaleUpperCase('tr-TR')).join('') || 'P'
 const isAdmin = (u: StaffUser) => u.role === 'yonetici'
 
 const shortDate = (key: string) => new Date(`${key}T12:00:00`).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' })
+const formatLoginDate = (iso?: string | null) => {
+  if (!iso) return 'Henüz giriş yok'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 'Henüz giriş yok'
+  return d.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
 
 export default function PersonelMesaiSection() {
   const { user } = useAuth()
-  const [tab, setTab] = useState<'plan' | 'staff'>('plan')
   const [users, setUsers] = useState<StaffUser[]>([])
   const [shifts, setShifts] = useState<ShiftItem[]>([])
   const [invitations, setInvitations] = useState<Invitation[]>([])
@@ -83,11 +114,13 @@ export default function PersonelMesaiSection() {
 
   const [weekStart, setWeekStart] = useState(() => mondayOf(dateKey(new Date())))
   const [editor, setEditor] = useState<Editor | null>(null)
+  const [profileEditor, setProfileEditor] = useState<ProfileEditor | null>(null)
   const [savingShift, setSavingShift] = useState(false)
+  const [savingProfile, setSavingProfile] = useState(false)
   const [openPermId, setOpenPermId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'freeze' | 'delete'; user: StaffUser } | null>(null)
 
-  const [invite, setInvite] = useState({ name: '', specialty: '', email: '', onCalendar: true })
+  const [invite, setInvite] = useState({ name: '', specialty: '', email: '', phone: '', role: 'calisan', onCalendar: true })
   const [inviteError, setInviteError] = useState('')
   const [sending, setSending] = useState(false)
 
@@ -109,7 +142,7 @@ export default function PersonelMesaiSection() {
       fetch('/api/dynamic-tables/schema', { credentials: 'include' }).then(json).then((d) => {
         if (typeof d?.tabLabel === 'string' && d.tabLabel.trim()) setDynamicLabel(d.tabLabel.trim())
       }),
-    ].map((p) => p.catch(() => {}))).finally(() => setLoaded(true))
+    ].map((p) => p.catch(() => { }))).finally(() => setLoaded(true))
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
@@ -118,7 +151,6 @@ export default function PersonelMesaiSection() {
   const canManageStaff = isManager || perms.manageStaff === true
   const canEditShifts = isManager || perms.editShifts !== false
 
-  const active = useMemo(() => users.filter((u) => u.active !== false), [users])
   const onCalendarCount = useMemo(() => users.filter(isOnCalendar).length, [users])
   const pending = invitations.filter((i) => i.status === 'pending')
 
@@ -138,8 +170,70 @@ export default function PersonelMesaiSection() {
 
   const openEditor = (u: StaffUser) => {
     if (editor?.userId === u.id) { setEditor(null); return }
+    setOpenPermId(null)
+    setProfileEditor(null)
     const sum = summarizeStaffWeek(shifts, u.id, weekStart)
     setEditor({ userId: u.id, days: sum?.days ?? [0, 1, 2, 3, 4], start: sum?.startTime ?? '09:00', end: sum?.endTime ?? '18:00', repeat: 'week' })
+  }
+
+  const togglePerms = (u: StaffUser) => {
+    setEditor(null)
+    setProfileEditor(null)
+    setOpenPermId((prev) => (prev === u.id ? null : u.id))
+  }
+
+  const openProfileEditor = (u: StaffUser) => {
+    if (profileEditor?.userId === u.id) { setProfileEditor(null); return }
+    setEditor(null)
+    setOpenPermId(null)
+    setProfileEditor({
+      userId: u.id,
+      name: u.name || '',
+      email: u.email || '',
+      phone: u.phone || '',
+      specialty: u.specialty || '',
+      role: u.role || 'calisan',
+      color: u.color || '#0284c7',
+      password: '',
+    })
+  }
+
+  const saveProfileEdit = async (u: StaffUser, e: React.FormEvent) => {
+    e.preventDefault()
+    if (!profileEditor) return
+    const name = profileEditor.name.trim()
+    const email = profileEditor.email.trim().toLowerCase()
+    if (!name) { toast.error('Ad soyad gerekli.'); return }
+    if (!email || !email.includes('@')) { toast.error('Geçerli bir e-posta adresi girin.'); return }
+    if (profileEditor.password && profileEditor.password.length < 6) {
+      toast.error('Yeni şifre en az 6 karakter olmalı.')
+      return
+    }
+
+    const payload: Record<string, unknown> = {
+      name,
+      email,
+      phone: profileEditor.phone.trim(),
+      specialty: profileEditor.specialty.trim(),
+      color: profileEditor.color,
+    }
+    if (!isAdmin(u) && profileEditor.role && profileEditor.role !== u.role) {
+      payload.role = profileEditor.role
+    }
+    if (profileEditor.password) {
+      payload.password = profileEditor.password
+    }
+
+    setSavingProfile(true)
+    try {
+      await putUser(u, payload, 'Kullanıcı bilgileri güncellendi.')
+      setProfileEditor(null)
+      fetchAll()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Bilgiler güncellenemedi.')
+    } finally {
+      setSavingProfile(false)
+    }
   }
 
   const saveShift = async () => {
@@ -245,7 +339,7 @@ export default function PersonelMesaiSection() {
     setInviteError('')
     if (!invite.name.trim() || !invite.email.trim()) { setInviteError('Ad soyad ve e-posta gerekli.'); return }
     if (!smtp.ready) { setInviteError(smtp.message || 'E-posta (SMTP) entegrasyonu tamamlanmadan davet gönderilemez.'); return }
-    const preset = getPresetForRole('calisan', roleTabs, roleStaff)
+    const preset = getPresetForRole(invite.role || 'calisan', roleTabs, roleStaff)
     setSending(true)
     try {
       const res = await fetch('/api/yonetici/users/invite', {
@@ -255,8 +349,8 @@ export default function PersonelMesaiSection() {
         body: JSON.stringify({
           name: invite.name.trim(),
           email: invite.email.trim(),
-          role: 'calisan',
-          phone: '',
+          role: invite.role || 'calisan',
+          phone: invite.phone.trim(),
           specialty: invite.specialty.trim(),
           color: '#0284c7',
           allowedTabs: preset.allowedTabs,
@@ -267,7 +361,7 @@ export default function PersonelMesaiSection() {
       const data = await res.json().catch(() => ({}))
       if (!res.ok) { setInviteError(data.error || 'Davet gönderilemedi.'); return }
       toast.success('KVKK uyumlu davet e-postası gönderildi.')
-      setInvite({ name: '', specialty: '', email: '', onCalendar: invite.onCalendar })
+      setInvite({ name: '', specialty: '', email: '', phone: '', role: invite.role, onCalendar: invite.onCalendar })
       fetchAll()
     } catch {
       setInviteError('Bağlantı hatası oluştu.')
@@ -286,187 +380,539 @@ export default function PersonelMesaiSection() {
 
   const editorFor = (u: StaffUser) => {
     if (!editor || editor.userId !== u.id) return null
-    const toggleDay = (d: number) => setEditor({ ...editor, days: editor.days.includes(d) ? editor.days.filter((x) => x !== d) : [...editor.days, d].sort((a, b) => a - b) })
+    const toggleDay = (d: number) =>
+      setEditor({
+        ...editor,
+        days: editor.days.includes(d) ? editor.days.filter((x) => x !== d) : [...editor.days, d].sort((a, b) => a - b),
+      })
     const range = editor.repeat === 'week' ? { start: weekStart, end: addDaysKey(weekStart, 6) } : monthBounds(weekStart)
     return (
-      <div className={s.compactEdit}>
-        <div className={s.row} style={{ justifyContent: 'space-between' }}>
+      <div className={pm.drawerStack}>
+        <div className={clay.topBar}>
           <div className={s.dayGrid} aria-label="Çalışma günleri">
-            {WEEK_DAYS_SHORT.map((d, i) => (
-              <button key={d} type="button" aria-pressed={editor.days.includes(i)} className={editor.days.includes(i) ? s.dayBtnOn : s.dayBtn} onClick={() => toggleDay(i)}>
-                <span style={editor.days.includes(i) ? { color: '#ffffff' } : undefined}>{d}</span>
-              </button>
-            ))}
+            {WEEK_DAYS_SHORT.map((d, i) => {
+              const on = editor.days.includes(i)
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  aria-pressed={on}
+                  className={on ? s.dayBtnOn : s.dayBtn}
+                  onClick={() => toggleDay(i)}
+                >
+                  <span style={on ? { color: '#ffffff' } : undefined}>{d}</span>
+                </button>
+              )
+            })}
           </div>
-          <div className={depth.segmentTrack} role="radiogroup" aria-label="Tekrar">
-            <Repeat size={13} style={{ alignSelf: 'center', margin: '0 4px', color: 'var(--foreground-3)' }} />
-            {([['week', 'Haftalık'], ['month', 'Aylık']] as const).map(([k, l]) => (
-              <button key={k} type="button" role="radio" aria-checked={editor.repeat === k} className={editor.repeat === k ? depth.segmentActive : depth.segment} onClick={() => setEditor({ ...editor, repeat: k })}>
-                <span style={editor.repeat === k ? { color: '#ffffff' } : undefined}>{l}</span>
-              </button>
-            ))}
+          <div className={clay.segmentTrack} role="radiogroup" aria-label="Tekrar">
+            <Repeat size={13} style={{ alignSelf: 'center', margin: '0 4px', color: 'var(--foreground-2)' }} />
+            {([['week', 'Haftalık'], ['month', 'Aylık']] as const).map(([k, l]) => {
+              const active = editor.repeat === k
+              return (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  className={active ? clay.segmentOn : clay.segment}
+                  onClick={() => setEditor({ ...editor, repeat: k })}
+                >
+                  <span style={active ? { color: '#ffffff' } : undefined}>{l}</span>
+                </button>
+              )
+            })}
           </div>
         </div>
-        <div className={s.row} style={{ justifyContent: 'space-between' }}>
-          <div className={s.row}>
+        <div className={clay.topBar}>
+          <div className={clay.row}>
             <TimeSelect label="Başlangıç" value={editor.start} onChange={(start) => setEditor({ ...editor, start })} />
             <TimeSelect label="Bitiş" value={editor.end} min={editor.start} allowMidnightEnd onChange={(end) => setEditor({ ...editor, end })} />
           </div>
-          <div className={s.row}>
-            <span className={s.muted}>{shortDate(range.start)} – {shortDate(range.end)} arasına uygulanır</span>
-            <button type="button" className={depth.btn} onClick={() => setEditor(null)}>Kapat</button>
-            <button type="button" className={depth.btnPrimary} disabled={savingShift} onClick={saveShift}>
+          <div className={clay.row}>
+            <span className={clay.wellPill}>
+              {shortDate(range.start)} – {shortDate(range.end)}
+            </span>
+            <button type="button" className={clay.ctlBtnSm} onClick={() => setEditor(null)}>
+              Kapat
+            </button>
+            <button
+              type="button"
+              className={clay.primaryBtn}
+              style={{ minHeight: 32, padding: '0 14px', fontSize: 12 }}
+              disabled={savingShift}
+              onClick={saveShift}
+            >
+              <Check size={13} color="#ffffff" />
               <span style={{ color: '#ffffff' }}>{savingShift ? 'Kaydediliyor…' : 'Kaydet'}</span>
             </button>
           </div>
         </div>
-        {!editor.days.length && <p className={s.muted} style={{ margin: 0 }}>Gün seçmezseniz bu aralıktaki mesaileri kaldırılır.</p>}
+        {!editor.days.length && (
+          <p className={clay.muted} style={{ margin: 0 }}>
+            Gün seçmezseniz bu aralıktaki mesaileri kaldırılır.
+          </p>
+        )}
       </div>
     )
   }
 
-  return (
-    <div className={s.stack}>
-      <div className={s.topBar}>
-        <div className={depth.segmentTrack} role="tablist" aria-label="Personel bölümleri">
-          <button type="button" role="tab" aria-selected={tab === 'plan'} className={tab === 'plan' ? depth.segmentActive : depth.segment} onClick={() => setTab('plan')}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...(tab === 'plan' ? { color: '#ffffff' } : {}) }}><Clock size={13} />Mesai Planı</span>
-          </button>
-          <button type="button" role="tab" aria-selected={tab === 'staff'} className={tab === 'staff' ? depth.segmentActive : depth.segment} onClick={() => setTab('staff')}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...(tab === 'staff' ? { color: '#ffffff' } : {}) }}><Users size={13} />Personeller ({users.length})</span>
-          </button>
-        </div>
-        <span className={depth.badge} style={onCalendarCount ? undefined : { borderColor: 'var(--danger)', color: 'var(--danger)' }}>
-          <CalendarDays size={11} />
-          {onCalendarCount ? `${onCalendarCount} çalışan takvimde görünüyor` : 'Takvimde görünen çalışan yok'}
-        </span>
-      </div>
+  const activeUserCount = users.filter((u) => u.active !== false).length
 
-      {!loaded ? (
-        <span className={s.muted}>Yükleniyor…</span>
-      ) : tab === 'plan' ? (
-        <div className={s.panelCard}>
-          <div className={s.topBar}>
-            <h3 className={s.sectionTitle}>Çalışanlara göre mesai</h3>
-            <div className={depth.pager}>
-              <button type="button" className={s.iconBtn} aria-label="Önceki hafta" onClick={() => { setWeekStart(addDaysKey(weekStart, -7)); setEditor(null) }}><ChevronLeft size={14} /></button>
-              <span style={{ fontWeight: 700, minWidth: 112, textAlign: 'center' }}>{shortDate(weekStart)} – {shortDate(addDaysKey(weekStart, 6))}</span>
-              <button type="button" className={s.iconBtn} aria-label="Sonraki hafta" onClick={() => { setWeekStart(addDaysKey(weekStart, 7)); setEditor(null) }}><ChevronRight size={14} /></button>
+  return (
+    <div className={clay.scope}>
+      {/* Üst Güçlü Mavi Clay Hero Şeridi */}
+      <div className={clay.hero}>
+        <div className={clay.heroMain}>
+          <div className={clay.heroLeft}>
+            <span className={clay.heroBadgeIcon} aria-hidden="true">
+              <Users size={20} strokeWidth={2.3} color="#ffffff" />
+            </span>
+            <div style={{ minWidth: 0 }}>
+              <div className={clay.heroTitleRow}>
+                <h3 className={clay.heroName}>Personeller ve Mesai ({users.length})</h3>
+                <InfoTooltip title="Personel ve mesai" glyph="?">
+                  Her çalışanın satırından haftalık/aylık mesaisini ve yetkilerini doğrudan düzenleyebilirsiniz. İşletme saatleri Genel İşletme Bilgileri’nden belirlenir.
+                </InfoTooltip>
+                <span className={clay.heroPill}>
+                  <CalendarDays size={11} color="#ffffff" />
+                  {onCalendarCount ? `${onCalendarCount} çalışan takvimde görünüyor` : 'Takvimde görünen çalışan yok'}
+                </span>
+                {pending.length > 0 && (
+                  <span className={clay.heroPill}>
+                    <Send size={11} color="#ffffff" />
+                    {pending.length} bekleyen davet
+                  </span>
+                )}
+              </div>
+              <p className={clay.heroMeta}>
+                Her çalışanın satırından profil, haftalık/aylık mesai ve modül yetkilerini doğrudan düzenleyin.
+              </p>
             </div>
           </div>
-          {active.length === 0 ? (
-            <div className={s.emptyState}><Users size={18} />Henüz aktif personel yok. Personeller sekmesinden davet edin.</div>
-          ) : (
-            <div className={s.compactList}>
-              {active.map((u) => {
-                const sum = summarizeStaffWeek(shifts, u.id, weekStart)
-                const editing = editor?.userId === u.id
-                return (
-                  <div key={u.id} className={s.compactRow}>
-                    <div className={s.compactMain}>
-                      <span className={s.avatar} style={{ background: u.color || '#0284c7' }}>{initials(u.name)}</span>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div className={s.staffName}>{u.name}</div>
-                        <div className={s.staffSub}>{sum ? `${formatDayList(sum.days)} · ${sum.startTime}–${sum.endTime}` : 'Bu hafta mesai yok'}</div>
-                      </div>
-                      <div className={s.compactActions}>
-                        {isOnCalendar(u) && <span className={depth.badge}><CalendarDays size={10} />Takvimde</span>}
-                        {canEditShifts && (
-                          <button type="button" className={editing ? depth.btnPrimary : depth.btn} style={{ minHeight: 28, padding: '3px 9px', fontSize: '11.5px' }} aria-expanded={editing} onClick={() => openEditor(u)}>
-                            <Pencil size={12} color={editing ? '#ffffff' : undefined} />
-                            <span style={editing ? { color: '#ffffff' } : undefined}>{editing ? 'Kapat' : 'Düzenle'}</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {editorFor(u)}
-                  </div>
-                )
-              })}
+
+          <div className={clay.heroActions}>
+            <div className={clay.heroPager}>
+              <button
+                type="button"
+                className={clay.heroPagerBtn}
+                aria-label="Önceki hafta"
+                onClick={() => {
+                  setWeekStart(addDaysKey(weekStart, -7))
+                  setEditor(null)
+                }}
+              >
+                <ChevronLeft size={15} color="#ffffff" />
+              </button>
+              <span className={clay.heroPagerText}>
+                {shortDate(weekStart)} – {shortDate(addDaysKey(weekStart, 6))}
+              </span>
+              <button
+                type="button"
+                className={clay.heroPagerBtn}
+                aria-label="Sonraki hafta"
+                onClick={() => {
+                  setWeekStart(addDaysKey(weekStart, 7))
+                  setEditor(null)
+                }}
+              >
+                <ChevronRight size={15} color="#ffffff" />
+              </button>
             </div>
-          )}
-          <span className={s.muted}>İşletme saatleri Genel İşletme Bilgileri’nden belirlenir; burada yalnızca çalışanların mesaisi planlanır.</span>
+          </div>
         </div>
-      ) : (
-        <div className={s.stack}>
-          <p className={s.muted} style={{ margin: 0 }}>
-            <ShieldCheck size={12} style={{ verticalAlign: '-2px', marginRight: 4 }} />
-            Yetkileri düzenlemek için bir personele dokunun. <strong>Takvimde görünsün</strong> açık olan çalışanlar günlük takvimde sütun olarak yer alır.
-          </p>
-          <div className={s.tableWrap}>
-            <table className={s.table}>
+      </div>
+
+      {/* Ekip Listesi ve Mesai Ana Kartı */}
+      <section className={clay.card}>
+        <div className={clay.cardHead}>
+          <div className={clay.cardTitleGroup}>
+            <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+              <Users size={16} strokeWidth={2.3} color="#ffffff" />
+            </span>
+            <div className={clay.cardTitleRow}>
+              <h3 className={clay.cardTitle}>Ekip Listesi ve Mesai</h3>
+            </div>
+          </div>
+          <span className={clay.wellPill}>{activeUserCount} aktif</span>
+        </div>
+
+        {!loaded ? (
+          <div className={clay.emptyHero}>
+            <span className={clay.muted}>Yükleniyor…</span>
+          </div>
+        ) : users.length === 0 && pending.length === 0 ? (
+          <div className={clay.emptyHero}>
+            <span className={clay.muted}>Henüz ekip üyesi bulunmuyor.</span>
+          </div>
+        ) : (
+          <div className={clay.tableShell}>
+            <table className={clay.table}>
               <thead>
                 <tr>
-                  <th>Personel</th>
-                  <th>Rol</th>
+                  <th>Kullanıcı / Personel</th>
+                  <th>Rol &amp; Hesap</th>
+                  <th>Mesai ({shortDate(weekStart)})</th>
                   <th>Takvim</th>
                   <th>Durum</th>
-                  <th className={s.stickyCol}><span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>Yetkiler</span></th>
+                  <th className={clay.stickyCol}>İşlemler</th>
                 </tr>
               </thead>
               <tbody>
                 {users.map((u) => {
-                  const open = openPermId === u.id
+                  const permOpen = openPermId === u.id
+                  const shiftOpen = editor?.userId === u.id
+                  const profileOpen = profileEditor?.userId === u.id
+                  const rowExpanded = permOpen || shiftOpen || profileOpen
                   const role = ROLE_BADGE_META[u.role] || ROLE_BADGE_META.calisan!
                   const { tabs, staff } = accessOf(u)
                   const activeCount = permDefs.filter((p) => tabs.includes(p.id)).length + (staff.showOnCalendar ? 1 : 0)
                   const admin = isAdmin(u)
+                  const sum = summarizeStaffWeek(shifts, u.id, weekStart)
                   return (
                     <Fragment key={u.id}>
-                      <tr className={`${canManageStaff && !admin ? s.clickRow : ''} ${open ? s.rowOpen : ''}`} onClick={() => canManageStaff && !admin && setOpenPermId(open ? null : u.id)}>
+                      <tr
+                        className={`${canManageStaff ? clay.rowClick : ''} ${rowExpanded ? clay.rowOpen : ''}`}
+                        onClick={() => canManageStaff && openProfileEditor(u)}
+                      >
                         <td>
-                          <span className={s.row} style={{ flexWrap: 'nowrap' }}>
-                            <span className={s.avatar} style={{ background: u.color || '#0284c7' }}>{initials(u.name)}</span>
-                            <span style={{ minWidth: 0 }}>
-                              <strong className={s.staffName} style={{ display: 'block' }}>{u.name}</strong>
-                              <span className={s.staffSub} style={{ display: 'block' }}>{u.specialty || role.label} · {u.email || 'E-posta yok'}</span>
+                          <span className={pm.staffCell}>
+                            <span className={clay.avatarChip} style={{ background: u.color || '#255ee3' }}>
+                              {initials(u.name)}
+                            </span>
+                            <span className={pm.staffText}>
+                              <strong className={pm.staffName}>
+                                {u.name}
+                                {u.specialty ? (
+                                  <span className={`${clay.muted} ${pm.staffSpecialty}`}> · {u.specialty}</span>
+                                ) : null}
+                              </strong>
+                              <span className={pm.staffSubRow}>
+                                <span className={pm.staffContact}>
+                                  <Mail size={10} /> {u.email || 'E-posta yok'}
+                                </span>
+                                {u.phone && (
+                                  <span className={pm.staffContact}>
+                                    <Phone size={10} /> {u.phone}
+                                  </span>
+                                )}
+                              </span>
                             </span>
                           </span>
                         </td>
-                        <td><span style={{ fontSize: '0.7rem', fontWeight: 750, padding: '2px 8px', borderRadius: 7, background: role.bg, border: `1px solid ${role.border}`, color: role.color, whiteSpace: 'nowrap' }}>{role.label}</span></td>
-                        <td>{isOnCalendar(u) ? <span className={depth.badge}><CalendarDays size={11} />Takvimde</span> : <span className={s.muted}>Kapalı</span>}</td>
-                        <td>{u.active !== false ? <span className={s.statusOk}>Aktif</span> : <span className={s.statusOff}>Donduruldu</span>}</td>
-                        <td className={s.stickyCol} onClick={(e) => e.stopPropagation()}>
-                          {admin ? (
-                            <span className={s.muted} title="Yönetici tüm modüllere erişir">Tüm yetkiler</span>
-                          ) : canManageStaff ? (
-                            <button type="button" className={open ? depth.btnPrimary : depth.btn} style={{ minHeight: 30, padding: '4px 10px', whiteSpace: 'nowrap' }} aria-expanded={open} aria-label={`${u.name} yetkilerini düzenle`} onClick={() => setOpenPermId(open ? null : u.id)}>
-                              <ShieldCheck size={13} color={open ? '#ffffff' : undefined} />
-                              <span style={open ? { color: '#ffffff' } : undefined}>Yetkiler ({activeCount})</span>
-                              {open ? <ChevronUp size={13} color="#ffffff" /> : <ChevronDown size={13} />}
-                            </button>
-                          ) : null}
+                        <td>
+                          <div className={pm.roleWrap}>
+                            <span
+                              className={pm.rolePill}
+                              style={{ background: role.bg, borderColor: role.border, color: role.color }}
+                            >
+                              {role.label}
+                            </span>
+                            <span className={`${clay.muted} ${pm.loginMeta}`}>
+                              <UserCheck size={10} /> {formatLoginDate(u.lastLoginAt)}
+                            </span>
+                          </div>
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          {sum ? (
+                            <span className={clay.wellPill}>
+                              <Clock size={11} />
+                              {formatDayList(sum.days)} · {sum.startTime}–{sum.endTime}
+                            </span>
+                          ) : (
+                            <span className={clay.muted}>Bu hafta mesai yok</span>
+                          )}
+                        </td>
+                        <td>
+                          {isOnCalendar(u) ? (
+                            <span className={clay.pillBrand}>
+                              <CalendarDays size={11} />
+                              Takvimde
+                            </span>
+                          ) : (
+                            <span className={clay.muted}>Kapalı</span>
+                          )}
+                        </td>
+                        <td>
+                          {u.active !== false ? (
+                            <span className={clay.pillGood}>Aktif</span>
+                          ) : (
+                            <span className={clay.pillDanger}>Donduruldu</span>
+                          )}
+                        </td>
+                        <td className={clay.stickyCol} onClick={(e) => e.stopPropagation()}>
+                          <div className={pm.actionGroup}>
+                            {canManageStaff && (
+                              <button
+                                type="button"
+                                className={profileOpen ? `${clay.ctlBtnSm} ${clay.ctlBtnOn}` : clay.ctlBtnSm}
+                                aria-expanded={profileOpen}
+                                aria-label={`${u.name} bilgilerini düzenle`}
+                                onClick={() => openProfileEditor(u)}
+                              >
+                                <Pencil size={12} color={profileOpen ? '#ffffff' : undefined} />
+                                <span style={profileOpen ? { color: '#ffffff' } : undefined}>
+                                  {profileOpen ? 'Kapat' : 'Düzenle'}
+                                </span>
+                              </button>
+                            )}
+                            {canEditShifts && u.active !== false && (
+                              <button
+                                type="button"
+                                className={shiftOpen ? `${clay.ctlBtnSm} ${clay.ctlBtnOn}` : clay.ctlBtnSm}
+                                aria-expanded={shiftOpen}
+                                aria-label={`${u.name} mesaisini düzenle`}
+                                onClick={() => openEditor(u)}
+                              >
+                                <Clock size={12} color={shiftOpen ? '#ffffff' : undefined} />
+                                <span style={shiftOpen ? { color: '#ffffff' } : undefined}>
+                                  {shiftOpen ? 'Kapat' : 'Mesai'}
+                                </span>
+                              </button>
+                            )}
+                            {admin ? (
+                              <span className={clay.wellPill} title="Yönetici tüm modüllere erişir">
+                                Tüm yetkiler
+                              </span>
+                            ) : canManageStaff ? (
+                              <button
+                                type="button"
+                                className={permOpen ? `${clay.ctlBtnSm} ${clay.ctlBtnOn}` : clay.ctlBtnSm}
+                                aria-expanded={permOpen}
+                                aria-label={`${u.name} yetkilerini düzenle`}
+                                onClick={() => togglePerms(u)}
+                              >
+                                <ShieldCheck size={12} color={permOpen ? '#ffffff' : undefined} />
+                                <span style={permOpen ? { color: '#ffffff' } : undefined}>
+                                  Yetkiler ({activeCount})
+                                </span>
+                                {permOpen ? <ChevronUp size={12} color="#ffffff" /> : <ChevronDown size={12} />}
+                              </button>
+                            ) : null}
+                          </div>
                         </td>
                       </tr>
-                      {open && (
+
+                      {profileOpen && profileEditor && (
                         <tr>
-                          <td colSpan={5} className={s.drawer}>
-                            <div className={s.row} style={{ justifyContent: 'space-between', marginBottom: 10 }}>
-                              <span className={s.muted}><strong>{u.name}</strong> · modül ve takvim yetkileri</span>
-                              <div className={s.row} style={{ gap: 6 }}>
-                                <button type="button" className={depth.btn} style={{ minHeight: 30 }} onClick={() => setAccess(u, permDefs.map((p) => p.id), { ...staff, showOnCalendar: true })}>Tüm yetkiler</button>
-                                <button type="button" className={depth.btn} style={{ minHeight: 30 }} onClick={() => setConfirm({ kind: 'freeze', user: u })}>
-                                  {u.active !== false ? <Snowflake size={13} /> : <Play size={13} />}{u.active !== false ? 'Dondur' : 'Etkinleştir'}
-                                </button>
-                                <button type="button" className={depth.btn} style={{ minHeight: 30, color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={() => setConfirm({ kind: 'delete', user: u })}>
-                                  <Trash2 size={13} />Kaldır
-                                </button>
+                          <td colSpan={6} className={clay.drawerWell}>
+                            <form className={pm.drawerStack} onSubmit={(e) => void saveProfileEdit(u, e)}>
+                              <div className={clay.topBar}>
+                                <span className={clay.muted}>
+                                  <strong>{u.name}</strong> · kullanıcı hesap ve profil bilgileri
+                                </span>
+                                <span className={clay.muted}>
+                                  {u.createdAt ? `Kayıt: ${new Date(u.createdAt).toLocaleDateString('tr-TR')} · ` : ''}
+                                  Son giriş: {formatLoginDate(u.lastLoginAt)}
+                                </span>
                               </div>
-                            </div>
-                            <div className={s.permGrid}>
-                              <label className={staff.showOnCalendar ? s.permItemOn : s.permItem}>
-                                <input type="checkbox" checked={Boolean(staff.showOnCalendar)} onChange={(e) => setAccess(u, tabs, { ...staff, showOnCalendar: e.target.checked })} aria-label={`${u.name} — Takvimde görünsün`} />
-                                <CalendarDays size={13} /> Takvimde görünsün
-                              </label>
-                              {permDefs.map((p) => {
-                                const on = tabs.includes(p.id)
-                                return (
-                                  <label key={p.id} className={on ? s.permItemOn : s.permItem}>
-                                    <input type="checkbox" checked={on} onChange={(e) => setAccess(u, e.target.checked ? [...tabs, p.id] : tabs.filter((t) => t !== p.id), staff)} aria-label={`${u.name} — ${p.label}`} />
-                                    {p.label}
-                                  </label>
-                                )
-                              })}
+
+                              <div className={pm.grid3}>
+                                <label className={clay.field}>
+                                  <span className={clay.fieldLabel}>Ad soyad*</span>
+                                  <input
+                                    aria-label="Kullanıcı ad soyad"
+                                    className={clay.wellInput}
+                                    required
+                                    maxLength={100}
+                                    value={profileEditor.name}
+                                    onChange={(e) => setProfileEditor({ ...profileEditor, name: e.target.value })}
+                                  />
+                                </label>
+
+                                <label className={clay.field}>
+                                  <span className={clay.fieldLabel}>E-posta (giriş hesabı)*</span>
+                                  <input
+                                    type="email"
+                                    aria-label="Kullanıcı e-posta"
+                                    className={clay.wellInput}
+                                    required
+                                    maxLength={255}
+                                    value={profileEditor.email}
+                                    onChange={(e) => setProfileEditor({ ...profileEditor, email: e.target.value })}
+                                  />
+                                </label>
+
+                                <label className={clay.field}>
+                                  <span className={clay.fieldLabel}>Telefon</span>
+                                  <input
+                                    type="tel"
+                                    aria-label="Kullanıcı telefon"
+                                    className={clay.wellInput}
+                                    placeholder="05XX XXX XX XX"
+                                    maxLength={32}
+                                    value={profileEditor.phone}
+                                    onChange={(e) => setProfileEditor({ ...profileEditor, phone: e.target.value })}
+                                  />
+                                </label>
+
+                                <label className={clay.field}>
+                                  <span className={clay.fieldLabel}>Unvan / Görev</span>
+                                  <input
+                                    aria-label="Kullanıcı unvan"
+                                    className={clay.wellInput}
+                                    placeholder="Örn. Danışman, Muhasebe"
+                                    maxLength={80}
+                                    value={profileEditor.specialty}
+                                    onChange={(e) => setProfileEditor({ ...profileEditor, specialty: e.target.value })}
+                                  />
+                                </label>
+
+                                <label className={clay.field}>
+                                  <span className={clay.fieldLabel}>Kullanıcı rolü</span>
+                                  {admin ? (
+                                    <input
+                                      className={`${clay.wellInput} ${pm.readonlyInput}`}
+                                      value="Yönetici (sabit)"
+                                      disabled
+                                    />
+                                  ) : (
+                                    <select
+                                      aria-label="Kullanıcı rolü"
+                                      className={clay.wellSelect}
+                                      value={profileEditor.role}
+                                      onChange={(e) => setProfileEditor({ ...profileEditor, role: e.target.value })}
+                                    >
+                                      {EDITABLE_ROLES.map((r) => (
+                                        <option key={r.id} value={r.id}>
+                                          {r.label}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </label>
+
+                                <label className={clay.field}>
+                                  <span className={clay.fieldLabel}>Yeni şifre (isteğe bağlı)</span>
+                                  <input
+                                    type="password"
+                                    aria-label="Yeni şifre"
+                                    className={clay.wellInput}
+                                    placeholder="Boş bırakılırsa değişmez"
+                                    autoComplete="new-password"
+                                    value={profileEditor.password}
+                                    onChange={(e) => setProfileEditor({ ...profileEditor, password: e.target.value })}
+                                  />
+                                </label>
+                              </div>
+
+                              <div className={clay.topBar}>
+                                <div className={pm.swatchRow}>
+                                  <span className={clay.muted}>Takvim rengi:</span>
+                                  {STAFF_COLORS.map((col) => (
+                                    <button
+                                      key={col}
+                                      type="button"
+                                      aria-label={`Renk ${col}`}
+                                      aria-pressed={profileEditor.color === col}
+                                      className={profileEditor.color === col ? pm.swatchOn : pm.swatch}
+                                      style={{ background: col }}
+                                      onClick={() => setProfileEditor({ ...profileEditor, color: col })}
+                                    />
+                                  ))}
+                                </div>
+
+                                <div className={clay.row}>
+                                  <button type="button" className={clay.ctlBtnSm} onClick={() => setProfileEditor(null)}>
+                                    Vazgeç
+                                  </button>
+                                  <button
+                                    type="submit"
+                                    className={clay.primaryBtn}
+                                    style={{ minHeight: 32, padding: '0 14px', fontSize: 12 }}
+                                    disabled={savingProfile}
+                                  >
+                                    <Check size={13} color="#ffffff" />
+                                    <span style={{ color: '#ffffff' }}>
+                                      {savingProfile ? 'Kaydediliyor…' : 'Bilgileri Kaydet'}
+                                    </span>
+                                  </button>
+                                </div>
+                              </div>
+                            </form>
+                          </td>
+                        </tr>
+                      )}
+
+                      {shiftOpen && (
+                        <tr>
+                          <td colSpan={6} className={clay.drawerWell}>
+                            {editorFor(u)}
+                          </td>
+                        </tr>
+                      )}
+
+                      {permOpen && (
+                        <tr>
+                          <td colSpan={6} className={clay.drawerWell}>
+                            <div className={pm.drawerStack}>
+                              <div className={clay.topBar}>
+                                <span className={clay.muted}>
+                                  <strong>{u.name}</strong> · modül ve takvim yetkileri
+                                </span>
+                                <div className={clay.row}>
+                                  <button
+                                    type="button"
+                                    className={clay.ctlBtnSm}
+                                    onClick={() =>
+                                      setAccess(
+                                        u,
+                                        permDefs.map((p) => p.id),
+                                        { ...staff, showOnCalendar: true },
+                                      )
+                                    }
+                                  >
+                                    Tüm yetkiler
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={u.active !== false ? clay.ctlBtnSm : clay.mintBtn}
+                                    onClick={() => setConfirm({ kind: 'freeze', user: u })}
+                                  >
+                                    {u.active !== false ? <Snowflake size={13} /> : <Play size={13} />}
+                                    <span>{u.active !== false ? 'Dondur' : 'Etkinleştir'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={clay.dangerBtn}
+                                    onClick={() => setConfirm({ kind: 'delete', user: u })}
+                                  >
+                                    <Trash2 size={13} />
+                                    <span>Kaldır</span>
+                                  </button>
+                                </div>
+                              </div>
+                              <div className={clay.permGrid}>
+                                <label className={staff.showOnCalendar ? clay.permItemOn : clay.permItem}>
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(staff.showOnCalendar)}
+                                    onChange={(e) => setAccess(u, tabs, { ...staff, showOnCalendar: e.target.checked })}
+                                    aria-label={`${u.name} — Takvimde görünsün`}
+                                  />
+                                  <CalendarDays size={13} /> Takvimde görünsün
+                                </label>
+                                {permDefs.map((p) => {
+                                  const on = tabs.includes(p.id)
+                                  return (
+                                    <label key={p.id} className={on ? clay.permItemOn : clay.permItem}>
+                                      <input
+                                        type="checkbox"
+                                        checked={on}
+                                        onChange={(e) =>
+                                          setAccess(
+                                            u,
+                                            e.target.checked ? [...tabs, p.id] : tabs.filter((t) => t !== p.id),
+                                            staff,
+                                          )
+                                        }
+                                        aria-label={`${u.name} — ${p.label}`}
+                                      />
+                                      {p.label}
+                                    </label>
+                                  )
+                                })}
+                              </div>
                             </div>
                           </td>
                         </tr>
@@ -477,22 +923,57 @@ export default function PersonelMesaiSection() {
                 {pending.map((inv) => (
                   <tr key={inv.id}>
                     <td>
-                      <span className={s.row} style={{ flexWrap: 'nowrap' }}>
-                        <span className={s.avatar} style={{ background: 'var(--foreground-3)' }}>{initials(inv.name)}</span>
-                        <span style={{ minWidth: 0 }}>
-                          <strong className={s.staffName} style={{ display: 'block' }}>{inv.name}</strong>
-                          <span className={s.staffSub} style={{ display: 'block' }}>{inv.specialty || 'Çalışan'} · {inv.email}</span>
+                      <span className={pm.staffCell}>
+                        <span className={clay.avatarChip} style={{ background: '#475569' }}>
+                          {initials(inv.name)}
+                        </span>
+                        <span className={pm.staffText}>
+                          <strong className={pm.staffName}>{inv.name}</strong>
+                          <span className={pm.staffSubRow}>
+                            {inv.specialty || 'Çalışan'} · {inv.email}
+                          </span>
                         </span>
                       </span>
                     </td>
-                    <td><span className={s.muted}>Çalışan</span></td>
-                    <td><span className={s.muted}>—</span></td>
-                    <td><span className={depth.badge}><Send size={11} />Davet gönderildi</span></td>
-                    <td className={s.stickyCol}>
+                    <td>
+                      <span className={clay.muted}>Çalışan</span>
+                    </td>
+                    <td>
+                      <span className={clay.muted}>—</span>
+                    </td>
+                    <td>
+                      <span className={clay.muted}>—</span>
+                    </td>
+                    <td>
+                      <span className={clay.pillBrand}>
+                        <Send size={11} />
+                        Davet gönderildi
+                      </span>
+                    </td>
+                    <td className={clay.stickyCol}>
                       {canManageStaff && (
-                        <span className={s.row} style={{ gap: 4, justifyContent: 'flex-end', flexWrap: 'nowrap' }}>
-                          <button type="button" className={s.iconBtn} title="Davet bağlantısını kopyala" aria-label={`${inv.name} davet bağlantısını kopyala`} onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/invite/${inv.token}`); toast.success('Davet bağlantısı kopyalandı.') }}><Copy size={14} /></button>
-                          <button type="button" className={s.iconBtn} title="Daveti iptal et" aria-label={`${inv.name} davetini iptal et`} style={{ color: 'var(--danger)' }} onClick={() => revokeInvite(inv)}><Trash2 size={14} /></button>
+                        <span className={pm.actionGroup}>
+                          <button
+                            type="button"
+                            className={clay.iconToolBtn}
+                            title="Davet bağlantısını kopyala"
+                            aria-label={`${inv.name} davet bağlantısını kopyala`}
+                            onClick={() => {
+                              navigator.clipboard?.writeText(`${window.location.origin}/invite/${inv.token}`)
+                              toast.success('Davet bağlantısı kopyalandı.')
+                            }}
+                          >
+                            <Copy size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            className={clay.iconToolBtnDanger}
+                            title="Daveti iptal et"
+                            aria-label={`${inv.name} davetini iptal et`}
+                            onClick={() => revokeInvite(inv)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
                         </span>
                       )}
                     </td>
@@ -501,31 +982,114 @@ export default function PersonelMesaiSection() {
               </tbody>
             </table>
           </div>
+        )}
+      </section>
 
-          {canManageStaff && (
-            <form className={s.panelCard} onSubmit={sendInvite}>
-              <h3 className={s.sectionTitle}>Yeni personel davet et</h3>
-              <div className={s.inviteGrid}>
-                <input className={depth.input} aria-label="Ad soyad" placeholder="Ad soyad" value={invite.name} maxLength={100} onChange={(e) => { setInvite({ ...invite, name: e.target.value }); setInviteError('') }} />
-                <input className={depth.input} aria-label="Unvan veya branş" placeholder="Unvan / branş" value={invite.specialty} maxLength={80} onChange={(e) => setInvite({ ...invite, specialty: e.target.value })} />
-                <input className={depth.input} aria-label="E-posta" type="email" placeholder="ad@isletme.com" value={invite.email} maxLength={255} onChange={(e) => { setInvite({ ...invite, email: e.target.value }); setInviteError('') }} />
-                <button type="submit" className={depth.btnPrimary} disabled={sending || !invite.name.trim()}>
-                  <Plus size={14} color="#ffffff" />
-                  <span style={{ color: '#ffffff' }}>{sending ? 'Gönderiliyor…' : 'Davet et'}</span>
-                </button>
+      {/* Yeni Kullanıcı / Personel Davet Kartı */}
+      {loaded && canManageStaff && (
+        <form className={clay.card} onSubmit={sendInvite}>
+          <div className={clay.cardHead}>
+            <div className={clay.cardTitleGroup}>
+              <span className={`${clay.iconChipSm} ${clay.chipMint}`} aria-hidden="true">
+                <Plus size={16} strokeWidth={2.4} color="#ffffff" />
+              </span>
+              <div className={clay.cardTitleRow}>
+                <h3 className={clay.cardTitle}>Yeni kullanıcı / personel davet et</h3>
+                <InfoTooltip title="Ekip daveti" glyph="?">
+                  Davet edilen kullanıcı KVKK onaylı e-posta bağlantısı üzerinden şifresini belirleyerek ekibe katılır.
+                </InfoTooltip>
               </div>
-              <div className={s.row} style={{ justifyContent: 'space-between', marginTop: 10 }}>
-                <label className={s.row} style={{ gap: 6, fontSize: '0.78rem', fontWeight: 650, color: 'var(--foreground)', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={invite.onCalendar} onChange={(e) => setInvite({ ...invite, onCalendar: e.target.checked })} style={{ accentColor: '#2563eb' }} />
-                  <CalendarDays size={13} /> Takvimde görünsün
-                </label>
-                <span className={s.muted}>KVKK onamlı e-posta daveti gönderilir.</span>
-              </div>
-              {!smtp.ready && <p className={s.error}>{smtp.message || 'Davet için Entegrasyonlar (Ayarlar) sekmesinden E-posta (SMTP) kurulumunu tamamlayın.'}</p>}
-              {inviteError && <p className={s.error} role="alert">{inviteError}</p>}
-            </form>
+            </div>
+          </div>
+
+          <div className={pm.grid3}>
+            <input
+              className={clay.wellInput}
+              aria-label="Ad soyad"
+              placeholder="Ad soyad*"
+              value={invite.name}
+              maxLength={100}
+              onChange={(e) => {
+                setInvite({ ...invite, name: e.target.value })
+                setInviteError('')
+              }}
+            />
+            <input
+              className={clay.wellInput}
+              aria-label="E-posta"
+              type="email"
+              placeholder="ad@isletme.com*"
+              value={invite.email}
+              maxLength={255}
+              onChange={(e) => {
+                setInvite({ ...invite, email: e.target.value })
+                setInviteError('')
+              }}
+            />
+            <input
+              className={clay.wellInput}
+              aria-label="Telefon"
+              type="tel"
+              placeholder="Telefon (isteğe bağlı)"
+              value={invite.phone}
+              maxLength={32}
+              onChange={(e) => setInvite({ ...invite, phone: e.target.value })}
+            />
+            <input
+              className={clay.wellInput}
+              aria-label="Unvan veya branş"
+              placeholder="Unvan / görev"
+              value={invite.specialty}
+              maxLength={80}
+              onChange={(e) => setInvite({ ...invite, specialty: e.target.value })}
+            />
+            <select
+              className={clay.wellSelect}
+              aria-label="Rol"
+              value={invite.role}
+              onChange={(e) => setInvite({ ...invite, role: e.target.value })}
+            >
+              {EDITABLE_ROLES.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              className={clay.primaryBtn}
+              disabled={sending || !invite.name.trim()}
+            >
+              <Plus size={14} color="#ffffff" />
+              <span style={{ color: '#ffffff' }}>{sending ? 'Gönderiliyor…' : 'Davet et'}</span>
+            </button>
+          </div>
+
+          <div className={clay.topBar}>
+            <label className={pm.checkLabel}>
+              <input
+                type="checkbox"
+                checked={invite.onCalendar}
+                onChange={(e) => setInvite({ ...invite, onCalendar: e.target.checked })}
+                className={pm.checkbox}
+              />
+              <CalendarDays size={13} />
+              <span>Takvimde görünsün</span>
+            </label>
+            <span className={clay.muted}>KVKK onamlı e-posta daveti gönderilir.</span>
+          </div>
+
+          {!smtp.ready && (
+            <p className={clay.errorText}>
+              {smtp.message || 'Davet için Ayarlar ve Entegrasyonlar bölümünden E-posta (SMTP) kurulumunu tamamlayın.'}
+            </p>
           )}
-        </div>
+          {inviteError && (
+            <p className={clay.errorText} role="alert">
+              {inviteError}
+            </p>
+          )}
+        </form>
       )}
 
       <ConfirmModal

@@ -10,13 +10,14 @@ export interface InfoTooltipProps {
   placement?: 'top' | 'bottom' | 'left' | 'right' | 'auto'
   maxWidth?: number
   size?: 16 | 18
+  glyph?: 'i' | '?'
 }
 
 type Side = 'top' | 'bottom' | 'left' | 'right'
 const GAP = 8
 const EDGE = 8
 
-export default function InfoTooltip({ title, children, placement = 'auto', maxWidth = 300, size = 16 }: InfoTooltipProps) {
+export default function InfoTooltip({ title, children, placement = 'auto', maxWidth = 300, size = 16, glyph = 'i' }: InfoTooltipProps) {
   const id = useId()
   const triggerRef = useRef<HTMLSpanElement>(null)
   const popupRef = useRef<HTMLDivElement>(null)
@@ -95,7 +96,7 @@ export default function InfoTooltip({ title, children, placement = 'auto', maxWi
           boxShadow: 'var(--pc-clay-btn)',
         }}
       >
-        <span aria-hidden="true">ⓘ</span>
+        <span aria-hidden="true">{glyph === '?' ? '?' : 'ⓘ'}</span>
       </span>
       {open && typeof document !== 'undefined' && Boolean(document.body) && createPortal(
         <div

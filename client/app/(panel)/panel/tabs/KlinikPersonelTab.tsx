@@ -530,7 +530,7 @@ export default function KlinikPersonelTab() {
             </div>
             <div style={{ fontSize: '0.78rem', color: 'var(--foreground)', lineHeight: 1.45, fontWeight: 600 }}>
               {smtpStatus.message ||
-                'İşletmenin KVKK uyumlu olarak yeni çalışan veya personel davet edebilmesi için E-Posta (SMTP) entegrasyonunun yapılandırılmış ve aktif olması zorunludur. Lütfen Entegrasyonlar (Ayarlar) sekmesinden E-Posta kurulumunu tamamlayın.'}
+                'İşletmenin KVKK uyumlu olarak yeni çalışan veya personel davet edebilmesi için E-Posta (SMTP) entegrasyonunun yapılandırılmış ve aktif olması zorunludur. Lütfen İşletme ve Kayıtlar > Ayarlar ve Entegrasyonlar bölümünden E-Posta kurulumunu tamamlayın.'}
             </div>
           </div>
         </div>

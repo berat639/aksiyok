@@ -3,20 +3,17 @@
 import EvolutionWhatsAppCard from './EvolutionWhatsAppCard'
 import N8nMetaWhatsAppCard from './N8nMetaWhatsAppCard'
 import BillingIntegrationsCard from './BillingIntegrationsCard'
-import ConfirmModal from './ConfirmModal'
 import SubscriptionCheckoutModal, {
   type SubscriptionModalMode,
   type UpgradeRequestType,
 } from './SubscriptionCheckoutModal'
-import InfoTooltip from './ui/InfoTooltip'
-import { useAuth, type ClinicEntitlements } from '@/lib/auth-context'
-import { PhoneMaskedInput } from '@/lib/phone-mask'
+import { useAuth } from '@/lib/auth-context'
+import clay from '@/app/(panel)/panel/tabs/isletme/isletme-clay.module.css'
 import depth from '@/styles/clinic-depth.module.css'
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Settings } from 'lucide-react'
+import { useEffect, useState, type ReactNode } from 'react'
 import styles from './IntegrationsTab.module.css'
 
-type CloudProvider = 'netgsm' | 'twilio' | 'vonage' | 'custom'
-type ClinicPhone = { id: string; phoneNumber: string; label: string | null; isActive: boolean; isPrimary: boolean }
 type IntegrationTest = { id?: string; status: string; confirmed_at?: string | null; message?: string | null } | null
 type IntegrationState = {
   configured: boolean
@@ -502,59 +499,9 @@ function ManagedIntegrationCard({
   )
 }
 
-type DemoAdminUser = {
-  id: string
-  name: string
-  email: string
-  role: string
-  active: boolean
-  phone?: string
-}
-
-type SubscriptionOverview = {
-  entitlements?: ClinicEntitlements
-  requests?: Array<{
-    id: string
-    requestType: string
-    requestedPlan?: string | null
-    status: string
-    createdAt?: string
-  }>
-  payments?: Array<Record<string, unknown>>
-  iyzicoConfigured?: boolean
-}
-
-const PLAN_STATUS_LABELS: Record<string, string> = {
-  trial: '7 Günlük Deneme',
-  active: 'Aktif Abonelik',
-  past_due: 'Ödeme Bekliyor',
-  canceled: 'İptal Edildi',
-  expired: 'Deneme Süresi Doldu',
-}
-
-const UPGRADE_REQ_LABELS: Record<string, string> = {
-  pro_upgrade: 'Pro Paket Geçişi',
-  whatsapp: 'WhatsApp Asistanı',
-  inbound_call: 'Gelen Arama Asistanı',
-  outbound_call: 'Giden Arama Asistanı',
-  kurumsal_lead: 'Kurumsal Paket',
-}
-
-const UPGRADE_REQ_STATUS_LABELS: Record<string, string> = {
-  pending: 'İnceleniyor',
-  contacted: 'İletişime Geçildi',
-  approved: 'Onaylandı',
-  rejected: 'Reddedildi',
-}
-
 export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' }: { apiPrefix?: string }) {
   const { user, refreshUser } = useAuth()
 
-  // Subscription & Demo Admins State
-  const [subscription, setSubscription] = useState<SubscriptionOverview | null>(null)
-  const [demoAdmins, setDemoAdmins] = useState<DemoAdminUser[]>([])
-  const [newAdminForm, setNewAdminForm] = useState({ name: '', email: '', password: '', phone: '' })
-  const [addingAdmin, setAddingAdmin] = useState(false)
   const [subModal, setSubModal] = useState<{
     open: boolean
     mode: SubscriptionModalMode
@@ -562,34 +509,6 @@ export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' 
     requestType?: UpgradeRequestType
     requestedPlan?: 'pro' | 'kurumsal'
   }>({ open: false, mode: 'Checkout' })
-  const [confirmCancelSub, setConfirmCancelSub] = useState(false)
-  const [cancelingSub, setCancelingSub] = useState(false)
-
-  // VoIP States
-  const [voipProvider, setVoipProvider] = useState<CloudProvider>('netgsm')
-  const [voipLabel, setVoipLabel] = useState('Netgsm Bulut Santral')
-  const [voipBaseUrl, setVoipBaseUrl] = useState('https://api.netgsm.com.tr/voice/v1/')
-  const [voipTrunkHost, setVoipTrunkHost] = useState('')
-  const [clinicPhones, setClinicPhones] = useState<ClinicPhone[]>([])
-  const [newPhone, setNewPhone] = useState('')
-  const [newPhoneLabel, setNewPhoneLabel] = useState('')
-
-  // SMS States
-  const [smsUsercode, setSmsUsercode] = useState('')
-  const [smsPassword, setSmsPassword] = useState('')
-  const [smsSenderId, setSmsSenderId] = useState('')
-
-  // SMTP States
-  const [smtpHost, setSmtpHost] = useState('')
-  const [smtpPort, setSmtpPort] = useState('')
-  const [smtpUser, setSmtpUser] = useState('')
-  const [smtpPass, setSmtpPass] = useState('')
-  const [smtpSecure, setSmtpSecure] = useState('none')
-
-  // Branding / Logo State
-  const [brandingLogoUrl, setBrandingLogoUrl] = useState('')
-  const [uploadingLogo, setUploadingLogo] = useState(false)
-  const [logoPreviewError, setLogoPreviewError] = useState(false)
 
   // Notification Policy State
   const [notificationPolicy, setNotificationPolicy] = useState<NotificationPolicyState>(DEFAULT_NOTIFICATION_POLICY_STATE)
@@ -603,87 +522,6 @@ export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' 
   const showToast = (type: 'success' | 'error', text: string) => {
     setToast({ type, text })
     setTimeout(() => setToast(null), 4000)
-  }
-
-  const refreshSubscriptionAndAdmins = useCallback(async () => {
-    try {
-      const [subRes, usersRes] = await Promise.all([
-        fetch('/api/billing/subscription', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/admin/users', { cache: 'no-store', credentials: 'include' }).catch(() => null),
-      ])
-      if (subRes && subRes.ok) {
-        const subData = await subRes.json().catch(() => null)
-        if (subData && typeof subData === 'object') {
-          setSubscription(subData as SubscriptionOverview)
-        }
-      }
-      if (usersRes && usersRes.ok) {
-        const usersData = await usersRes.json().catch(() => [])
-        if (Array.isArray(usersData)) {
-          setDemoAdmins(usersData as DemoAdminUser[])
-        }
-      }
-    } catch {}
-  }, [])
-
-  useEffect(() => {
-    void refreshSubscriptionAndAdmins()
-  }, [refreshSubscriptionAndAdmins])
-
-  const handleAddDemoAdmin = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!newAdminForm.name.trim() || !newAdminForm.email.trim() || newAdminForm.password.length < 6) {
-      showToast('error', 'Lütfen ad soyad, e-posta ve en az 6 karakterli şifre girin.')
-      return
-    }
-    setAddingAdmin(true)
-    try {
-      const res = await fetch('/api/yonetici/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          name: newAdminForm.name.trim(),
-          email: newAdminForm.email.trim().toLowerCase(),
-          password: newAdminForm.password,
-          phone: newAdminForm.phone || undefined,
-          role: 'yonetici',
-        }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        showToast('error', data.error || '2. yönetici eklenemedi.')
-        return
-      }
-      setNewAdminForm({ name: '', email: '', password: '', phone: '' })
-      await refreshSubscriptionAndAdmins()
-      await refreshUser()
-      showToast('success', 'Yeni yönetici hesabı başarıyla oluşturuldu.')
-    } catch {
-      showToast('error', 'Sunucuya bağlanılamadı.')
-    } finally {
-      setAddingAdmin(false)
-    }
-  }
-
-  const handleCancelSubscription = async () => {
-    setCancelingSub(true)
-    try {
-      const res = await fetch('/api/billing/cancel', { method: 'POST' })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        showToast('error', data.error || 'Abonelik iptal edilemedi.')
-        return
-      }
-      setConfirmCancelSub(false)
-      await refreshSubscriptionAndAdmins()
-      await refreshUser()
-      showToast('success', 'Abonelik yenilemesi iptal edildi. Dönem sonuna kadar erişiminiz devam edecektir.')
-    } catch {
-      showToast('error', 'İptal işlemi sırasında hata oluştu.')
-    } finally {
-      setCancelingSub(false)
-    }
   }
 
   const refreshIntegrations = async () => {
@@ -702,30 +540,9 @@ export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' 
       .then(res => res.json())
       .then(data => {
         if (data.phone && data.sms && data.smtp) setIntegrationStatus(data as IntegrationOverview)
-        if (data.voipProvider) setVoipProvider(data.voipProvider as CloudProvider)
-        if (data.voipLabel) setVoipLabel(data.voipLabel)
-        if (data.voipBaseUrl) setVoipBaseUrl(data.voipBaseUrl)
-        if (data.voipTrunkHost) setVoipTrunkHost(data.voipTrunkHost)
-        
-        if (data.smtpHost) setSmtpHost(data.smtpHost)
-        if (data.smtpPort) setSmtpPort(data.smtpPort)
-        if (data.smtpUser) setSmtpUser(data.smtpUser)
-        if (data.smtpPass) setSmtpPass(data.smtpPass)
-        if (data.smtpSecure) setSmtpSecure(data.smtpSecure)
-
-        if (data.smsUsercode) setSmsUsercode(data.smsUsercode)
-        if (data.smsPassword) setSmsPassword(data.smsPassword)
-        if (data.smsSenderId) setSmsSenderId(data.smsSenderId)
-
-
       })
       .catch(() => showToast('error', 'Bağlantı bilgileri alınamadı'))
       .finally(() => setLoading(false))
-
-    fetch('/api/admin/settings/branding')
-      .then(r => r.json())
-      .then(data => { if (data.logoUrl) setBrandingLogoUrl(data.logoUrl) })
-      .catch(() => {})
 
     fetch('/api/admin/settings/notification-policy')
       .then(r => r.ok ? r.json() : null)
@@ -778,27 +595,6 @@ export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' 
     }
   }
 
-  const addClinicPhone = async () => {
-    if (!newPhone.trim()) return
-    const res = await fetch('/api/yonetici/telephony-numbers', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phoneNumber: newPhone, label: newPhoneLabel, isPrimary: clinicPhones.length === 0 }),
-    })
-    const data = await res.json()
-    if (!res.ok) return showToast('error', data.error || 'Telefon eklenemedi')
-    setClinicPhones(prev => [...prev, data]); setNewPhone(''); setNewPhoneLabel('')
-    showToast('success', 'Telefon numarası işletmeye bağlandı')
-  }
-
-  const toggleClinicPhone = async (phone: ClinicPhone) => {
-    const res = await fetch(`/api/yonetici/telephony-numbers/${phone.id}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isActive: !phone.isActive }),
-    })
-    if (!res.ok) return showToast('error', 'Telefon durumu güncellenemedi')
-    setClinicPhones(prev => prev.map(x => x.id === phone.id ? { ...x, isActive: !phone.isActive } : x))
-  }
-
   const handleSave = async () => {
     setSaving(true)
     try {
@@ -817,330 +613,36 @@ export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' 
     }
   }
 
-  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setUploadingLogo(true)
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const res = await fetch('/api/admin/settings/logo-upload', {
-        method: 'POST',
-        body: formData
-      })
-      const data = await res.json()
-      if (!res.ok || data.error) throw new Error(data.error || 'Yükleme hatası')
-      setBrandingLogoUrl(data.logoUrl)
-      setLogoPreviewError(false)
-      showToast('success', 'Amblem başarıyla yüklendi')
-    } catch (err: any) {
-      showToast('error', err.message || 'Amblem yüklenemedi')
-    } finally {
-      setUploadingLogo(false)
-    }
-  }
-
   if (loading) return <div className={styles.loading}><Spinner /></div>
 
-  const effectivePlan: ClinicEntitlements | undefined = subscription?.entitlements || user?.plan
-  const isDemoLocked = Boolean(effectivePlan?.planId === 'demo' && !user?.canManagePlatform)
-  const adminOnlyUsers = demoAdmins.filter(u => u.role === 'yonetici')
-  const maxAllowedUsers = effectivePlan?.maxUsers || (effectivePlan?.planId === 'pro' ? 10 : effectivePlan?.planId === 'kurumsal' ? 50 : 2)
-  const activeCount = effectivePlan?.activeUsersCount ?? (demoAdmins.filter(u => u.active !== false).length || 1)
-  const planDisplayName =
-    effectivePlan?.planName ||
-    (effectivePlan?.planId === 'pro'
-      ? 'Pro Paket'
-      : effectivePlan?.planId === 'kurumsal'
-        ? 'Kurumsal Paket'
-        : 'Demo Paket')
+  const isDemoLocked = Boolean(user?.plan?.planId === 'demo' && !user?.canManagePlatform)
 
   return (
-    <div className={styles.page}>
+    <div className={`${clay.scope} ${styles.page}`}>
       {toast && (
         <div className={`${styles.toast} ${toast.type === 'success' ? styles.toastSuccess : styles.toastError}`} role="status">
           {toast.text}
         </div>
       )}
 
-      {/* Abonelik, Paket ve Yönetici Hesapları */}
-      <section className={styles.card}>
-        <div className={styles.comingSoonHeader} style={{ marginBottom: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <h3 className={styles.cardTitle} style={{ margin: 0 }}>
-              Abonelik, Paket ve Yönetici Hesapları
-            </h3>
-            <InfoTooltip title="Paket Hakları ve Kullanıcı Kapasitesi">
-              Demo pakette 7 gün boyunca Web Asistanı ve en fazla 2 Yönetici hesabı aktiftir. Pro pakette (7.000 ₺ + KDV / ay) 10 kullanıcı, Personel, Finans, Stok, WhatsApp Business ve Sesli Santral asistanları açılır.
-            </InfoTooltip>
-          </div>
-          {effectivePlan && (
-            <span
-              className={`${styles.statusBadge} ${
-                effectivePlan.isTrialExpired || effectivePlan.planStatus === 'expired'
-                  ? styles.statusDanger
-                  : effectivePlan.planStatus === 'active'
-                    ? styles.statusSuccess
-                    : styles.statusWarning
-              }`}
-            >
-              {planDisplayName} · {PLAN_STATUS_LABELS[effectivePlan.planStatus] || effectivePlan.planStatus}
+      {/* Üst Güçlü Mavi Clay Hero Şeridi */}
+      <div className={clay.hero}>
+        <div className={clay.heroMain}>
+          <div className={clay.heroLeft}>
+            <span className={clay.heroBadgeIcon} aria-hidden="true">
+              <Settings size={20} strokeWidth={2.2} color="#ffffff" />
             </span>
-          )}
-        </div>
-
-        <div className={styles.grid} style={{ marginBottom: 16 }}>
-          <div className={styles.roleGroup} style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Aktif Paket
-            </div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--foreground)', marginTop: 4 }}>
-              {planDisplayName}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--foreground-2)', marginTop: 2 }}>
-              {effectivePlan?.planId === 'pro'
-                ? '7.000 ₺ + KDV (8.400 ₺ / ay)'
-                : effectivePlan?.planId === 'kurumsal'
-                  ? 'Kurumsal Özel Sözleşme'
-                  : '7 Gün Ücretsiz Başlangıç'}
-            </div>
-          </div>
-
-          <div className={styles.roleGroup} style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Kullanıcı Limiti
-            </div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--foreground)', marginTop: 4 }}>
-              {activeCount} / {maxAllowedUsers} Aktif Kullanıcı
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--foreground-2)', marginTop: 2 }}>
-              {effectivePlan?.planId === 'demo'
-                ? 'En fazla 2 Yönetici hesabı'
-                : effectivePlan?.pendingInvitesCount
-                  ? `${effectivePlan.pendingInvitesCount} bekleyen davet`
-                  : 'Tüm personel rolleri açık'}
-            </div>
-          </div>
-
-          <div className={styles.roleGroup} style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--foreground-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              {effectivePlan?.trialEndsAt ? 'Deneme Bitiş Tarihi' : 'Dönem / Yenileme'}
-            </div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--foreground)', marginTop: 4 }}>
-              {effectivePlan?.trialEndsAt
-                ? new Date(effectivePlan.trialEndsAt).toLocaleDateString('tr-TR')
-                : effectivePlan?.currentPeriodEnd
-                  ? new Date(effectivePlan.currentPeriodEnd).toLocaleDateString('tr-TR')
-                  : 'Aktif'}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--foreground-2)', marginTop: 2 }}>
-              {effectivePlan?.trialEndsAt
-                ? effectivePlan.isTrialExpired
-                  ? 'Deneme süresi sona erdi'
-                  : `Kalan süre: ${effectivePlan.trialDaysRemaining ?? 0} gün`
-                : effectivePlan?.planStatus === 'canceled'
-                  ? 'Dönem sonunda yenilenmeyecek'
-                  : 'Kesintisiz erişim'}
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
-          {(!effectivePlan || effectivePlan.planId === 'demo' || effectivePlan.planStatus === 'expired' || effectivePlan.planStatus === 'canceled') && (
-            <button
-              type="button"
-              className={styles.saveButton}
-              onClick={() => setSubModal({ open: true, mode: 'Checkout', requestType: 'pro_upgrade', requestedPlan: 'pro' })}
-            >
-              <span>🚀 Pro Pakete Yükselt (7.000 ₺ + KDV)</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            className={depth.btn}
-            style={{ minHeight: 40, padding: '8px 14px' }}
-            onClick={() =>
-              setSubModal({
-                open: true,
-                mode: 'RequestAssistant',
-                requestType: 'kurumsal_lead',
-                requestedPlan: 'kurumsal',
-                featureTitle: 'Kurumsal Paket',
-              })
-            }
-          >
-            Kurumsal Paket İçin Satışla Görüş
-          </button>
-
-          {effectivePlan?.planId === 'pro' && effectivePlan.planStatus === 'active' && (
-            <button
-              type="button"
-              disabled={cancelingSub}
-              onClick={() => setConfirmCancelSub(true)}
-              style={{
-                minHeight: 40,
-                padding: '8px 14px',
-                borderRadius: 9,
-                border: '1px solid var(--danger)',
-                background: 'var(--card-inner)',
-                color: 'var(--danger)',
-                fontWeight: 700,
-                fontSize: 13,
-                cursor: 'pointer',
-                boxShadow: 'var(--pc-clay-btn)',
-              }}
-            >
-              Aboneliği İptal Et
-            </button>
-          )}
-        </div>
-
-        {subscription?.requests && subscription.requests.length > 0 && (
-          <div className={styles.roleGroup} style={{ marginTop: 14, padding: '10px 14px' }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--foreground)', marginBottom: 6 }}>
-              Son Paket & Asistan Talepleriniz
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {subscription.requests.slice(0, 4).map(req => (
-                <span key={req.id} className={depth.badge}>
-                  {UPGRADE_REQ_LABELS[req.requestType] || req.requestType} ·{' '}
-                  {UPGRADE_REQ_STATUS_LABELS[req.status] || req.status}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Demo 2-Admin Management Card */}
-        {(!effectivePlan || effectivePlan.planId === 'demo') && (
-          <div className={styles.policyRulesBox} style={{ marginTop: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 750, color: 'var(--foreground)' }}>
-                  Demo Yönetici Kullanıcıları (En Fazla {maxAllowedUsers} Yönetici)
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--foreground-2)', marginTop: 2 }}>
-                  Demo pakette İşletme Personeli sekmesi kilitlidir; 2. yönetici ortağınızı doğrudan buradan ekleyebilirsiniz.
-                </div>
+            <div style={{ minWidth: 0 }}>
+              <div className={clay.heroTitleRow}>
+                <h3 className={clay.heroName}>Ayarlar ve Entegrasyonlar</h3>
               </div>
-              <span className={depth.badge}>
-                {adminOnlyUsers.length} / {maxAllowedUsers} Yönetici
-              </span>
+              <p className={clay.heroMeta}>
+                Bildirim kanal önceliği, e-posta (SMTP), SMS, santral, WhatsApp ve fatura bağlantılarını buradan yönetin.
+              </p>
             </div>
-
-            {adminOnlyUsers.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {adminOnlyUsers.map(adm => (
-                  <div
-                    key={adm.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 10,
-                      padding: '8px 12px',
-                      borderRadius: 8,
-                      background: 'var(--card-bg)',
-                      border: '1px solid var(--input-border)',
-                      flexWrap: 'wrap',
-                    }}
-                  >
-                    <div>
-                      <strong style={{ fontSize: 13, color: 'var(--foreground)' }}>{adm.name}</strong>
-                      <span style={{ fontSize: 12, color: 'var(--foreground-2)', marginLeft: 8 }}>{adm.email}</span>
-                    </div>
-                    <span className={`${styles.statusBadge} ${adm.active !== false ? styles.statusSuccess : styles.statusWarning}`}>
-                      {adm.active !== false ? 'Yönetici · Aktif' : 'Pasif'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {adminOnlyUsers.length < maxAllowedUsers ? (
-              <form onSubmit={handleAddDemoAdmin} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div className={styles.grid}>
-                  <Field label="2. Yönetici Ad Soyad *">
-                    <input
-                      required
-                      value={newAdminForm.name}
-                      onChange={e => setNewAdminForm(prev => ({ ...prev, name: e.target.value }))}
-                      placeholder="Örn: Mehmet Demir"
-                    />
-                  </Field>
-                  <Field label="E-posta Adresi *">
-                    <input
-                      type="email"
-                      required
-                      value={newAdminForm.email}
-                      onChange={e => setNewAdminForm(prev => ({ ...prev, email: e.target.value }))}
-                      placeholder="ortak@isletme.com"
-                    />
-                  </Field>
-                  <Field label="Başlangıç Şifresi * (En az 6 karakter)">
-                    <input
-                      type="password"
-                      required
-                      minLength={6}
-                      value={newAdminForm.password}
-                      onChange={e => setNewAdminForm(prev => ({ ...prev, password: e.target.value }))}
-                      placeholder="••••••••"
-                    />
-                  </Field>
-                  <Field label="Telefon (Opsiyonel)">
-                    <PhoneMaskedInput
-                      value={newAdminForm.phone}
-                      onValueChange={phone => setNewAdminForm(prev => ({ ...prev, phone }))}
-                      placeholder="0 (5XX) XXX XX XX"
-                    />
-                  </Field>
-                </div>
-                <div>
-                  <button type="submit" disabled={addingAdmin} className={styles.saveButton}>
-                    <span>{addingAdmin ? 'Ekleniyor...' : '+ 2. Yöneticiyi Ekle'}</span>
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <div style={{ fontSize: 12.5, color: 'var(--foreground-2)', fontWeight: 600 }}>
-                Demo yönetici limitiniz ({maxAllowedUsers}/{maxAllowedUsers}) doldu. 10 kullanıcıya kadar personel ve uzman eklemek için Pro pakete yükseltebilirsiniz.
-              </div>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* Marka / Logo Ayarları */}
-      <SettingsCard title="Marka ve Görünüm" description="Sistemde, özellikle hasta ekranlarında ve panelde görünecek kurum amblemi.">
-        <div className={styles.logoRow}>
-          <div className={styles.logoPreview}>
-            {brandingLogoUrl && !logoPreviewError ? (
-              <img
-                src={brandingLogoUrl}
-                alt="Amblem"
-                onError={() => setLogoPreviewError(true)}
-              />
-            ) : (
-              <span className={styles.logoPlaceholder}>🖼️</span>
-            )}
-          </div>
-          <div className={styles.logoActions}>
-            <label
-              className={styles.uploadButton}
-              style={{ background: '#2563eb', color: '#ffffff' }}
-            >
-              <span style={{ color: '#ffffff' }}>
-                {uploadingLogo ? 'Yükleniyor...' : 'Amblem Seç ve Yükle'}
-              </span>
-              <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleLogoUpload} disabled={uploadingLogo} />
-            </label>
-            <p className={styles.helperText}>
-              PNG, JPG veya WEBP formatlarında, maksimum 2 MB boyutunda görsel yükleyebilirsiniz.
-            </p>
           </div>
         </div>
-      </SettingsCard>
+      </div>
 
       {/* Yönetici Bildirim Kanal Önceliği ve Otomatik Kurallar */}
       <SettingsCard
@@ -1369,23 +871,9 @@ export default function IntegrationsTab({ apiPrefix = '/api/admin/integrations' 
         userName={user?.name}
         onClose={() => setSubModal(prev => ({ ...prev, open: false }))}
         onSuccess={() => {
-          void refreshSubscriptionAndAdmins()
           void refreshUser()
         }}
       />
-
-      {confirmCancelSub && (
-        <ConfirmModal
-          isOpen={true}
-          title="Pro Aboneliği İptal Et"
-          message="Pro paket otomatik yenilemesini iptal etmek istediğinize emin misiniz? Mevcut fatura döneminizin sonuna kadar tüm Pro modüllerini kullanmaya devam edebilirsiniz."
-          confirmText="Evet, Aboneliği İptal Et"
-          cancelText="Vazgeç"
-          variant="warning"
-          onConfirm={() => void handleCancelSubscription()}
-          onClose={() => setConfirmCancelSub(false)}
-        />
-      )}
     </div>
   )
 }

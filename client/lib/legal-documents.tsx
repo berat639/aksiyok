@@ -50,7 +50,7 @@ export const LEGAL_DOCUMENTS: Record<LegalDocKey, LegalDocumentDefinition> = {
       },
       {
         heading: '2. Aylık Abonelik İptali',
-        body: 'Ücretli Pro Paket aboneliğinizi dilediğiniz an Yönetim Paneli > Entegrasyonlar (Ayarlar) > Abonelik bölümünden tek tıkla iptal edebilirsiniz. İptal işlemi gerçekleştiğinde takip eden dönem için yenileme tahsilatı durdurulur ve mevcut fatura döneminizin sonuna kadar tüm Pro özellikleri kullanmaya devam edersiniz.',
+        body: 'Ücretli Pro Paket aboneliğinizi dilediğiniz an Yönetim Paneli > İşletme ve Kayıtlar > İşletme Özet > Paket ve Abonelik Bilgileri bölümünden tek tıkla iptal edebilirsiniz. İptal işlemi gerçekleştiğinde takip eden dönem için yenileme tahsilatı durdurulur ve mevcut fatura döneminizin sonuna kadar tüm Pro özellikleri kullanmaya devam edersiniz.',
       },
       {
         heading: '3. İade Koşulları',

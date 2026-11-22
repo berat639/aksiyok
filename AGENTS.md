@@ -12,18 +12,18 @@
    - Tüm kartlar, modallar, popoverlar, context menüler, butonlar, inputlar ve bildirim kutuları HEM AÇIK (LIGHT) HEM DE KOYU (DARK) temada kusursuz görünmelidir.
    - Renkler her zaman temaya duyarlı CSS değişkenleri (`var(--card-bg)`, `var(--input-bg)`, `var(--input-border)`, `var(--foreground)`, `var(--foreground-2)`, `var(--foreground-3)`, `var(--glass-border)`, `var(--card-inner)`, `var(--accent)`, `var(--danger)` vb.) veya `[data-theme="light"]` / `[data-theme="dark"]` seçicileri ile tanımlanmalıdır.
    - Açık temada siyah/koyu arka planlı yamaların kalması veya açık temada beyaz/açık yazıların okunaksızlaşması kesinlikle kabul edilemez.
-4. **Klinik & Sağlık Renk Mimarisi ve Buton Standartları (Medical Clean Design)**:
-   - **Klinik / Sağlık Kimliği:** Bu bir medikal ve klinik yönetim sistemidir. Renk dili her zaman sağlık, ferahlık, güven, hijyen ve profesyonellik hissettirmelidir. Ana renk paleti **Sağlık Mavisi (Medikal Mavi), Açık Mavi, Buz Mavisi, Nane Yeşili ve Opak Beyaz**'dır.
+4. **Kurumsal & Profesyonel Mavi Renk Mimarisi ve Buton Standartları (Clean Corporate Design)**:
+   - **Platform Kimliği:** Sistem her sektörden işletmeye hizmet veren profesyonel bir iş ve randevu yönetim platformudur. Renk dili her zaman ferahlık, güven, netlik ve profesyonellik hissettirmelidir. Ana renk paleti **Kurumsal Mavi (Canlı Mavi), Açık Mavi, Buz Mavisi, Nane Yeşili ve Opak Beyaz**'dır (Klinik Şablonu aktif olan kiracılarda da aynı uyumlu mavi/nane paleti kullanılır).
    - **Açık (Light) Mod Buton Kuralları (KESİNLİKLE SİYAH/KOYU BUTON VEYA MAVİ BUTON İÇİNDE SİYAH YAZI KULLANILMAZ):**
      - Light modda butonların siyah, antrasit, koyu gri veya koyu lacivert kutu zeminli olması KESİNLİKLE YASAKTIR. Açık ekranda siyah kutulu buton yer alamaz.
      - **Mavi Buton İçinde Siyah/Koyu Yazı Kesinlikle Yasaktır:** Hiçbir yerde (Light veya Dark mod fark etmeksizin) mavi zeminli bir butonun (`#0284c7`, `#2563eb`, `#3b82f6`, `#075cff`, `#1d4ed8`, `.primary`, `.btn-primary`, `.btn-clinic-primary` vb.) içinde siyah veya koyu renkli yazı/ikon (`#000000`, `#060d1a`, `#0f172a`, `var(--foreground)`) KESİNLİKLE OLAMAZ. Mavi butonların metin ve ikon rengi her koşulda saf beyaz (`#ffffff`) olmak zorundadır; global tema kuralları mavi butonların veya içindeki `span`/`svg` elemanlarının beyaz rengini asla ezemez.
-     - Birincil Butonlar (Primary): Canlı medikal mavi (`#0284c7`, `#2563eb`), saf beyaz yazı (`#ffffff`).
-     - İkincil / İşlem Butonları (Secondary/Outline): Temiz beyaz veya çok açık buz mavisi zemin (`#ffffff` / `#eff6ff`), medikal mavi sınır (`#93c5fd` / `#3b82f6`), medikal mavi metin (`#0284c7` / `#1d4ed8`).
-     - Pozitif / Eylem Butonları (Excel, İçe Aktar vb.): Ferah nane zemin (`#f0fdf4`), nane yeşili sınır (`#86efac`), sağlık yeşili metin (`#15803d`).
-     - Rozetler ve Sayaçlar (Badges/Pills): Açık gök mavisi zemin (`#e0f2fe`), medikal mavi sınır (`#bae6fd`), koyu medikal mavi metin (`#0369a1`).
-   - **Koyu (Dark) Mod Buton ve Renk Kuralları (Sağlığı Çağrıştıran Medikal Gece Mavisi):**
-     - Koyu modda kasvetli, ölü siyah veya çamurlu renkler yerine; sağlığı ve modern medikal teknolojiyi çağrıştıran derin klinik gece mavisi (`#0b1329`, `#0f172a`, `#132238`), canlı sağlık mavisi (`#38bdf8`, `#60a5fa`) ve nane yeşili (`#34d399`) vurgular kullanılmalıdır.
-     - İkincil butonlar derin klinik mavi zemin (`#132238`), medikal mavi sınır (`#1e40af`) ve parlak mavi metin (`#60a5fa`) ile şık ve sağlık odaklı olmalıdır.
+     - Birincil Butonlar (Primary): Canlı kurumsal mavi (`#0284c7`, `#2563eb`), saf beyaz yazı (`#ffffff`).
+     - İkincil / İşlem Butonları (Secondary/Outline): Temiz beyaz veya çok açık buz mavisi zemin (`#ffffff` / `#eff6ff`), mavi sınır (`#93c5fd` / `#3b82f6`), kurumsal mavi metin (`#0284c7` / `#1d4ed8`).
+     - Pozitif / Eylem Butonları (Excel, İçe Aktar vb.): Ferah nane zemin (`#f0fdf4`), nane yeşili sınır (`#86efac`), yeşil metin (`#15803d`).
+     - Rozetler ve Sayaçlar (Badges/Pills): Açık gök mavisi zemin (`#e0f2fe`), mavi sınır (`#bae6fd`), koyu mavi metin (`#0369a1`).
+   - **Koyu (Dark) Mod Buton ve Renk Kuralları (Derin Gece Mavisi):**
+     - Koyu modda kasvetli, ölü siyah veya çamurlu renkler yerine; modern ve güven veren derin gece mavisi (`#0b1329`, `#0f172a`, `#132238`), canlı mavi (`#38bdf8`, `#60a5fa`) ve nane yeşili (`#34d399`) vurgular kullanılmalıdır.
+     - İkincil butonlar derin mavi zemin (`#132238`), mavi sınır (`#1e40af`) ve parlak mavi metin (`#60a5fa`) ile şık olmalıdır.
 5. **Tedavi Planlama Oranında Neomorphism & Claymorphism Tasarım Standardı (`PineTreatmentPlan.module.css` Standardı)**:
    - Cam efekti (`backdrop-filter: blur`) ve yarı saydamlık yasağı kesinlikle korunarak, tüm bileşenlerde **Tedavi Planlama (`PineTreatmentPlan.module.css`)** ekranındaki **Neomorphism ve Claymorphism** oranı (`--pc-neo-card`, `--pc-neo-subcard`, `--pc-neo-inset`, `--pc-clay-btn`, `--pc-clay-pale`, `--pc-clay-primary`, `--pc-clay-total`) kullanılmalıdır:
      - **Neomorphism (Opak Kartlar, Alt Kartlar ve Girdi Alanları):** Ana kartlarda `--pc-neo-card`, iç grup kutularında `--pc-neo-subcard`, tüm `input` / `select` / arama kutularında ve sekme kanallarında içe gömülü `--pc-neo-inset` gölge derinliği kullanılmalıdır.
@@ -35,7 +35,8 @@
      - **Modal Boyutu ve Gövdesi:** `width: min(460px, calc(100vw - 24px))`, `maxWidth: 460px`, `maxHeight: 90vh`, `borderRadius: 14px`, opak `background: var(--card-bg)` (Light: `#ffffff` / `#f4f8fe`, Dark: `#1e293b` / `#0f172a`), `border: 1.5px solid var(--input-border)` ve `boxShadow: var(--pc-modal-shadow)` ile birlikte Neomorphism & Claymorphism kuralları geçerli olmalıdır.
      - **Koyu Mavi (Deep Clinical Blue) Buton Uyumu:** Tüm birincil butonlar, aktif sekmeler ve seçili öğeler birbiriyle tam uyumlu koyu klinik mavi (`linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)`, border `#1d4ed8`, metin `#ffffff`) kullanmalıdır.
      - **Özel Tarih ve Saat Seçiciler:** Tarayıcı varsayılanı olan ham `<input type="date">` ve uzun `<select>` saat listeleri yerine, klinik temasına uyumlu özel `DayPicker` takvim açılır penceresi ve sürüklenebilir 24 saatlik `InteractiveTimeRangePicker` (çift başlıklı slider + saat ızgarası) kullanılmalıdır.
-7. **Tedavi Planlama, Odontogram, Seans Planlama ve Context Menu Standartları (Regresyon Önleme Kuralları)**:
+7. **Opsiyonel Klinik Şablonu (`dental_clinic`) Modülü Standartları (Yalnızca Klinik Şablonu Aktif İşletmeler İçin Regresyon Önleme Kuralları)**:
+   *(Genel işletmelerde klinik/dental ekranlar yüklenmez; yalnızca işletme `businessTemplate === 'dental_clinic'` seçtiğinde aşağıdaki modüler kurallar geçerlidir.)*
    - **İşlem Renk Seçici ve Tüm Ekranlarda Renk Senkronizasyonu**:
      - Tedavi Planlama modalında (`InlineCatalogForm.tsx` / `PineTreatmentPlanView.tsx`) yeni tedavi eklerken veya düzenlerken mutlaka **Klinik İşlem Renk Seçici** bulunmalıdır; burada gereksiz `Diş / Çene / Tüm ağız` (`catalogScope`) select kutusu yer almamalıdır.
      - Seçilen işlem rengi; Tedaviler kataloğunda, Tedavi Planı tablosunda, Odontogram dişlerinin üst kısmında, sağ panel Tedavi Planı kartlarında (`CalendarTab.tsx`) ve Günlük Takvim Seans Planlama modalında (`FastScheduleModal.tsx`) birebir aynı renk kimliğiyle gösterilmelidir.

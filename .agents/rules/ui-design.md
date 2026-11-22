@@ -32,11 +32,11 @@ trigger: always_on
 - **ALWAYS USE CSS VARIABLES**: Use `var(--card-bg)`, `var(--input-bg)`, `var(--input-border)`, `var(--foreground)`, `var(--foreground-2)`, `var(--foreground-3)`, `var(--glass-border)`, `var(--card-inner)`, `var(--accent)`, `var(--danger)` etc.
 - Every newly created or modified component (modal, popover, button, notification box, calendar cell, context menu) MUST look pixel-perfect and highly legible in BOTH dark mode and light mode.
 
-## 4. Clinical & Health Color Palette Architecture
-- **Healthcare Identity**: This is a medical & clinic management platform. Colors must evoke health, hygiene, trust, and freshness.
-- **Core Clinical Palette**: Medical Blue (`#0284c7`, `#2563eb`), Sky/Ice Blue (`#e0f2fe`, `#eff6ff`), Mint Green (`#15803d`, `#34d399`), and Pure Opaque White (`#ffffff`).
-- **FORBIDDEN IN LIGHT MODE**: Creating buttons with black, charcoal, or dark-slate backgrounds (`#1e293b`, `#0f172a`, `#000000`) and colored text is STRICTLY FORBIDDEN in light mode. Light mode must be clean, luminous, and clinical.
-- **DARK MODE CLINICAL IDENTITY**: Dark mode must use deep medical night blues (`#0b1329`, `#0f172a`, `#132238`) with vibrant medical blue (`#38bdf8`, `#60a5fa`) and mint accents (`#34d399`), rather than flat muddy grays.
+## 4. Corporate & Clean Professional Color Palette Architecture
+- **Platform Identity**: This is a multi-sector business, operations, and appointment management platform (with an optional Clinical Template). Colors must evoke clarity, trust, cleanliness, and professionalism.
+- **Core Palette**: Corporate Blue (`#0284c7`, `#2563eb`), Sky/Ice Blue (`#e0f2fe`, `#eff6ff`), Mint Green (`#15803d`, `#34d399`), and Pure Opaque White (`#ffffff`).
+- **FORBIDDEN IN LIGHT MODE**: Creating buttons with black, charcoal, or dark-slate backgrounds (`#1e293b`, `#0f172a`, `#000000`) and colored text is STRICTLY FORBIDDEN in light mode. Light mode must be clean, luminous, and crisp.
+- **DARK MODE IDENTITY**: Dark mode must use deep midnight blues (`#0b1329`, `#0f172a`, `#132238`) with vibrant blue (`#38bdf8`, `#60a5fa`) and mint accents (`#34d399`), rather than flat muddy grays.
 
 ## 5. Neomorphism & Claymorphism Ratio (Tedavi Planlama / `PineTreatmentPlan.module.css` Standard)
 - While strictly keeping all surfaces 100% opaque (no glassmorphism/blur), apply the exact Neomorphism + Claymorphism depth ratio used in `PineTreatmentPlan.module.css`:
@@ -51,7 +51,8 @@ trigger: always_on
   - **Cohesive Deep Clinical Blue**: All primary buttons, active tabs, and selected pills must use the same deep clinical blue (`linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%)`, border `#1d4ed8`, text `#ffffff`).
   - **Custom DatePicker & Interactive Slider HourPicker**: Avoid raw browser-native `<input type="date">` and long `<select>` hour dropdowns; use custom `DayPicker` popovers and dual-thumb 24-hour range sliders + hour grid popovers (`InteractiveTimeRangePicker`).
 
-## 7. Treatment Planning, Odontogram, Session Scheduling & Context Menu Standards (Anti-Regression Rules)
+## 7. Optional Clinical Template (`dental_clinic`) Standards (Anti-Regression Rules)
+*(Dental/medical components stay isolated for tenants using `businessTemplate === 'dental_clinic'`; when that template is enabled, all anti-regression rules below remain strictly enforced.)*
 - **Procedure Color Picker & Cross-View Color Synchronization**:
   - When adding or editing a procedure in the Treatment Planning modal (`InlineCatalogForm.tsx` / `PineTreatmentPlanView.tsx`), a **Clinical Procedure Color Picker** must always be present; the redundant `Diş / Çene / Tüm ağız` (`catalogScope`) select box must NOT be included there.
   - The selected procedure color must be rendered with identical color identity across the Treatments catalog, Treatment Plan table, the top indicator bar/dots of Odontogram teeth, the right-panel Treatment Plan cards (`CalendarTab.tsx`), and the Daily Calendar Session Scheduling modal (`FastScheduleModal.tsx`).

@@ -36,7 +36,15 @@ interface AppointmentDynamicPaymentSectionProps {
   linksRefreshKey?: string
 }
 
-const METHODS = ['Nakit', 'Kredi Kartı', 'Havale / EFT', 'Sigorta / Kurum']
+const METHODS = [
+  'Nakit (Kasa)',
+  'Kredi Kartı / POS',
+  'Havale / EFT / FAST',
+  'Online Ödeme / Sanal POS',
+  'Çek / Senet',
+  'Vadeli / Açık Hesap',
+  'Diğer / Kurum',
+]
 
 export default function AppointmentDynamicPaymentSection({
   appointmentId,
@@ -49,7 +57,7 @@ export default function AppointmentDynamicPaymentSection({
 
   const [formOpen, setFormOpen] = useState(false)
   const [amount, setAmount] = useState('')
-  const [method, setMethod] = useState('Nakit')
+  const [method, setMethod] = useState('Nakit (Kasa)')
   const [status, setStatus] = useState<'completed' | 'pending'>('completed')
   const [notes, setNotes] = useState('')
   const [saving, setSaving] = useState(false)
@@ -91,7 +99,7 @@ export default function AppointmentDynamicPaymentSection({
     } else {
       setAmount('')
     }
-    setMethod('Nakit')
+    setMethod('Nakit (Kasa)')
     setStatus('completed')
     setNotes('')
     setFormOpen(true)

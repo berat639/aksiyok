@@ -369,7 +369,17 @@ export const yoneticiPlugin = new Elysia({ prefix: '/api/yonetici' })
     if (b.active !== undefined) data.active = b.active
     if (b.password) data.passwordHash = await Bun.password.hash(b.password)
 
-    const updated = await updateUser(params.id, data)
+    let updated: Awaited<ReturnType<typeof updateUser>>
+    try {
+      updated = await updateUser(params.id, data)
+    } catch (err: any) {
+      const msg = String(err?.message || err?.cause?.message || '')
+      if (msg.includes('users_email_unique') || msg.includes('duplicate key')) {
+        set.status = 400
+        return { error: 'Bu e-posta adresi başka bir kullanıcı tarafından kullanılıyor.' }
+      }
+      throw err
+    }
     if (!updated) { set.status = 404; return { error: 'Kullanıcı bulunamadı' } }
 
     const finalRole = data.role || updated.role

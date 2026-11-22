@@ -1,0 +1,1469 @@
+/* İşletme, Finans ve Stok Clay/Neo Ortak Tasarım Sistemi — İşletme Özet (kpi.module.css) çizgisi (%100 opak, blur yok, çift tema) */
+
+.scope {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  width: 100%;
+
+  /* Koyu tema (aksiyok varsayılan :root) */
+  --clay-r: 22px;
+  --clay-r-sm: 14px;
+  --clay-ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --clay-ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --clay-surface: linear-gradient(145deg, #243550 0%, #1c2a40 55%, #162235 100%);
+  --clay-surface-solid: #1c2a40;
+  --clay-well: #121d2f;
+  --clay-border: #2c3e5a;
+  --clay-card-sh:
+    8px 12px 24px rgba(2, 6, 23, 0.55),
+    inset 3px 3px 6px rgba(148, 163, 184, 0.14),
+    inset -4px -5px 10px rgba(2, 6, 23, 0.55);
+  --clay-card-sh-hover:
+    12px 16px 30px rgba(2, 6, 23, 0.66),
+    inset 3px 3px 7px rgba(148, 163, 184, 0.2),
+    inset -4px -5px 10px rgba(2, 6, 23, 0.6);
+  --clay-ctl-bg: linear-gradient(145deg, #273a57 0%, #1d2d45 100%);
+  --clay-ctl-sh:
+    4px 5px 10px rgba(2, 6, 23, 0.48),
+    inset 1.5px 1.5px 3px rgba(148, 163, 184, 0.16),
+    inset -2px -2px 4px rgba(2, 6, 23, 0.45);
+  --clay-inset-sh:
+    inset 3px 3px 7px rgba(2, 6, 23, 0.6),
+    inset -2px -2px 5px rgba(71, 85, 105, 0.22);
+
+  --clay-strong-bg: linear-gradient(145deg, #3b74f0 0%, #255ee3 50%, #1a49bf 100%);
+  --clay-strong-sh:
+    10px 14px 28px rgba(15, 38, 110, 0.52),
+    inset 5px 5px 10px rgba(255, 255, 255, 0.28),
+    inset -6px -7px 14px rgba(8, 28, 110, 0.48);
+
+  --clay-c1: #60a5fa;
+  --clay-c2: #38bdf8;
+  --clay-c3: #34d399;
+  --clay-c4: #fbbf24;
+  --clay-c5: #fb7185;
+  --clay-c6: #a78bfa;
+  --clay-grid: #2b3d59;
+  --clay-tip-bg: #0c2155;
+  --clay-good: #34d399;
+  --clay-watch: #fbbf24;
+  --clay-danger: #f87185;
+  --clay-mint-bg: #0b2e20;
+  --clay-mint-border: #059669;
+  --clay-danger-bg: #3b1322;
+  --clay-danger-border: #be123c;
+  --clay-active-row: #183056;
+}
+
+/* Açık tema — berat639/kpi #e7effc clay/neo paleti (%100 opak) */
+:global([data-theme='light']) .scope {
+  --clay-surface: linear-gradient(145deg, #f8fbff 0%, #edf4fe 55%, #e1ebfb 100%);
+  --clay-surface-solid: #eef4fe;
+  --clay-well: #dfe9f9;
+  --clay-border: #ccdcf5;
+  --clay-card-sh:
+    10px 14px 26px rgba(37, 94, 227, 0.14),
+    -6px -6px 16px #ffffff,
+    inset 4px 4px 8px rgba(255, 255, 255, 0.92),
+    inset -5px -6px 12px rgba(37, 94, 227, 0.1);
+  --clay-card-sh-hover:
+    14px 18px 34px rgba(37, 94, 227, 0.2),
+    -6px -6px 16px #ffffff,
+    inset 4px 4px 9px rgba(255, 255, 255, 0.96),
+    inset -5px -6px 12px rgba(37, 94, 227, 0.13);
+  --clay-ctl-bg: linear-gradient(145deg, #ffffff 0%, #ebf2fd 100%);
+  --clay-ctl-sh:
+    4px 6px 12px rgba(37, 94, 227, 0.14),
+    -3px -3px 8px #ffffff,
+    inset 2px 2px 4px rgba(255, 255, 255, 0.9),
+    inset -2px -3px 5px rgba(37, 94, 227, 0.1);
+  --clay-inset-sh:
+    inset 3px 3px 7px rgba(139, 165, 214, 0.45),
+    inset -3px -3px 7px #ffffff;
+
+  --clay-strong-bg: linear-gradient(145deg, #4a82f2 0%, #255ee3 48%, #1a49bf 100%);
+  --clay-strong-sh:
+    10px 16px 30px rgba(37, 94, 227, 0.34),
+    inset 5px 5px 12px rgba(255, 255, 255, 0.36),
+    inset -7px -8px 16px rgba(8, 28, 110, 0.36);
+
+  --clay-c1: #255ee3;
+  --clay-c2: #0ea5e9;
+  --clay-c3: #12a57f;
+  --clay-c4: #d98200;
+  --clay-c5: #e5484d;
+  --clay-c6: #7c5cf0;
+  --clay-grid: #c9d8f2;
+  --clay-tip-bg: #0c2155;
+  --clay-good: #0f766e;
+  --clay-watch: #b45309;
+  --clay-danger: #b91c1c;
+  --clay-mint-bg: #e7fbf3;
+  --clay-mint-border: #6ee7b7;
+  --clay-danger-bg: #feecef;
+  --clay-danger-border: #fda4af;
+  --clay-active-row: #dce9fd;
+}
+
+/* ── Üst Güçlü Mavi Clay Hero Şeridi ──────────────────────────────────────── */
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  border-radius: var(--clay-r);
+  background: var(--clay-strong-bg);
+  box-shadow: var(--clay-strong-sh);
+  color: #ffffff;
+}
+
+.heroMain {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.heroLeft {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+  flex: 1 1 280px;
+}
+
+.heroBadgeIcon {
+  width: 44px;
+  height: 44px;
+  border-radius: 34%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: linear-gradient(145deg, #6fa0ff, #1d4ed8);
+  color: #ffffff;
+  box-shadow:
+    4px 6px 14px rgba(8, 28, 110, 0.45),
+    inset 3px 3px 6px rgba(255, 255, 255, 0.45),
+    inset -3px -4px 7px rgba(8, 28, 110, 0.35);
+}
+
+.heroTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.heroName {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 850;
+  color: #ffffff;
+  line-height: 1.2;
+}
+
+.heroPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #1b4bc0;
+  border: 1px solid #5f8ceb;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.heroMeta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.heroMetaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: #ffffff;
+}
+
+.heroActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.heroGhostBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid #5f8ceb;
+  border-radius: var(--clay-r-sm);
+  background: #1b4bc0;
+  color: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  box-shadow:
+    3px 5px 10px rgba(8, 28, 110, 0.38),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.25),
+    inset -2px -3px 5px rgba(8, 28, 110, 0.35);
+  transition: transform 0.2s var(--clay-ease-pop), background-color 0.15s ease;
+}
+
+.heroGhostBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: #153b9a;
+}
+
+.heroGhostBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.heroPrimaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--clay-r-sm);
+  background: linear-gradient(145deg, #ffffff 0%, #e7effc 100%);
+  color: #0e2152;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 850;
+  cursor: pointer;
+  box-shadow:
+    5px 8px 16px rgba(8, 28, 110, 0.42),
+    inset 2px 2px 4px #ffffff,
+    inset -2px -3px 6px rgba(37, 94, 227, 0.18);
+  transition: transform 0.2s var(--clay-ease-pop);
+}
+
+.heroPrimaryBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.heroPrimaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.heroTabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 11px;
+  border-top: 1px solid #4f81ea;
+}
+
+.heroTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid #5f8ceb;
+  border-radius: 12px;
+  background: #1b4bc0;
+  color: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  box-shadow:
+    3px 5px 10px rgba(8, 28, 110, 0.38),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.25),
+    inset -2px -3px 5px rgba(8, 28, 110, 0.35);
+  transition: transform 0.2s var(--clay-ease-pop), background-color 0.15s ease;
+}
+
+.heroTab:hover {
+  transform: translateY(-1px);
+  background: #153b9a;
+}
+
+.heroTabOn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid #ffffff;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #ffffff 0%, #e7effc 100%);
+  color: #0e2152;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+  box-shadow:
+    5px 8px 16px rgba(8, 28, 110, 0.42),
+    inset 2px 2px 4px #ffffff,
+    inset -2px -3px 6px rgba(37, 94, 227, 0.18);
+  transition: transform 0.2s var(--clay-ease-pop);
+}
+
+.heroSwitchPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 12px;
+  border-radius: var(--clay-r-sm);
+  background: #1b4bc0;
+  border: 1px solid #5f8ceb;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  box-shadow:
+    3px 5px 10px rgba(8, 28, 110, 0.38),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.22),
+    inset -2px -3px 5px rgba(8, 28, 110, 0.35);
+}
+
+.heroSwitchLabel {
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.heroPager {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 2px 6px;
+  border-radius: var(--clay-r-sm);
+  background: #1b4bc0;
+  border: 1px solid #5f8ceb;
+  color: #ffffff;
+  box-shadow:
+    3px 5px 10px rgba(8, 28, 110, 0.38),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.22),
+    inset -2px -3px 5px rgba(8, 28, 110, 0.35);
+}
+
+.heroPagerBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: #ffffff;
+  cursor: pointer;
+  transition: background-color 0.14s ease;
+}
+
+.heroPagerBtn:hover {
+  background: #153b9a;
+}
+
+.heroPagerText {
+  font-size: 12px;
+  font-weight: 800;
+  color: #ffffff;
+  min-width: 112px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Kartlar & Kompakt KPI Kartları ──────────────────────────────────────── */
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--clay-border);
+  border-radius: var(--clay-r);
+  background: var(--clay-surface);
+  box-shadow: var(--clay-card-sh);
+  min-width: 0;
+  transition: transform 0.3s var(--clay-ease-pop), box-shadow 0.3s var(--clay-ease-soft), border-color 0.2s ease;
+}
+
+.cardHover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--clay-card-sh-hover);
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 225px), 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.statCard {
+  composes: card;
+  gap: 11px;
+  padding: 15px 17px;
+}
+
+.statCardClickable {
+  composes: statCard;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.statCardClickable:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--clay-card-sh-hover);
+  border-color: var(--pc-blue);
+}
+
+.statCardActive {
+  border-color: var(--pc-blue);
+  box-shadow: var(--clay-card-sh-hover), 0 0 0 2px rgba(37, 94, 227, 0.22);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cardTitleGroup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cardTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 850;
+  color: var(--foreground);
+  line-height: 1.25;
+}
+
+.statTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--foreground-2);
+  line-height: 1.25;
+}
+
+.statVal {
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.statFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.valGood {
+  color: var(--clay-good);
+}
+
+.valWatch {
+  color: var(--clay-watch);
+}
+
+.valDanger {
+  color: var(--clay-danger);
+}
+
+/* ── 3D Squircle İkon Çipleri (kpi-utils CHIP_COLORS) ───────────────────── */
+.iconChip {
+  width: 38px;
+  height: 38px;
+  border-radius: 34%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #ffffff;
+}
+
+.iconChipSm {
+  width: 34px;
+  height: 34px;
+  border-radius: 34%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #ffffff;
+}
+
+.chipBrand {
+  background: linear-gradient(145deg, #4a82f2, #1d52d1);
+  box-shadow:
+    4px 6px 12px #1d52d155,
+    inset 3px 3px 6px rgba(255, 255, 255, 0.48),
+    inset -4px -4px 8px rgba(0, 0, 0, 0.22);
+}
+
+.chipMint {
+  background: linear-gradient(145deg, #2fd6a6, #0e9a74);
+  box-shadow:
+    4px 6px 12px #0e9a7455,
+    inset 3px 3px 6px rgba(255, 255, 255, 0.48),
+    inset -4px -4px 8px rgba(0, 0, 0, 0.22);
+}
+
+.chipAmber {
+  background: linear-gradient(145deg, #ffbe3d, #d97706);
+  box-shadow:
+    4px 6px 12px #d9770655,
+    inset 3px 3px 6px rgba(255, 255, 255, 0.48),
+    inset -4px -4px 8px rgba(0, 0, 0, 0.22);
+}
+
+.chipCoral {
+  background: linear-gradient(145deg, #ff8591, #dc2626);
+  box-shadow:
+    4px 6px 12px #dc262655,
+    inset 3px 3px 6px rgba(255, 255, 255, 0.48),
+    inset -4px -4px 8px rgba(0, 0, 0, 0.22);
+}
+
+.chipViolet {
+  background: linear-gradient(145deg, #a58bff, #6d28d9);
+  box-shadow:
+    4px 6px 12px #6d28d955,
+    inset 3px 3px 6px rgba(255, 255, 255, 0.48),
+    inset -4px -4px 8px rgba(0, 0, 0, 0.22);
+}
+
+/* ── Oyuk Kuyu Haplar (Well Pills) ───────────────────────────────────────── */
+.wellPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  color: var(--foreground-2);
+  white-space: nowrap;
+}
+
+.pillGood {
+  composes: wellPill;
+  color: var(--clay-good);
+}
+
+.pillWatch {
+  composes: wellPill;
+  color: var(--clay-watch);
+}
+
+.pillDanger {
+  composes: wellPill;
+  color: var(--clay-danger);
+}
+
+.pillBrand {
+  composes: wellPill;
+  color: var(--pc-tint-fg);
+}
+
+/* ── Oyuk Kuyu Form Alanları & Segmentler ───────────────────────────────── */
+.field {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  display: block;
+  margin: 0 0 1px 2px;
+  color: var(--foreground-2);
+  font-size: 11.5px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.fieldBox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--clay-border);
+  border-radius: var(--clay-r-sm);
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.fieldBox:focus-within {
+  border-color: var(--pc-blue);
+  box-shadow: var(--clay-inset-sh), 0 0 0 3px rgba(37, 94, 227, 0.18);
+}
+
+.fieldBoxInvalid {
+  border-color: var(--danger);
+}
+
+.fieldInput {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: 36px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.fieldInput::placeholder {
+  color: var(--pc-muted);
+}
+
+.fieldTextarea {
+  composes: fieldInput;
+  height: auto;
+  min-height: 92px;
+  padding: 10px 0;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.wellInput {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 11px;
+  border: 1px solid var(--clay-border);
+  border-radius: 12px;
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.wellInput:focus {
+  border-color: var(--pc-blue);
+  box-shadow: var(--clay-inset-sh), 0 0 0 3px rgba(37, 94, 227, 0.18);
+}
+
+.wellInput::placeholder {
+  color: var(--pc-muted);
+}
+
+.wellSelect {
+  composes: wellInput;
+  cursor: pointer;
+}
+
+.segmentTrack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--clay-border);
+  border-radius: var(--clay-r-sm);
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+}
+
+.segment {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 29px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--foreground-2);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.18s var(--clay-ease-pop), background-color 0.15s ease, color 0.15s ease;
+}
+
+.segment:hover {
+  color: var(--foreground);
+}
+
+.segmentOn {
+  composes: segment;
+  border-color: #1d4ed8;
+  background: var(--clay-strong-bg);
+  box-shadow:
+    3px 5px 12px rgba(37, 94, 227, 0.34),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.35),
+    inset -2px -3px 5px rgba(8, 28, 110, 0.35);
+  color: #ffffff;
+  font-weight: 850;
+}
+
+.segmentOn:hover {
+  color: #ffffff;
+}
+
+.switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1px solid var(--clay-border);
+  border-radius: 999px;
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, #ffffff 0%, #e7effc 100%);
+  box-shadow: 0 2px 4px rgba(2, 6, 23, 0.3);
+  transition: transform 0.18s var(--clay-ease-pop);
+}
+
+.switch[aria-checked='true'] {
+  border-color: #1d4ed8;
+  background: var(--clay-strong-bg);
+}
+
+.switch[aria-checked='true']::after {
+  transform: translateX(18px);
+}
+
+/* ── Dokunsal Clay Butonlar ──────────────────────────────────────────────── */
+.ctlBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid var(--clay-border);
+  border-radius: var(--clay-r-sm);
+  background: var(--clay-ctl-bg);
+  box-shadow: var(--clay-ctl-sh);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.2s var(--clay-ease-pop), box-shadow 0.2s ease, border-color 0.15s ease;
+}
+
+.ctlBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--pc-blue);
+}
+
+.ctlBtn:active:not(:disabled) {
+  transform: scale(0.97);
+  box-shadow: var(--clay-inset-sh);
+}
+
+.ctlBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.ctlBtnSm {
+  composes: ctlBtn;
+  min-height: 29px;
+  padding: 0 10px;
+  border-radius: 11px;
+  font-size: 11.5px;
+}
+
+.ctlBtnOn {
+  composes: ctlBtn;
+  border-color: #1d4ed8;
+  background: var(--clay-strong-bg);
+  box-shadow:
+    4px 6px 14px rgba(37, 94, 227, 0.36),
+    inset 2px 2px 5px rgba(255, 255, 255, 0.35),
+    inset -3px -3px 6px rgba(8, 28, 110, 0.35);
+  color: #ffffff;
+}
+
+.ctlBtnOn:hover:not(:disabled) {
+  color: #ffffff;
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid #1d4ed8;
+  border-radius: var(--clay-r-sm);
+  background: var(--clay-strong-bg);
+  box-shadow:
+    5px 8px 18px rgba(37, 94, 227, 0.36),
+    inset 2px 2px 5px rgba(255, 255, 255, 0.36),
+    inset -3px -4px 7px rgba(8, 28, 110, 0.36);
+  color: #ffffff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 850;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.2s var(--clay-ease-pop), filter 0.15s ease;
+}
+
+.primaryBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.04);
+}
+
+.primaryBtn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.primaryBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.mintBtn {
+  composes: ctlBtnSm;
+  background: var(--clay-mint-bg);
+  border-color: var(--clay-mint-border);
+  color: var(--clay-good);
+}
+
+.dangerBtn {
+  composes: ctlBtnSm;
+  background: var(--clay-danger-bg);
+  border-color: var(--clay-danger-border);
+  color: var(--clay-danger);
+}
+
+.chipBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--clay-border);
+  border-radius: 11px;
+  background: var(--clay-ctl-bg);
+  box-shadow: var(--clay-ctl-sh);
+  color: var(--foreground-2);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: transform 0.18s var(--clay-ease-pop), border-color 0.14s ease, color 0.14s ease;
+}
+
+.chipBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--pc-blue);
+  color: var(--foreground);
+}
+
+.chipBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.iconToolBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--foreground-2);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.18s var(--clay-ease-pop);
+}
+
+.iconToolBtn:hover {
+  border-color: var(--clay-border);
+  background: var(--clay-well);
+  color: var(--foreground);
+}
+
+.iconToolBtnActive {
+  composes: iconToolBtn;
+  border-color: #1d4ed8;
+  background: var(--clay-strong-bg);
+  color: #ffffff;
+  box-shadow: 0 3px 8px rgba(37, 94, 227, 0.35);
+}
+
+.iconToolBtnDanger {
+  composes: iconToolBtn;
+  color: var(--clay-danger);
+}
+
+.iconToolBtnDanger:hover {
+  border-color: var(--clay-danger-border);
+  background: var(--clay-danger-bg);
+  color: var(--clay-danger);
+}
+
+/* ── Clay/Neo Tablo ve Satır İçi Çekmeceler ────────────────────────────── */
+.tableShell {
+  overflow-x: auto;
+  border: 1px solid var(--clay-border);
+  border-radius: 16px;
+  background: var(--clay-surface-solid);
+  box-shadow: var(--clay-inset-sh);
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+}
+
+.table th {
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--foreground-2);
+  background: var(--clay-well);
+  border-bottom: 1px solid var(--clay-border);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 10px 12px;
+  background: var(--clay-surface-solid);
+  border-bottom: 1px solid var(--clay-border);
+  color: var(--foreground);
+  vertical-align: middle;
+  transition: background-color 0.12s ease;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.rowClick {
+  cursor: pointer;
+}
+
+.table tbody tr:hover td {
+  background: var(--clay-well);
+}
+
+.rowOpen td {
+  background: var(--clay-active-row);
+}
+
+.table tbody tr.rowOpen:hover td {
+  background: var(--clay-active-row);
+}
+
+.stickyCol {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: var(--clay-surface-solid);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.table th.stickyCol {
+  background: var(--clay-well);
+}
+
+.table tbody tr:hover .stickyCol {
+  background: var(--clay-well);
+}
+
+.rowOpen .stickyCol,
+.table tbody tr.rowOpen:hover .stickyCol {
+  background: var(--clay-active-row);
+}
+
+.drawerWell {
+  padding: 14px 16px !important;
+  background: var(--clay-well) !important;
+  box-shadow: var(--clay-inset-sh);
+  border-bottom: 1px solid var(--clay-border);
+}
+
+.table tbody tr:hover td.drawerWell {
+  background: var(--clay-well) !important;
+}
+
+/* ── Alt Kartlar, Kuyu Listeler, Avatarlar & Bildirimler ────────────────── */
+.subCard {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 15px;
+  border: 1px solid var(--clay-border);
+  border-radius: 16px;
+  background: var(--clay-surface);
+  box-shadow: var(--clay-ctl-sh);
+  min-width: 0;
+  transition: transform 0.22s var(--clay-ease-pop), border-color 0.16s ease, box-shadow 0.2s ease;
+}
+
+.subCard:hover {
+  border-color: var(--pc-blue);
+  box-shadow: var(--clay-card-sh-hover);
+}
+
+.subCardActive {
+  composes: subCard;
+  border-color: #1d4ed8;
+  box-shadow: var(--clay-card-sh-hover), 0 0 0 2px rgba(37, 94, 227, 0.24);
+}
+
+.subCardDanger {
+  composes: subCard;
+  border-color: var(--clay-danger-border);
+}
+
+.wellList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 256px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.wellRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--clay-border);
+  border-radius: 14px;
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.18s var(--clay-ease-pop), background-color 0.15s ease;
+}
+
+.wellRow:hover {
+  border-color: var(--pc-blue);
+  transform: translateY(-1px);
+}
+
+.wellRowActive {
+  composes: wellRow;
+  border-color: #1d4ed8;
+  background: var(--clay-active-row);
+}
+
+.avatarChip {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 34%;
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 850;
+  box-shadow:
+    3px 5px 10px rgba(2, 6, 23, 0.25),
+    inset 2px 2px 4px rgba(255, 255, 255, 0.42),
+    inset -2px -3px 5px rgba(0, 0, 0, 0.22);
+}
+
+.permGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 7px;
+}
+
+.permItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--clay-border);
+  border-radius: 11px;
+  background: var(--clay-ctl-bg);
+  box-shadow: var(--clay-ctl-sh);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--foreground-2);
+  cursor: pointer;
+  transition: border-color 0.14s ease, color 0.14s ease;
+}
+
+.permItemOn {
+  composes: permItem;
+  border-color: #1d4ed8;
+  background: var(--clay-active-row);
+  color: var(--pc-tint-fg);
+}
+
+.permItem input {
+  width: 14px;
+  height: 14px;
+  accent-color: #2563eb;
+}
+
+.emptyHero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px 18px;
+  text-align: center;
+  border-radius: var(--clay-r);
+  border: 1px solid var(--clay-border);
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  color: var(--foreground-2);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.noticeInfo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 11px 15px;
+  border: 1px solid var(--clay-border);
+  border-radius: 16px;
+  background: var(--clay-well);
+  box-shadow: var(--clay-inset-sh);
+  font-size: 12px;
+  color: var(--foreground);
+}
+
+.noticeGood {
+  composes: noticeInfo;
+  border-color: var(--clay-mint-border);
+  background: var(--clay-mint-bg);
+}
+
+.noticeWarn {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid var(--clay-danger-border);
+  border-radius: 14px;
+  background: var(--clay-danger-bg);
+  font-size: 12px;
+  color: var(--foreground);
+}
+
+/* Recharts Tooltip — koyu lacivert kutu, her temada saf beyaz yazı */
+.chartTip {
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--clay-tip-bg);
+  color: #ffffff;
+  font-size: 12.5px;
+  font-weight: 800;
+  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.42);
+}
+
+.chartTipLabel {
+  margin: 0 0 3px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #dbeafe;
+}
+
+.chartTipVal {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 900;
+  color: #ffffff;
+}
+
+/* DynamicDataGridPanel Dış Clay Çerçevesi */
+.gridFrame {
+  border: 1px solid var(--clay-border);
+  border-radius: var(--clay-r);
+  background: var(--clay-surface);
+  box-shadow: var(--clay-card-sh);
+  overflow: hidden;
+  min-width: 0;
+  width: 100%;
+}
+
+.gridFrameHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--clay-border);
+}
+
+/* ── Ortak Yardımcılar ──────────────────────────────────────────────────── */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.muted {
+  font-size: 11.5px;
+  color: var(--foreground-2);
+}
+
+.errorText {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--clay-danger);
+}
+
+.goodText {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--clay-good);
+}
+
+/* ── Açık Tema Kontrast Korumaları (globals.css !important kurallarına karşı) */
+:global([data-theme='light']) .scope .fieldInput,
+:global([data-theme='light']) .scope .fieldTextarea {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: var(--foreground) !important;
+}
+
+:global([data-theme='light']) .scope .wellInput,
+:global([data-theme='light']) .scope .wellSelect {
+  background: var(--clay-well) !important;
+  border-color: var(--clay-border) !important;
+  color: var(--foreground) !important;
+}
+
+:global([data-theme='light']) .scope .heroName,
+:global([data-theme='light']) .scope .heroPill,
+:global([data-theme='light']) .scope .heroPill span,
+:global([data-theme='light']) .scope .heroPill *,
+:global([data-theme='light']) .scope .heroMeta,
+:global([data-theme='light']) .scope .heroMetaItem,
+:global([data-theme='light']) .scope .heroMetaItem span,
+:global([data-theme='light']) .scope .heroGhostBtn,
+:global([data-theme='light']) .scope .heroGhostBtn span,
+:global([data-theme='light']) .scope .heroTab,
+:global([data-theme='light']) .scope .heroTab span,
+:global([data-theme='light']) .scope .heroSwitchPill,
+:global([data-theme='light']) .scope .heroSwitchLabel,
+:global([data-theme='light']) .scope .heroPagerBtn,
+:global([data-theme='light']) .scope .heroPagerText,
+:global([data-theme='light']) .scope .primaryBtn,
+:global([data-theme='light']) .scope .primaryBtn span,
+:global([data-theme='light']) .scope .ctlBtnOn,
+:global([data-theme='light']) .scope .ctlBtnOn span,
+:global([data-theme='light']) .scope .segmentOn,
+:global([data-theme='light']) .scope .segmentOn span,
+:global([data-theme='light']) .scope .iconChip,
+:global([data-theme='light']) .scope .iconChipSm,
+:global([data-theme='light']) .scope .avatarChip,
+:global([data-theme='light']) .scope .iconToolBtnActive,
+:global([data-theme='light']) .scope .chartTip,
+:global([data-theme='light']) .scope .chartTip p,
+:global([data-theme='light']) .scope .chartTip span,
+:global([data-theme='light'] .admin-content) .scope .heroName,
+:global([data-theme='light'] .admin-content) .scope .heroPill,
+:global([data-theme='light'] .admin-content) .scope .heroPill span,
+:global([data-theme='light'] .admin-content) .scope .heroPill *,
+:global([data-theme='light'] .admin-content) .scope .heroMeta,
+:global([data-theme='light'] .admin-content) .scope .heroMetaItem,
+:global([data-theme='light'] .admin-content) .scope .heroMetaItem span,
+:global([data-theme='light'] .admin-content) .scope .heroGhostBtn,
+:global([data-theme='light'] .admin-content) .scope .heroGhostBtn span,
+:global([data-theme='light'] .admin-content) .scope .heroTab,
+:global([data-theme='light'] .admin-content) .scope .heroTab span,
+:global([data-theme='light'] .admin-content) .scope .heroSwitchPill,
+:global([data-theme='light'] .admin-content) .scope .heroSwitchLabel,
+:global([data-theme='light'] .admin-content) .scope .heroPagerBtn,
+:global([data-theme='light'] .admin-content) .scope .heroPagerText,
+:global([data-theme='light'] .admin-content) .scope .primaryBtn,
+:global([data-theme='light'] .admin-content) .scope .primaryBtn span,
+:global([data-theme='light'] .admin-content) .scope .ctlBtnOn,
+:global([data-theme='light'] .admin-content) .scope .ctlBtnOn span,
+:global([data-theme='light'] .admin-content) .scope .segmentOn,
+:global([data-theme='light'] .admin-content) .scope .segmentOn span,
+:global([data-theme='light'] .admin-content) .scope .iconChip,
+:global([data-theme='light'] .admin-content) .scope .iconChipSm,
+:global([data-theme='light'] .admin-content) .scope .avatarChip,
+:global([data-theme='light'] .admin-content) .scope .iconToolBtnActive,
+:global([data-theme='light'] .admin-content) .scope .chartTip,
+:global([data-theme='light'] .admin-content) .scope .chartTip p,
+:global([data-theme='light'] .admin-content) .scope .chartTip span {
+  color: #ffffff !important;
+}
+
+:global([data-theme='light']) .scope .heroPrimaryBtn,
+:global([data-theme='light']) .scope .heroPrimaryBtn span,
+:global([data-theme='light']) .scope .heroTabOn,
+:global([data-theme='light']) .scope .heroTabOn span,
+:global([data-theme='light'] .admin-content) .scope .heroPrimaryBtn,
+:global([data-theme='light'] .admin-content) .scope .heroPrimaryBtn span,
+:global([data-theme='light'] .admin-content) .scope .heroTabOn,
+:global([data-theme='light'] .admin-content) .scope .heroTabOn span {
+  color: #0e2152 !important;
+}
+
+:global([data-theme='light']) .scope .pillGood,
+:global([data-theme='light']) .scope .mintBtn,
+:global([data-theme='light']) .scope .mintBtn span,
+:global([data-theme='light']) .scope .valGood,
+:global([data-theme='light']) .scope .goodText,
+:global([data-theme='light']) .scope .goodText span,
+:global([data-theme='light'] .admin-content) .scope .pillGood,
+:global([data-theme='light'] .admin-content) .scope .mintBtn,
+:global([data-theme='light'] .admin-content) .scope .mintBtn span,
+:global([data-theme='light'] .admin-content) .scope .valGood,
+:global([data-theme='light'] .admin-content) .scope .goodText,
+:global([data-theme='light'] .admin-content) .scope .goodText span {
+  color: var(--clay-good) !important;
+}
+
+:global([data-theme='light']) .scope .pillWatch,
+:global([data-theme='light']) .scope .valWatch,
+:global([data-theme='light'] .admin-content) .scope .pillWatch,
+:global([data-theme='light'] .admin-content) .scope .valWatch {
+  color: var(--clay-watch) !important;
+}
+
+:global([data-theme='light']) .scope .pillDanger,
+:global([data-theme='light']) .scope .dangerBtn,
+:global([data-theme='light']) .scope .dangerBtn span,
+:global([data-theme='light']) .scope .iconToolBtnDanger,
+:global([data-theme='light']) .scope .valDanger,
+:global([data-theme='light']) .scope .errorText,
+:global([data-theme='light'] .admin-content) .scope .pillDanger,
+:global([data-theme='light'] .admin-content) .scope .dangerBtn,
+:global([data-theme='light'] .admin-content) .scope .dangerBtn span,
+:global([data-theme='light'] .admin-content) .scope .iconToolBtnDanger,
+:global([data-theme='light'] .admin-content) .scope .valDanger,
+:global([data-theme='light'] .admin-content) .scope .errorText {
+  color: var(--clay-danger) !important;
+}
+
+:global([data-theme='light']) .scope .pillBrand,
+:global([data-theme='light']) .scope .permItemOn,
+:global([data-theme='light'] .admin-content) .scope .pillBrand,
+:global([data-theme='light'] .admin-content) .scope .permItemOn {
+  color: var(--pc-tint-fg) !important;
+}
+
+:global([data-theme='light']) .scope .muted,
+:global([data-theme='light']) .scope .fieldLabel,
+:global([data-theme='light']) .scope .wellPill,
+:global([data-theme='light']) .scope .statTitle,
+:global([data-theme='light'] .admin-content) .scope .muted,
+:global([data-theme='light'] .admin-content) .scope .fieldLabel,
+:global([data-theme='light'] .admin-content) .scope .wellPill,
+:global([data-theme='light'] .admin-content) .scope .statTitle {
+  color: var(--foreground-2) !important;
+}
+
+@media (max-width: 640px) {
+  .hero,
+  .card,
+  .statCard {
+    padding: 14px 16px;
+  }
+
+  .statVal {
+    font-size: 24px;
+  }
+}
