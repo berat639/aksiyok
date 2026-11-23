@@ -8,7 +8,6 @@ import depth from '@/styles/clinic-depth.module.css'
 
 import CalendarTab from '../../admin/components/CalendarTab'
 import PatientsTab from '../../admin/components/PatientsTab'
-import StatsBar from '../../admin/components/StatsBar'
 import KnowledgeTab from '../../admin/components/KnowledgeTab'
 import SubscriptionCheckoutModal, {
   type SubscriptionModalMode,
@@ -346,10 +345,6 @@ export default function YoneticiPage() {
           </div>
         </div>
       )}
-
-      <div style={{ width: '100%', maxWidth: '100%', marginBottom: 16 }}>
-        <StatsBar />
-      </div>
 
       <div style={{ width: '100%', maxWidth: '100%' }}>
         <div style={{ display: 'flex', flexWrap: 'nowrap', overflowX: 'auto', WebkitOverflowScrolling: 'touch', gap: 6, marginBottom: 20, borderBottom: '1px solid var(--glass-border)', paddingBottom: 6, width: '100%' }}>

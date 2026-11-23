@@ -1135,8 +1135,12 @@ export const dynamicTablesPlugin = new Elysia({ prefix: '/api/dynamic-tables' })
       set.status = 400
       return { error: 'Geçersiz kart listesi' }
     }
+    const cardsList = raw as KpiCardConfig[]
+    const forceRefresh =
+      Boolean((body as any)?.refresh) ||
+      cardsList.some((c) => c?.sourceId === 'builtin:assistant_live' || c?.sourceId === 'builtin:ai_usage')
     try {
-      const metrics = await evaluateKpiCards(raw as KpiCardConfig[])
+      const metrics = await evaluateKpiCards(cardsList, forceRefresh)
       return { metrics }
     } catch (err: any) {
       set.status = 400

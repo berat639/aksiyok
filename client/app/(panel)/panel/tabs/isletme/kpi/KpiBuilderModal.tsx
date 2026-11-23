@@ -273,7 +273,14 @@ export function KpiBuilderModal({
     setChart(pick?.kind === 'breakdown' ? 'donut' : 'number')
     setFilterColumnId('')
     setFilterValue('')
-    if (nextId === 'builtin:stock' || nextId === 'builtin:staff' || nextId === 'local:offerings') {
+    if (nextId === 'builtin:ai_usage') {
+      setDateRange('today')
+    } else if (
+      nextId === 'builtin:assistant_live' ||
+      nextId === 'builtin:stock' ||
+      nextId === 'builtin:staff' ||
+      nextId === 'local:offerings'
+    ) {
       setDateRange('all')
     }
   }
@@ -295,14 +302,22 @@ export function KpiBuilderModal({
     const parsedTarget = Number(targetValue)
     const validChart = chartChoices.includes(chart) ? chart : chartChoices[0]
     const icon =
-      activeMeasure.valueColumnId &&
-      source.columns.find((c) => c.id === activeMeasure.valueColumnId)?.fieldType === 'currency'
-        ? 'wallet'
-        : effectiveKind === 'breakdown'
-          ? 'channels'
-          : effectiveKind === 'goal'
-            ? 'target'
-            : 'sales'
+      source.id === 'builtin:assistant_live'
+        ? activeMeasure.valueColumnId === 'activeAccounts'
+          ? 'cloud'
+          : 'phone'
+        : source.id === 'builtin:ai_usage'
+          ? activeMeasure.valueColumnId === 'replyCount'
+            ? 'bot'
+            : 'credit'
+          : activeMeasure.valueColumnId &&
+            source.columns.find((c) => c.id === activeMeasure.valueColumnId)?.fieldType === 'currency'
+            ? 'wallet'
+            : effectiveKind === 'breakdown'
+              ? 'channels'
+              : effectiveKind === 'goal'
+                ? 'target'
+                : 'sales'
 
     onSave({
       id: editing?.id || `kpi-${Date.now().toString(36)}`,
@@ -433,7 +448,7 @@ export function KpiBuilderModal({
               </button>
             </div>
             <div className={s.presetGrid}>
-              {availablePresets.slice(0, 4).map((preset) => (
+              {availablePresets.slice(0, 10).map((preset) => (
                 <button
                   key={preset.id}
                   type="button"

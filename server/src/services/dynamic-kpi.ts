@@ -11,8 +11,29 @@ import {
 } from '../db/repositories/dynamic-tables'
 import { listUsers } from '../db/repositories/users'
 import { getSetting, setSetting } from '../db/repositories/settings'
+import { getClinicTokenStats, listClinicDailyAiUsage } from '../db/repositories/ai-usage'
+import { resolveClinicGeminiKeyInfo } from './gemini-client'
 import { normalizeCurrencyCode, roundMoney } from './pre-accounting-core'
 import { requireClinicId } from '../tenancy/context'
+
+let liveSessionCounter: ((clinicId: string) => number) | null = null
+
+export function registerLiveSessionCounter(fn: (clinicId: string) => number) {
+  liveSessionCounter = fn
+}
+
+const AI_SOURCE_LABELS: Record<string, string> = {
+  live_phone: 'Telefon',
+  live_web: 'Web sesli görüşme',
+  web_live: 'Web sesli görüşme',
+  web_text: 'Web yazılı',
+  whatsapp: 'WhatsApp',
+  embedding: 'Bilgi bankası',
+  simulator: 'Simülatör',
+}
+
+const TRY_FORMAT = new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' })
+const formatTry = (n: number) => TRY_FORMAT.format(Number.isFinite(n) ? n : 0)
 
 export type KpiMetricKind = 'time' | 'breakdown' | 'goal'
 
@@ -48,10 +69,14 @@ export type KpiIconKey =
   | 'truck'
   | 'returns'
   | 'package'
+  | 'phone'
+  | 'cloud'
+  | 'credit'
+  | 'bot'
 
 export type KpiChipTone = 'brand' | 'mint' | 'amber' | 'coral' | 'violet'
 export type KpiAggregation = 'count' | 'sum' | 'avg'
-export type KpiDateRange = '7d' | '30d' | 'this_month' | '6m' | 'all'
+export type KpiDateRange = 'today' | '7d' | '30d' | 'this_month' | '6m' | 'all'
 
 export interface KpiUnitFormat {
   prefix?: string
@@ -99,6 +124,7 @@ export interface KpiSourceDescriptor {
 export interface KpiMetricBase {
   id: string
   title: string
+  subtitle?: string
   tooltip: string
   sourceName: string
   icon: KpiIconKey
@@ -150,6 +176,17 @@ interface NormalizedRow {
 interface ResolvedDataset {
   descriptor: KpiSourceDescriptor
   rows: NormalizedRow[]
+  meta?: {
+    clinicId?: string
+    keySourceLabel?: string
+    activeAccounts?: number
+    aiCostToday?: number
+    aiCostMonth?: number
+    aiCostBySourceToday?: Record<string, number>
+    assistantRepliesToday?: number
+    assistantRepliesMonth?: number
+    assistantRepliesBySourceToday?: Record<string, number>
+  }
 }
 
 /* Kısa süreli klinik bazlı bellek önbelleği + eşzamanlı istek birleştirme */
@@ -282,7 +319,7 @@ async function fetchAllDatasets(clinicId: string): Promise<Map<string, ResolvedD
   const weekEndKey = isoDateKey(weekEnd)
 
   // Tek paralel DB geçişi (N+1 sorgu ve gereksiz legacy taraması yok)
-  const [schema, allDynRows, apptDbRows, usersList, weekShifts] = await Promise.all([
+  const [schema, allDynRows, apptDbRows, usersList, weekShifts, tokenStats, dailyAiRows, keyInfo] = await Promise.all([
     getStudioSchema().catch(() => ({ tables: [], relations: [], appointmentConfigs: [], moduleConfigs: [] })),
     db
       .select({
@@ -313,6 +350,17 @@ async function fetchAllDatasets(clinicId: string): Promise<Map<string, ResolvedD
       .from(shifts)
       .where(and(eq(shifts.clinicId, clinicId), gte(shifts.date, weekStartKey), lte(shifts.date, weekEndKey)))
       .catch(() => []),
+    getClinicTokenStats(clinicId).catch(() => ({
+      today: 0,
+      month: 0,
+      total: 0,
+      promptToday: 0,
+      responseToday: 0,
+      bySource: {} as Record<string, number>,
+      costTry: { today: 0, month: 0, bySource: {} as Record<string, number> },
+    })),
+    listClinicDailyAiUsage(clinicId, 180).catch(() => []),
+    resolveClinicGeminiKeyInfo(clinicId).catch(() => ({ source: 'missing' as const, apiKey: '' })),
   ])
 
   const tables = schema.tables ?? []
@@ -660,6 +708,122 @@ async function fetchAllDatasets(clinicId: string): Promise<Map<string, ResolvedD
     rows: staffRows,
   })
 
+  // 7. Yerleşik: Canlı Asistan ve Hesap (Aktif Görüşme + Aktif Hesap)
+  const activeCallsNow = liveSessionCounter ? liveSessionCounter(clinicId) : 0
+  const activeAccountsNow = keyInfo.source === 'missing' ? 0 : 1
+  const keySourceLabel =
+    keyInfo.source === 'clinic'
+      ? 'İşletmeye Özel Anahtar'
+      : keyInfo.source === 'shared'
+        ? 'Ortak Anahtar'
+        : 'Anahtar Tanımlı Değil'
+  map.set('builtin:assistant_live', {
+    descriptor: {
+      id: 'builtin:assistant_live',
+      kind: 'builtin',
+      name: 'Canlı Asistan ve Hesap',
+      group: 'İşletme Modülleri',
+      rowCount: 1,
+      columns: [
+        { id: 'activeCalls', name: 'Aktif Görüşme', fieldType: 'number' },
+        { id: 'activeAccounts', name: 'Aktif Hesap', fieldType: 'number' },
+      ],
+    },
+    rows: [
+      {
+        createdAt: now,
+        values: {
+          activeCalls: activeCallsNow,
+          activeAccounts: activeAccountsNow,
+        },
+      },
+    ],
+    meta: {
+      clinicId,
+      keySourceLabel,
+      activeAccounts: activeAccountsNow,
+    },
+  })
+
+  // 8. Yerleşik: Yapay Zeka ve Asistan Kullanımı (günlük harcama + asistan cevaplama sayısı)
+  const istanbulToday = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Istanbul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now)
+  const istanbulMonthPrefix = istanbulToday.slice(0, 7)
+  const assistantReplySources = new Set(['live_phone', 'live_web', 'web_live', 'web_text', 'whatsapp'])
+  let assistantRepliesToday = 0
+  let assistantRepliesMonth = 0
+  const assistantRepliesBySourceToday: Record<string, number> = {}
+
+  const aiRows: NormalizedRow[] = dailyAiRows.map((r) => {
+    const isAssistantReply = assistantReplySources.has(r.source)
+    const replyCount = isAssistantReply ? r.callCount : 0
+    if (replyCount > 0) {
+      if (r.day === istanbulToday) {
+        assistantRepliesToday += replyCount
+        const lbl = AI_SOURCE_LABELS[r.source] || r.source
+        assistantRepliesBySourceToday[lbl] = (assistantRepliesBySourceToday[lbl] ?? 0) + replyCount
+      }
+      if (r.day.startsWith(istanbulMonthPrefix)) {
+        assistantRepliesMonth += replyCount
+      }
+    }
+    return {
+      createdAt: parseDate(r.day),
+      values: {
+        costTry: r.costTry,
+        replyCount,
+        callCount: r.callCount,
+        source: AI_SOURCE_LABELS[r.source] || r.source,
+        date: r.day,
+      },
+    }
+  })
+  map.set('builtin:ai_usage', {
+    descriptor: {
+      id: 'builtin:ai_usage',
+      kind: 'builtin',
+      name: 'Yapay Zeka ve Asistan Kullanımı',
+      group: 'İşletme Modülleri',
+      rowCount: aiRows.length,
+      columns: [
+        { id: 'costTry', name: 'Harcama', fieldType: 'currency', currencySymbol: '₺' },
+        { id: 'replyCount', name: 'Asistan Cevaplama', fieldType: 'number' },
+        { id: 'callCount', name: 'Toplam İşlem', fieldType: 'number' },
+        {
+          id: 'source',
+          name: 'Kanal',
+          fieldType: 'select',
+          values: Array.from(
+            new Set([
+              'Telefon',
+              'Web sesli görüşme',
+              'Web yazılı',
+              'WhatsApp',
+              'Bilgi bankası',
+              'Simülatör',
+              ...collectDistinct(aiRows, 'source'),
+            ])
+          ),
+        },
+        { id: 'date', name: 'Tarih', fieldType: 'date' },
+      ],
+    },
+    rows: aiRows,
+    meta: {
+      clinicId,
+      aiCostToday: tokenStats.costTry?.today ?? 0,
+      aiCostMonth: tokenStats.costTry?.month ?? 0,
+      aiCostBySourceToday: tokenStats.costTry?.bySource ?? {},
+      assistantRepliesToday,
+      assistantRepliesMonth,
+      assistantRepliesBySourceToday,
+    },
+  })
+
   return map
 }
 
@@ -719,12 +883,20 @@ function aggregateRows(rows: NormalizedRow[], aggregation: KpiAggregation, value
 
 function unitForColumn(col: KpiColumnOption | undefined, aggregation: KpiAggregation): KpiUnitFormat {
   if (aggregation === 'count' || !col) return { decimals: 0 }
-  if (col.fieldType === 'currency') return { prefix: col.currencySymbol || '₺', decimals: 0 }
+  if (col.fieldType === 'currency') {
+    return { prefix: col.currencySymbol || '₺', decimals: col.id === 'costTry' ? 2 : 0 }
+  }
   return { decimals: aggregation === 'avg' ? 1 : 0 }
 }
 
 function rangeBounds(range: KpiDateRange): { start: Date | null; prevStart: Date | null; prevEnd: Date | null; label: string } {
   const now = new Date()
+  if (range === 'today') {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0)
+    const prevEnd = new Date(start.getTime() - 1)
+    const prevStart = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1, 0, 0, 0)
+    return { start, prevStart, prevEnd, label: 'Düne göre' }
+  }
   if (range === '7d') {
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0)
     const prevEnd = new Date(start.getTime() - 1)
@@ -766,6 +938,7 @@ function buildTooltip(
         ? `${valCol.name} ortalaması`
         : 'Kayıt sayısı'
   const rangeMap: Record<KpiDateRange, string> = {
+    today: 'Bugün',
     '7d': 'Son 7 gün',
     '30d': 'Son 30 gün',
     this_month: 'Bu ay',
@@ -784,7 +957,7 @@ function evaluateOne(cfg: KpiCardConfig, datasets: Map<string, ResolvedDataset>)
   const ds = datasets.get(cfg.sourceId)
   if (!ds) return null
 
-  const { descriptor, rows: allRows } = ds
+  const { descriptor, rows: allRows, meta } = ds
   const valCol = cfg.valueColumnId ? descriptor.columns.find((c) => c.id === cfg.valueColumnId) : undefined
   const grpCol = cfg.groupByColumnId ? descriptor.columns.find((c) => c.id === cfg.groupByColumnId) : undefined
   const filterCol = cfg.filterColumnId ? descriptor.columns.find((c) => c.id === cfg.filterColumnId) : undefined
@@ -792,27 +965,104 @@ function evaluateOne(cfg: KpiCardConfig, datasets: Map<string, ResolvedDataset>)
   const range = cfg.dateRange || '30d'
   const bounds = rangeBounds(range)
 
+  // Canlı Asistan ve Hesap (her değerlendirmede taze anlık görüşme sayısı okunur)
+  if (cfg.sourceId === 'builtin:assistant_live') {
+    const isAccounts = cfg.valueColumnId === 'activeAccounts'
+    const liveVal = isAccounts
+      ? (meta?.activeAccounts ?? 0)
+      : (liveSessionCounter && meta?.clinicId ? liveSessionCounter(meta.clinicId) : toFiniteNumber(allRows[0]?.values.activeCalls) ?? 0)
+    const subtitle = isAccounts ? meta?.keySourceLabel : undefined
+    const tooltip = isAccounts
+      ? `Aktif yapay zeka hesap bağlantısı · ${meta?.keySourceLabel || 'Durum kontrol edildi'}`
+      : 'Şu an devam eden canlı sesli ve telefon görüşmeleri'
+    const liveBase: KpiMetricBase = {
+      id: cfg.id,
+      title: cfg.title,
+      subtitle,
+      tooltip,
+      sourceName: descriptor.name,
+      icon: cfg.icon || (isAccounts ? 'cloud' : 'phone'),
+      chip: cfg.chip || (isAccounts ? 'brand' : 'mint'),
+      unit: { decimals: 0 },
+      goodDirection: cfg.goodDirection || 'up',
+      previous: null,
+      compareLabel: '',
+      upWord: 'artış',
+      downWord: 'düşüş',
+      defaultChart: cfg.chart,
+      supports: cfg.kind === 'goal' ? GOAL_CHARTS : TIME_CHARTS,
+    }
+    if (cfg.kind === 'goal') {
+      const target = cfg.targetValue && cfg.targetValue > 0 ? cfg.targetValue : Math.max(1, liveVal)
+      return { ...liveBase, kind: 'goal', value: liveVal, target, targetLabel: cfg.targetLabel?.trim() || 'Hedef' }
+    }
+    return {
+      ...liveBase,
+      kind: 'time',
+      headline: 'last',
+      headlineValue: liveVal,
+      points: [{ label: 'Şimdi', value: liveVal }],
+    }
+  }
+
   const filtered = allRows.filter((r) => matchesFilter(r, cfg.filterColumnId, cfg.filterValue))
   const inRange = bounds.start
     ? filtered.filter((r) => {
-        const d = getRowDate(r, cfg.dateColumnId)
-        return d ? d >= bounds.start! : range === 'all'
-      })
+      const d = getRowDate(r, cfg.dateColumnId)
+      return d ? d >= bounds.start! : range === 'all'
+    })
     : filtered
 
   const prevRows =
     bounds.prevStart && bounds.prevEnd
       ? filtered.filter((r) => {
-          const d = getRowDate(r, cfg.dateColumnId)
-          return Boolean(d && d >= bounds.prevStart! && d <= bounds.prevEnd!)
-        })
+        const d = getRowDate(r, cfg.dateColumnId)
+        return Boolean(d && d >= bounds.prevStart! && d <= bounds.prevEnd!)
+      })
       : []
 
   const previous = bounds.prevStart ? aggregateRows(prevRows, cfg.aggregation, cfg.valueColumnId) : null
+  const isAiSpend = cfg.sourceId === 'builtin:ai_usage' && cfg.valueColumnId === 'costTry'
+  const isAssistantReplies = cfg.sourceId === 'builtin:ai_usage' && cfg.valueColumnId === 'replyCount'
+  let customSubtitle: string | undefined
+  let customTooltip = buildTooltip(descriptor, cfg, valCol, grpCol, filterCol)
+  if (isAiSpend && meta) {
+    const todayVal = meta.aiCostToday ?? 0
+    const monthVal = meta.aiCostMonth ?? 0
+    customSubtitle =
+      range === 'today'
+        ? `Bu ay ${formatTry(monthVal)}`
+        : range === 'this_month'
+          ? `Bugün ${formatTry(todayVal)}`
+          : `Bugün ${formatTry(todayVal)} · Bu ay ${formatTry(monthVal)}`
+    const bySourceEntries = Object.entries(meta.aiCostBySourceToday ?? {}).filter(([, v]) => v > 0)
+    const breakdownText =
+      bySourceEntries.length > 0
+        ? bySourceEntries.map(([k, v]) => `${AI_SOURCE_LABELS[k] || k}: ${formatTry(v)}`).join(' · ')
+        : 'Bugün henüz harcama yok'
+    customTooltip = `Bugün: ${formatTry(todayVal)} · Bu ay: ${formatTry(monthVal)} · Kanal dağılımı: ${breakdownText}`
+  } else if (isAssistantReplies && meta) {
+    const todayReplies = meta.assistantRepliesToday ?? 0
+    const monthReplies = meta.assistantRepliesMonth ?? 0
+    customSubtitle =
+      range === 'today'
+        ? `Bu ay ${monthReplies} cevaplama`
+        : range === 'this_month'
+          ? `Bugün ${todayReplies} cevaplama`
+          : `Bugün ${todayReplies} · Bu ay ${monthReplies} cevaplama`
+    const bySourceEntries = Object.entries(meta.assistantRepliesBySourceToday ?? {}).filter(([, v]) => v > 0)
+    const breakdownText =
+      bySourceEntries.length > 0
+        ? bySourceEntries.map(([k, v]) => `${k}: ${v}`).join(' · ')
+        : 'Bugün henüz cevaplama yok'
+    customTooltip = `Bugün: ${todayReplies} · Bu ay: ${monthReplies} · Kanal dağılımı: ${breakdownText}`
+  }
+
   const base: KpiMetricBase = {
     id: cfg.id,
     title: cfg.title,
-    tooltip: buildTooltip(descriptor, cfg, valCol, grpCol, filterCol),
+    subtitle: customSubtitle,
+    tooltip: customTooltip,
     sourceName: descriptor.name,
     icon: cfg.icon || (unit.prefix ? 'wallet' : 'sales'),
     chip: cfg.chip || 'brand',
@@ -860,9 +1110,9 @@ function evaluateOne(cfg: KpiCardConfig, datasets: Map<string, ResolvedDataset>)
         const totalAll = aggregateRows(
           bounds.start
             ? allRows.filter((r) => {
-                const d = getRowDate(r, cfg.dateColumnId)
-                return d ? d >= bounds.start! : true
-              })
+              const d = getRowDate(r, cfg.dateColumnId)
+              return d ? d >= bounds.start! : true
+            })
             : allRows,
           cfg.aggregation,
           cfg.valueColumnId
@@ -879,7 +1129,15 @@ function evaluateOne(cfg: KpiCardConfig, datasets: Map<string, ResolvedDataset>)
   const points: { label: string; value: number }[] = []
   const now = new Date()
 
-  if (range === '7d') {
+  if (range === 'today') {
+    const val =
+      isAiSpend && !cfg.filterColumnId && meta
+        ? (meta.aiCostToday ?? 0)
+        : isAssistantReplies && !cfg.filterColumnId && meta
+          ? (meta.assistantRepliesToday ?? 0)
+          : aggregateRows(inRange, cfg.aggregation, cfg.valueColumnId)
+    points.push({ label: 'Bugün', value: val })
+  } else if (range === '7d') {
     for (let i = 6; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
       const k = isoDateKey(d)
@@ -934,17 +1192,84 @@ function evaluateOne(cfg: KpiCardConfig, datasets: Map<string, ResolvedDataset>)
     }
   }
 
+  let headlineValue = aggregateRows(inRange, cfg.aggregation, cfg.valueColumnId)
+  if (isAiSpend && !cfg.filterColumnId && meta) {
+    if (range === 'today') headlineValue = meta.aiCostToday ?? 0
+    else if (range === 'this_month') headlineValue = meta.aiCostMonth ?? 0
+  } else if (isAssistantReplies && !cfg.filterColumnId && meta) {
+    if (range === 'today') headlineValue = meta.assistantRepliesToday ?? 0
+    else if (range === 'this_month') headlineValue = meta.assistantRepliesMonth ?? 0
+  }
+
   return {
     ...base,
     kind: 'time',
     headline: cfg.aggregation === 'avg' ? 'avg' : 'sum',
-    headlineValue: aggregateRows(inRange, cfg.aggregation, cfg.valueColumnId),
+    headlineValue,
     points,
   }
 }
 
+const OPTIONAL_LIVE_PRESET_IDS = new Set([
+  'preset-live-calls',
+  'preset-live-accounts',
+  'preset-ai-spend',
+])
+
 export function buildSmartPresets(sources: KpiSourceDescriptor[]): KpiCardConfig[] {
-  const presets: KpiCardConfig[] = []
+  const presets: KpiCardConfig[] = [
+    {
+      id: 'preset-assistant-daily-replies',
+      title: 'Günlük Asistan Cevaplama',
+      sourceId: 'builtin:ai_usage',
+      kind: 'time',
+      aggregation: 'sum',
+      valueColumnId: 'replyCount',
+      dateColumnId: 'date',
+      dateRange: 'today',
+      chart: 'number',
+      icon: 'bot',
+      chip: 'mint',
+    },
+    {
+      id: 'preset-live-calls',
+      title: 'Aktif Görüşme',
+      sourceId: 'builtin:assistant_live',
+      kind: 'time',
+      aggregation: 'sum',
+      valueColumnId: 'activeCalls',
+      dateRange: 'all',
+      chart: 'number',
+      icon: 'phone',
+      chip: 'mint',
+    },
+    {
+      id: 'preset-live-accounts',
+      title: 'Aktif Hesap',
+      sourceId: 'builtin:assistant_live',
+      kind: 'time',
+      aggregation: 'sum',
+      valueColumnId: 'activeAccounts',
+      dateRange: 'all',
+      chart: 'number',
+      icon: 'cloud',
+      chip: 'brand',
+    },
+    {
+      id: 'preset-ai-spend',
+      title: 'Yapay Zeka Harcaması',
+      sourceId: 'builtin:ai_usage',
+      kind: 'time',
+      aggregation: 'sum',
+      valueColumnId: 'costTry',
+      dateColumnId: 'date',
+      dateRange: 'today',
+      goodDirection: 'down',
+      chart: 'number',
+      icon: 'credit',
+      chip: 'violet',
+    },
+  ]
   const dynamicSources = sources.filter((s) => s.kind === 'dynamic_table')
 
   for (const src of dynamicSources.slice(0, 4)) {
@@ -1114,7 +1439,8 @@ export async function getKpiBootstrap(forceRefresh = false) {
   ])
   const sources = [...datasets.values()].map((d) => d.descriptor)
   const presets = buildSmartPresets(sources)
-  const activeCards = savedCards !== null ? savedCards : presets.slice(0, 4)
+  const defaultCards = presets.filter((p) => !OPTIONAL_LIVE_PRESET_IDS.has(p.id)).slice(0, 4)
+  const activeCards = savedCards !== null ? savedCards : defaultCards
   const metrics: Record<string, KpiEvaluatedMetric> = {}
   for (const cfg of activeCards) {
     if (cfg.sourceId.startsWith('local:')) continue

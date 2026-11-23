@@ -407,7 +407,10 @@ describe('İşletme ve Kayıtlar', () => {
     const text = container.textContent || ''
     expect(text).toContain('Analiz Kartı Ekle')
     expect(text).not.toContain('KPI Kartı Ekle')
-    expect(text).toContain('Paket ve Abonelik Bilgileri')
+    expect(text).toContain('Paket ve Abonelik')
+    expect(text).toContain('Demo Paket')
+    expect(text).toContain("Pro'ya Yükselt")
+    expect(container.querySelector('[aria-label="Paket ve Abonelik Bilgileri"]')).toBeTruthy()
     expect(text).toContain('Aylık Ciro')
     expect(text).toContain('45.000 ₺')
     expect(text).not.toContain('Yeni hareket')
@@ -484,5 +487,244 @@ describe('İşletme ve Kayıtlar', () => {
     expect(container.textContent).toContain('Konut Kiralama Danışmanlığı')
     expect(container.textContent).toContain('Gayrimenkul Ekspertiz')
     expect(container.textContent).not.toContain('Emlak Ofisi İçin Şablon Ekle')
+  })
+
+  it('İşletme Özet: Aktif Görüşme, Aktif Hesap ve Yapay Zeka Harcaması kartları Analiz Kartı Ekle üzerinden eklenebilir', async () => {
+    window.localStorage.setItem(
+      'axamaz.business-profile.v1:c1',
+      JSON.stringify({
+        name: 'Örnek İşletme',
+        primaryCategory: 'Emlak Ofisi',
+        extraCategories: [],
+        location: { lat: 39.91, lng: 32.86, address: 'Çankaya, Ankara' },
+        addressDirections: '',
+        hours: Array.from({ length: 7 }, () => ({ open: true, ranges: [{ start: '09:00', end: '18:00' }] })),
+        extraBusinesses: [],
+      }),
+    )
+
+    const kpiBootstrap = {
+      sources: [
+        {
+          id: 'builtin:assistant_live',
+          kind: 'builtin',
+          name: 'Canlı Asistan ve Hesap',
+          group: 'İşletme Modülleri',
+          rowCount: 1,
+          columns: [
+            { id: 'activeCalls', name: 'Aktif Görüşme', fieldType: 'number' },
+            { id: 'activeAccounts', name: 'Aktif Hesap', fieldType: 'number' },
+          ],
+        },
+        {
+          id: 'builtin:ai_usage',
+          kind: 'builtin',
+          name: 'Yapay Zeka Harcaması',
+          group: 'İşletme Modülleri',
+          rowCount: 1,
+          columns: [
+            { id: 'costTry', name: 'Harcama', fieldType: 'currency', currencySymbol: '₺' },
+            { id: 'source', name: 'Kanal', fieldType: 'select', values: ['Telefon', 'WhatsApp'] },
+          ],
+        },
+      ],
+      presets: [
+        {
+          id: 'preset-live-calls',
+          title: 'Aktif Görüşme',
+          sourceId: 'builtin:assistant_live',
+          kind: 'time',
+          aggregation: 'sum',
+          valueColumnId: 'activeCalls',
+          dateRange: 'all',
+          chart: 'number',
+          icon: 'phone',
+          chip: 'mint',
+        },
+        {
+          id: 'preset-live-accounts',
+          title: 'Aktif Hesap',
+          sourceId: 'builtin:assistant_live',
+          kind: 'time',
+          aggregation: 'sum',
+          valueColumnId: 'activeAccounts',
+          dateRange: 'all',
+          chart: 'number',
+          icon: 'cloud',
+          chip: 'brand',
+        },
+        {
+          id: 'preset-ai-spend',
+          title: 'Yapay Zeka Harcaması',
+          sourceId: 'builtin:ai_usage',
+          kind: 'time',
+          aggregation: 'sum',
+          valueColumnId: 'costTry',
+          dateColumnId: 'date',
+          dateRange: 'today',
+          chart: 'number',
+          icon: 'credit',
+          chip: 'violet',
+        },
+        {
+          id: 'preset-assistant-daily-replies',
+          title: 'Günlük Asistan Cevaplama',
+          sourceId: 'builtin:ai_usage',
+          kind: 'time',
+          aggregation: 'sum',
+          valueColumnId: 'replyCount',
+          dateColumnId: 'date',
+          dateRange: 'today',
+          chart: 'number',
+          icon: 'bot',
+          chip: 'mint',
+        },
+      ],
+      cards: [],
+      metrics: {},
+    }
+
+    const evalMap: Record<string, any> = {
+      'preset-live-calls': {
+        id: 'preset-live-calls',
+        title: 'Aktif Görüşme',
+        tooltip: 'Şu an devam eden canlı görüşmeler',
+        sourceName: 'Canlı Asistan ve Hesap',
+        icon: 'phone',
+        chip: 'mint',
+        unit: { decimals: 0 },
+        goodDirection: 'up',
+        previous: null,
+        compareLabel: '',
+        upWord: 'artış',
+        downWord: 'düşüş',
+        defaultChart: 'number',
+        supports: ['number'],
+        kind: 'time',
+        headline: 'sum',
+        headlineValue: 0,
+        points: [{ label: 'Şimdi', value: 0 }],
+      },
+      'preset-live-accounts': {
+        id: 'preset-live-accounts',
+        title: 'Aktif Hesap',
+        subtitle: 'Ortak Anahtar',
+        tooltip: 'Aktif hesap: Ortak Anahtar',
+        sourceName: 'Canlı Asistan ve Hesap',
+        icon: 'cloud',
+        chip: 'brand',
+        unit: { decimals: 0 },
+        goodDirection: 'up',
+        previous: null,
+        compareLabel: '',
+        upWord: 'artış',
+        downWord: 'düşüş',
+        defaultChart: 'number',
+        supports: ['number'],
+        kind: 'time',
+        headline: 'sum',
+        headlineValue: 1,
+        points: [{ label: 'Aktif', value: 1 }],
+      },
+      'preset-ai-spend': {
+        id: 'preset-ai-spend',
+        title: 'Yapay Zeka Harcaması',
+        subtitle: 'Bu ay ₺1,03',
+        tooltip: 'Bugünkü harcama: ₺0,00 · Bu ay: ₺1,03',
+        sourceName: 'Yapay Zeka Harcaması',
+        icon: 'credit',
+        chip: 'violet',
+        unit: { prefix: '₺', decimals: 2 },
+        goodDirection: 'down',
+        previous: null,
+        compareLabel: '',
+        upWord: 'artış',
+        downWord: 'düşüş',
+        defaultChart: 'number',
+        supports: ['number', 'area', 'bar'],
+        kind: 'time',
+        headline: 'sum',
+        headlineValue: 0,
+        points: [{ label: 'Bugün', value: 0 }],
+      },
+      'preset-assistant-daily-replies': {
+        id: 'preset-assistant-daily-replies',
+        title: 'Günlük Asistan Cevaplama',
+        subtitle: 'Bu ay 42 cevaplama',
+        tooltip: 'Bugün: 14 cevaplama · Bu ay: 42 cevaplama',
+        sourceName: 'Yapay Zeka ve Asistan Kullanımı',
+        icon: 'bot',
+        chip: 'mint',
+        unit: { decimals: 0 },
+        goodDirection: 'up',
+        previous: null,
+        compareLabel: '',
+        upWord: 'artış',
+        downWord: 'düşüş',
+        defaultChart: 'number',
+        supports: ['number', 'area', 'bar'],
+        kind: 'time',
+        headline: 'sum',
+        headlineValue: 14,
+        points: [{ label: 'Bugün', value: 14 }],
+      },
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.startsWith('/api/dynamic-tables/kpi/bootstrap')) {
+          return { ok: true, json: async () => kpiBootstrap } as Response
+        }
+        if (url.startsWith('/api/dynamic-tables/kpi/evaluate')) {
+          const body = JSON.parse(String(init?.body || '{}'))
+          const metrics: Record<string, any> = {}
+          for (const c of body.cards || []) {
+            if (evalMap[c.id]) metrics[c.id] = evalMap[c.id]
+          }
+          return { ok: true, json: async () => ({ metrics }) } as Response
+        }
+        if (url.startsWith('/api/admin/users')) return { ok: true, json: async () => users } as Response
+        return { ok: true, json: async () => ({}) } as Response
+      }),
+    )
+
+    function OzetLiveHarness() {
+      const [section, setSection] = useState<IsletmeSection>('ozet')
+      return <IsletmeKayitlarTab section={section} onSectionChange={setSection} access={{ ozet: { visible: true }, ...allOpen }} onLocked={() => {}} scope="c1" />
+    }
+
+    await act(async () => root.render(<OzetLiveHarness />))
+    await flush()
+
+    const addBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Analiz Kartı Ekle'),
+    )
+    await click(addBtn)
+    await flush()
+
+    const dialog = document.body.querySelector('[role="dialog"]')!
+    expect(dialog).toBeTruthy()
+    expect(dialog.textContent).toContain('Aktif Görüşme')
+    expect(dialog.textContent).toContain('Aktif Hesap')
+    expect(dialog.textContent).toContain('Yapay Zeka Harcaması')
+    expect(dialog.textContent).toContain('Günlük Asistan Cevaplama')
+
+    for (const label of ['Aktif Görüşme', 'Aktif Hesap', 'Yapay Zeka Harcaması', 'Günlük Asistan Cevaplama']) {
+      const chip = Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent?.trim() === label)
+      await click(chip)
+      await flush()
+    }
+
+    const text = container.textContent || ''
+    expect(text).toContain('Aktif Görüşme')
+    expect(text).toContain('Aktif Hesap')
+    expect(text).toContain('Ortak Anahtar')
+    expect(text).toContain('Yapay Zeka Harcaması')
+    expect(text).toContain('₺0,00')
+    expect(text).toContain('Bu ay ₺1,03')
+    expect(text).toContain('Günlük Asistan Cevaplama')
+    expect(text).toContain('14')
+    expect(text).toContain('Bu ay 42 cevaplama')
   })
 })

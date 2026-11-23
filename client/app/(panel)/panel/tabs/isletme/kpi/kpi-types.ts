@@ -32,10 +32,14 @@ export type KpiIconKey =
   | 'truck'
   | 'returns'
   | 'package'
+  | 'phone'
+  | 'cloud'
+  | 'credit'
+  | 'bot'
 
 export type KpiChipTone = 'brand' | 'mint' | 'amber' | 'coral' | 'violet'
 export type KpiAggregation = 'count' | 'sum' | 'avg'
-export type KpiDateRange = '7d' | '30d' | 'this_month' | '6m' | 'all'
+export type KpiDateRange = 'today' | '7d' | '30d' | 'this_month' | '6m' | 'all'
 
 export interface KpiUnitFormat {
   prefix?: string
@@ -83,6 +87,7 @@ export interface KpiSourceDescriptor {
 export interface KpiMetricBase {
   id: string
   title: string
+  subtitle?: string
   tooltip: string
   sourceName: string
   icon: KpiIconKey

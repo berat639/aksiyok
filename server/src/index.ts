@@ -124,6 +124,10 @@ interface SessionInfo {
 }
 
 const sessions = new Map<string, SessionInfo>()
+import { registerLiveSessionCounter } from './services/dynamic-kpi'
+registerLiveSessionCounter((clinicId) =>
+  Array.from(sessions.values()).filter((s) => s.clinicId === clinicId).length
+)
 
 // ── SSE: Admin real-time notifications ───────────────────────────────────────
 import { sseClients as sharedSseClients } from './events'

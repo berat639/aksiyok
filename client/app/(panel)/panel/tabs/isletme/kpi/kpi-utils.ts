@@ -1,5 +1,6 @@
 import {
   BatteryFull,
+  Bot,
   ChartArea,
   ChartBarBig,
   ChartBarStacked,
@@ -10,11 +11,14 @@ import {
   ChartSpline,
   CircleDot,
   Clock,
+  Cloud,
+  CreditCard,
   Gauge,
   Grid3x3,
   Hash,
   LayoutGrid,
   Package,
+  PhoneCall,
   Radar,
   ShoppingBag,
   Smile,
@@ -91,6 +95,10 @@ export const METRIC_ICONS: Record<KpiIconKey, { icon: LucideIcon; label: string 
   smile: { icon: Smile, label: 'Memnuniyet' },
   truck: { icon: Truck, label: 'Operasyon' },
   returns: { icon: Undo2, label: 'İade' },
+  phone: { icon: PhoneCall, label: 'Görüşme' },
+  cloud: { icon: Cloud, label: 'Hesap' },
+  credit: { icon: CreditCard, label: 'Harcama' },
+  bot: { icon: Bot, label: 'Asistan' },
 }
 
 export const CHIP_COLORS: Record<KpiChipTone, { label: string; light: string; dark: string }> = {
@@ -102,6 +110,7 @@ export const CHIP_COLORS: Record<KpiChipTone, { label: string; light: string; da
 }
 
 export const DATE_RANGE_LABELS: Record<KpiDateRange, string> = {
+  today: 'Bugün',
   '7d': 'Son 7 gün',
   '30d': 'Son 30 gün',
   this_month: 'Bu ay',

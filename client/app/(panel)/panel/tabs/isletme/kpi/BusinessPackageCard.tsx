@@ -1,7 +1,8 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Crown, ShieldCheck, Sparkles, UserPlus, Users } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Crown, ShieldCheck, Sparkles, UserPlus, Users, X } from 'lucide-react'
 import { useAuth, type ClinicEntitlements } from '@/lib/auth-context'
 import { PhoneMaskedInput } from '@/lib/phone-mask'
 import ConfirmModal from '../../../../../admin/components/ConfirmModal'
@@ -11,6 +12,7 @@ import SubscriptionCheckoutModal, {
 } from '../../../../../admin/components/SubscriptionCheckoutModal'
 import InfoTooltip from '../../../../../admin/components/ui/InfoTooltip'
 import clay from '../isletme-clay.module.css'
+import s from './kpi.module.css'
 
 type DemoAdminUser = {
   id: string
@@ -39,14 +41,14 @@ const PLAN_STATUS_LABELS: Record<string, string> = {
   active: 'Aktif Abonelik',
   past_due: 'Ödeme Bekliyor',
   canceled: 'İptal Edildi',
-  expired: 'Deneme Süresi Doldu',
+  expired: 'Süre Doldu',
 }
 
 const UPGRADE_REQ_LABELS: Record<string, string> = {
-  pro_upgrade: 'Pro Paket Geçişi',
+  pro_upgrade: 'Pro Paket',
   whatsapp: 'WhatsApp Asistanı',
-  inbound_call: 'Gelen Arama Asistanı',
-  outbound_call: 'Giden Arama Asistanı',
+  inbound_call: 'Gelen Arama',
+  outbound_call: 'Giden Arama',
   kurumsal_lead: 'Kurumsal Paket',
 }
 
@@ -57,13 +59,17 @@ const UPGRADE_REQ_STATUS_LABELS: Record<string, string> = {
   rejected: 'Reddedildi',
 }
 
+/**
+ * İşletme Özet KPI ızgarasında varsayılan ve sabit (silinemez) olarak yer alan
+ * Paket ve Yükseltme analiz kartı.
+ */
 export function BusinessPackageCard() {
   const { user, refreshUser } = useAuth()
   const [subscription, setSubscription] = useState<SubscriptionOverview | null>(null)
   const [demoAdmins, setDemoAdmins] = useState<DemoAdminUser[]>([])
   const [newAdminForm, setNewAdminForm] = useState({ name: '', email: '', password: '', phone: '' })
   const [addingAdmin, setAddingAdmin] = useState(false)
-  const [showAdminForm, setShowAdminForm] = useState(false)
+  const [showAdminModal, setShowAdminModal] = useState(false)
   const [notice, setNotice] = useState<{ type: 'good' | 'err'; text: string } | null>(null)
   const [confirmCancelSub, setConfirmCancelSub] = useState(false)
   const [cancelingSub, setCancelingSub] = useState(false)
@@ -118,8 +124,26 @@ export function BusinessPackageCard() {
         ? 'Kurumsal Paket'
         : 'Demo Paket')
 
-  const isExpired = Boolean(effectivePlan?.isTrialExpired || effectivePlan?.planStatus === 'expired')
   const isDemo = !effectivePlan || effectivePlan.planId === 'demo'
+  const canUpgradeToPro =
+    !effectivePlan ||
+    effectivePlan.planId === 'demo' ||
+    effectivePlan.planStatus === 'expired' ||
+    effectivePlan.planStatus === 'canceled'
+
+  const statusText = effectivePlan
+    ? PLAN_STATUS_LABELS[effectivePlan.planStatus] || effectivePlan.planStatus
+    : '7 Günlük Deneme'
+
+  const periodDetail = effectivePlan?.trialEndsAt
+    ? effectivePlan.isTrialExpired
+      ? 'Deneme süresi sona erdi'
+      : `Kalan ${effectivePlan.trialDaysRemaining ?? 0} gün`
+    : effectivePlan?.currentPeriodEnd
+      ? `Yenileme: ${new Date(effectivePlan.currentPeriodEnd).toLocaleDateString('tr-TR')}`
+      : statusText
+
+  const latestRequest = subscription?.requests?.[0]
 
   const handleAddDemoAdmin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -147,10 +171,10 @@ export function BusinessPackageCard() {
         return
       }
       setNewAdminForm({ name: '', email: '', password: '', phone: '' })
-      setShowAdminForm(false)
+      setShowAdminModal(false)
       await refreshAll()
       await refreshUser()
-      showNotice('good', 'Yeni yönetici hesabı başarıyla oluşturuldu.')
+      showNotice('good', 'Yeni yönetici hesabı oluşturuldu.')
     } catch {
       showNotice('err', 'Sunucuya bağlanılamadı.')
     } finally {
@@ -170,7 +194,7 @@ export function BusinessPackageCard() {
       setConfirmCancelSub(false)
       await refreshAll()
       await refreshUser()
-      showNotice('good', 'Abonelik yenilemesi iptal edildi. Dönem sonuna kadar erişiminiz devam edecektir.')
+      showNotice('good', 'Abonelik yenilemesi iptal edildi. Dönem sonuna kadar erişiminiz sürer.')
     } catch {
       showNotice('err', 'İptal işlemi sırasında hata oluştu.')
     } finally {
@@ -179,241 +203,214 @@ export function BusinessPackageCard() {
   }
 
   return (
-    <div className={clay.scope}>
-      <section className={clay.card} aria-label="Paket ve Abonelik Bilgileri">
-        <div className={clay.cardHead}>
-          <div className={clay.cardTitleGroup}>
-            <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
-              <Crown size={16} strokeWidth={2.2} color="#ffffff" />
+    <>
+      <article className={s.kpiCardCompact} aria-label="Paket ve Abonelik Bilgileri">
+        <header className={s.cardHead}>
+          <div className={s.cardTitleGroup}>
+            <span
+              className={s.iconChipCompact}
+              style={{
+                background: 'linear-gradient(145deg, #4a82f2, #1d52d1)',
+                boxShadow:
+                  '4px 6px 12px #1d52d155, inset 3px 3px 6px rgba(255,255,255,0.48), inset -4px -4px 8px rgba(0,0,0,0.22)',
+              }}
+              aria-hidden="true"
+            >
+              <Crown size={17} strokeWidth={2.3} color="#ffffff" />
             </span>
-            <div className={clay.cardTitleRow}>
-              <h3 className={clay.cardTitle}>Paket ve Abonelik Bilgileri</h3>
-              <InfoTooltip title="Paket Hakları ve Kullanıcı Kapasitesi" glyph="?">
-                Demo pakette 7 gün boyunca Web Asistanı ve en fazla 2 Yönetici hesabı aktiftir. Pro pakette (7.000 ₺ + KDV / ay) 10 kullanıcı, Personel, Finans, Stok, WhatsApp Business ve Sesli Santral asistanları açılır.
-              </InfoTooltip>
+            <div className={s.cardTitleRow}>
+              <h3 className={s.cardTitleCompact}>
+                Paket ve Abonelik
+                <span className={s.titleTip}>
+                  <InfoTooltip title="Paket ve Abonelik Bilgileri" glyph="?">
+                    Demo pakette 7 gün boyunca Web Asistanı ve en fazla 2 Yönetici hesabı aktiftir. Pro pakette (7.000 ₺ + KDV / ay) 10 kullanıcı, Personel, Finans, Stok, WhatsApp Business ve Sesli Santral asistanları açılır.
+                  </InfoTooltip>
+                </span>
+              </h3>
             </div>
           </div>
+        </header>
 
-          {effectivePlan && (
-            <span
-              className={
-                isExpired
-                  ? clay.pillDanger
-                  : effectivePlan.planStatus === 'active'
-                    ? clay.pillGood
-                    : clay.pillWatch
-              }
-            >
-              {planDisplayName} · {PLAN_STATUS_LABELS[effectivePlan.planStatus] || effectivePlan.planStatus}
+        <div className={s.valStack}>
+          <span className={s.pkgHeadline}>{planDisplayName}</span>
+          <span className={s.cardSubtitle}>
+            {activeCount} / {maxAllowedUsers} kullanıcı · {periodDetail}
+          </span>
+          {latestRequest && (
+            <span className={s.cardSubtitle}>
+              Talep: {UPGRADE_REQ_LABELS[latestRequest.requestType] || latestRequest.requestType} ·{' '}
+              {UPGRADE_REQ_STATUS_LABELS[latestRequest.status] || latestRequest.status}
             </span>
           )}
         </div>
 
-        <div className={clay.statGrid}>
-          <div className={clay.subCard} style={{ gap: 4 }}>
-            <span className={clay.fieldLabel} style={{ margin: 0 }}>Aktif Paket</span>
-            <strong style={{ fontSize: 15, fontWeight: 850, color: 'var(--foreground)' }}>
-              {planDisplayName}
-            </strong>
-            <span className={clay.muted}>
-              {effectivePlan?.planId === 'pro'
-                ? '7.000 ₺ + KDV (8.400 ₺ / ay)'
-                : effectivePlan?.planId === 'kurumsal'
-                  ? 'Kurumsal Özel Sözleşme'
-                  : '7 Gün Ücretsiz Başlangıç'}
-            </span>
-          </div>
-
-          <div className={clay.subCard} style={{ gap: 4 }}>
-            <span className={clay.fieldLabel} style={{ margin: 0 }}>Kullanıcı Limiti</span>
-            <strong style={{ fontSize: 15, fontWeight: 850, color: 'var(--foreground)' }}>
-              {activeCount} / {maxAllowedUsers} Aktif Kullanıcı
-            </strong>
-            <span className={clay.muted}>
-              {effectivePlan?.planId === 'demo'
-                ? 'En fazla 2 Yönetici hesabı'
-                : effectivePlan?.pendingInvitesCount
-                  ? `${effectivePlan.pendingInvitesCount} bekleyen davet`
-                  : 'Tüm personel rolleri açık'}
-            </span>
-          </div>
-
-          <div className={clay.subCard} style={{ gap: 4 }}>
-            <span className={clay.fieldLabel} style={{ margin: 0 }}>
-              {effectivePlan?.trialEndsAt ? 'Deneme Bitiş Tarihi' : 'Dönem / Yenileme'}
-            </span>
-            <strong style={{ fontSize: 15, fontWeight: 850, color: 'var(--foreground)' }}>
-              {effectivePlan?.trialEndsAt
-                ? new Date(effectivePlan.trialEndsAt).toLocaleDateString('tr-TR')
-                : effectivePlan?.currentPeriodEnd
-                  ? new Date(effectivePlan.currentPeriodEnd).toLocaleDateString('tr-TR')
-                  : 'Aktif'}
-            </strong>
-            <span className={clay.muted}>
-              {effectivePlan?.trialEndsAt
-                ? effectivePlan.isTrialExpired
-                  ? 'Deneme süresi sona erdi'
-                  : `Kalan süre: ${effectivePlan.trialDaysRemaining ?? 0} gün`
-                : effectivePlan?.planStatus === 'canceled'
-                  ? 'Dönem sonunda yenilenmeyecek'
-                  : 'Kesintisiz erişim'}
-            </span>
-          </div>
-        </div>
-
-        <div className={clay.topBar}>
-          <div className={clay.row}>
-            {(!effectivePlan ||
-              effectivePlan.planId === 'demo' ||
-              effectivePlan.planStatus === 'expired' ||
-              effectivePlan.planStatus === 'canceled') && (
-              <button
-                type="button"
-                className={clay.primaryBtn}
-                onClick={() =>
-                  setSubModal({
-                    open: true,
-                    mode: 'Checkout',
-                    requestType: 'pro_upgrade',
-                    requestedPlan: 'pro',
-                  })
-                }
-              >
-                <Sparkles size={14} color="#ffffff" />
-                <span style={{ color: '#ffffff' }}>Pro Pakete Yükselt (7.000 ₺ + KDV)</span>
-              </button>
-            )}
-
+        <div className={s.pkgActions}>
+          {canUpgradeToPro && (
             <button
               type="button"
-              className={clay.ctlBtn}
+              className={s.pkgPrimaryBtn}
               onClick={() =>
                 setSubModal({
                   open: true,
-                  mode: 'RequestAssistant',
-                  requestType: 'kurumsal_lead',
-                  requestedPlan: 'kurumsal',
-                  featureTitle: 'Kurumsal Paket',
+                  mode: 'Checkout',
+                  requestType: 'pro_upgrade',
+                  requestedPlan: 'pro',
                 })
               }
             >
-              <ShieldCheck size={14} />
-              <span>Kurumsal Paket İçin Satışla Görüş</span>
+              <Sparkles size={12} color="#ffffff" />
+              <span>Pro&apos;ya Yükselt</span>
             </button>
+          )}
 
-            {effectivePlan?.planId === 'pro' && effectivePlan.planStatus === 'active' && (
-              <button
-                type="button"
-                disabled={cancelingSub}
-                className={clay.dangerBtn}
-                onClick={() => setConfirmCancelSub(true)}
-              >
-                <span>Aboneliği İptal Et</span>
-              </button>
-            )}
-          </div>
+          <button
+            type="button"
+            className={s.pkgSecondaryBtn}
+            onClick={() =>
+              setSubModal({
+                open: true,
+                mode: 'RequestAssistant',
+                requestType: 'kurumsal_lead',
+                requestedPlan: 'kurumsal',
+                featureTitle: 'Kurumsal Paket',
+              })
+            }
+          >
+            <ShieldCheck size={12} />
+            <span>Kurumsal</span>
+          </button>
 
           {isDemo && adminOnlyUsers.length < maxAllowedUsers && (
             <button
               type="button"
-              className={showAdminForm ? clay.ctlBtnOn : clay.ctlBtnSm}
-              onClick={() => setShowAdminForm((v) => !v)}
+              className={s.pkgSecondaryBtn}
+              onClick={() => setShowAdminModal(true)}
             >
-              <UserPlus size={13} color={showAdminForm ? '#ffffff' : undefined} />
-              <span>2. Yönetici Ekle ({adminOnlyUsers.length}/{maxAllowedUsers})</span>
+              <UserPlus size={12} />
+              <span>2. Yönetici</span>
+            </button>
+          )}
+
+          {effectivePlan?.planId === 'pro' && effectivePlan.planStatus === 'active' && (
+            <button
+              type="button"
+              disabled={cancelingSub}
+              className={s.pkgDangerBtn}
+              onClick={() => setConfirmCancelSub(true)}
+            >
+              <span>İptal Et</span>
             </button>
           )}
         </div>
 
         {notice && (
-          <div className={notice.type === 'good' ? clay.noticeGood : clay.noticeWarn} role="status">
-            <span>{notice.text}</span>
-          </div>
+          <span
+            role="status"
+            className={s.cardSubtitle}
+            style={{ color: notice.type === 'good' ? 'var(--kpi-good)' : 'var(--danger)' }}
+          >
+            {notice.text}
+          </span>
         )}
+      </article>
 
-        {subscription?.requests && subscription.requests.length > 0 && (
-          <div className={clay.row} style={{ gap: 6 }}>
-            <span className={clay.muted}>Son talepler:</span>
-            {subscription.requests.slice(0, 4).map((req) => (
-              <span key={req.id} className={clay.wellPill}>
-                {UPGRADE_REQ_LABELS[req.requestType] || req.requestType} ·{' '}
-                {UPGRADE_REQ_STATUS_LABELS[req.status] || req.status}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {isDemo && showAdminForm && (
-          <form onSubmit={handleAddDemoAdmin} className={clay.subCard}>
-            <div className={clay.topBar}>
-              <span className={clay.row} style={{ gap: 6 }}>
-                <Users size={14} />
-                <strong style={{ fontSize: 13, color: 'var(--foreground)' }}>
-                  Demo 2. Yönetici Hesabı ({adminOnlyUsers.length} / {maxAllowedUsers})
-                </strong>
-              </span>
-            </div>
+      {showAdminModal &&
+        typeof document !== 'undefined' &&
+        document.body &&
+        createPortal(
+          <div
+            className={s.pkgModalOverlay}
+            role="presentation"
+            onClick={() => setShowAdminModal(false)}
+          >
             <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 190px), 1fr))',
-                gap: 10,
-              }}
+              className={`${clay.scope} ${s.pkgModalCard}`}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Demo 2. Yönetici Hesabı Ekle"
+              onClick={(e) => e.stopPropagation()}
             >
-              <label className={clay.field}>
-                <span className={clay.fieldLabel}>Ad Soyad*</span>
-                <input
-                  required
-                  className={clay.wellInput}
-                  value={newAdminForm.name}
-                  onChange={(e) => setNewAdminForm((p) => ({ ...p, name: e.target.value }))}
-                  placeholder="Örn: Mehmet Demir"
-                />
-              </label>
-              <label className={clay.field}>
-                <span className={clay.fieldLabel}>E-posta*</span>
-                <input
-                  type="email"
-                  required
-                  className={clay.wellInput}
-                  value={newAdminForm.email}
-                  onChange={(e) => setNewAdminForm((p) => ({ ...p, email: e.target.value }))}
-                  placeholder="ortak@isletme.com"
-                />
-              </label>
-              <label className={clay.field}>
-                <span className={clay.fieldLabel}>Şifre* (En az 6 karakter)</span>
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  className={clay.wellInput}
-                  value={newAdminForm.password}
-                  onChange={(e) => setNewAdminForm((p) => ({ ...p, password: e.target.value }))}
-                  placeholder="••••••••"
-                />
-              </label>
-              <label className={clay.field}>
-                <span className={clay.fieldLabel}>Telefon (İsteğe bağlı)</span>
-                <PhoneMaskedInput
-                  className={clay.wellInput}
-                  value={newAdminForm.phone}
-                  onValueChange={(phone) => setNewAdminForm((p) => ({ ...p, phone }))}
-                  placeholder="0 (5XX) XXX XX XX"
-                />
-              </label>
+              <div className={clay.cardHead}>
+                <div className={clay.cardTitleGroup}>
+                  <span className={`${clay.iconChipSm} ${clay.chipBrand}`} aria-hidden="true">
+                    <Users size={15} color="#ffffff" />
+                  </span>
+                  <h3 className={clay.cardTitle}>
+                    2. Yönetici Ekle ({adminOnlyUsers.length}/{maxAllowedUsers})
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  className={s.iconToolBtn}
+                  aria-label="Kapat"
+                  onClick={() => setShowAdminModal(false)}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+
+              <form onSubmit={handleAddDemoAdmin} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Ad Soyad*</span>
+                  <input
+                    required
+                    className={clay.wellInput}
+                    value={newAdminForm.name}
+                    onChange={(e) => setNewAdminForm((p) => ({ ...p, name: e.target.value }))}
+                    placeholder="Örn: Mehmet Demir"
+                  />
+                </label>
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>E-posta*</span>
+                  <input
+                    type="email"
+                    required
+                    className={clay.wellInput}
+                    value={newAdminForm.email}
+                    onChange={(e) => setNewAdminForm((p) => ({ ...p, email: e.target.value }))}
+                    placeholder="ortak@isletme.com"
+                  />
+                </label>
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Şifre* (En az 6 karakter)</span>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    className={clay.wellInput}
+                    value={newAdminForm.password}
+                    onChange={(e) => setNewAdminForm((p) => ({ ...p, password: e.target.value }))}
+                    placeholder="••••••••"
+                  />
+                </label>
+                <label className={clay.field}>
+                  <span className={clay.fieldLabel}>Telefon (İsteğe bağlı)</span>
+                  <PhoneMaskedInput
+                    className={clay.wellInput}
+                    value={newAdminForm.phone}
+                    onValueChange={(phone) => setNewAdminForm((p) => ({ ...p, phone }))}
+                    placeholder="0 (5XX) XXX XX XX"
+                  />
+                </label>
+                <div className={clay.row} style={{ justifyContent: 'flex-end', marginTop: 4 }}>
+                  <button
+                    type="button"
+                    className={clay.ctlBtnSm}
+                    onClick={() => setShowAdminModal(false)}
+                  >
+                    Vazgeç
+                  </button>
+                  <button type="submit" disabled={addingAdmin} className={clay.primaryBtn}>
+                    <span style={{ color: '#ffffff' }}>
+                      {addingAdmin ? 'Ekleniyor…' : '2. Yöneticiyi Ekle'}
+                    </span>
+                  </button>
+                </div>
+              </form>
             </div>
-            <div className={clay.row} style={{ justifyContent: 'flex-end' }}>
-              <button type="button" className={clay.ctlBtnSm} onClick={() => setShowAdminForm(false)}>
-                Vazgeç
-              </button>
-              <button type="submit" disabled={addingAdmin} className={clay.primaryBtn}>
-                <span style={{ color: '#ffffff' }}>{addingAdmin ? 'Ekleniyor…' : '2. Yöneticiyi Ekle'}</span>
-              </button>
-            </div>
-          </form>
+          </div>,
+          document.body
         )}
-      </section>
 
       <SubscriptionCheckoutModal
         isOpen={subModal.open}
@@ -442,6 +439,6 @@ export function BusinessPackageCard() {
           onClose={() => setConfirmCancelSub(false)}
         />
       )}
-    </div>
+    </>
   )
 }

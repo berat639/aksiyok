@@ -223,3 +223,57 @@ export async function getDailyAiCallCount(clinicId?: string | null): Promise<num
   }
 }
 
+export interface ClinicDailyAiUsageRow {
+  day: string
+  source: string
+  costTry: number
+  callCount: number
+  totalTokens: number
+}
+
+export async function listClinicDailyAiUsage(
+  clinicId?: string | null,
+  days = 180
+): Promise<ClinicDailyAiUsageRow[]> {
+  const effectiveClinicId = clinicId ?? currentClinicId()
+  if (!effectiveClinicId) return []
+  const safeDays = Math.max(1, Math.min(365, Math.round(days)))
+  try {
+    await ensureAiUsageTable()
+    const rows = await db.execute<{
+      day: string
+      source: string
+      prompt_tokens: number
+      response_tokens: number
+      total_tokens: number
+      call_count: number
+    }>(sql`
+      SELECT
+        to_char(day, 'YYYY-MM-DD') AS day,
+        source,
+        COALESCE(prompt_tokens, 0)::bigint AS prompt_tokens,
+        COALESCE(response_tokens, 0)::bigint AS response_tokens,
+        COALESCE(total_tokens, 0)::bigint AS total_tokens,
+        COALESCE(call_count, 0)::int AS call_count
+      FROM clinic_ai_usage_daily
+      WHERE clinic_id = ${effectiveClinicId}::uuid
+        AND day >= ((now() AT TIME ZONE 'Europe/Istanbul')::date - (${safeDays} * INTERVAL '1 day'))
+      ORDER BY day ASC, source ASC
+    `)
+    return rows.map((r) => {
+      const prompt = Number(r.prompt_tokens || 0)
+      const response = Number(r.response_tokens || 0)
+      const total = Number(r.total_tokens || 0)
+      return {
+        day: String(r.day || ''),
+        source: String(r.source || 'live_phone'),
+        costTry: usdToTry(estimateCostUsd(prompt, response, total)),
+        callCount: Number(r.call_count || 0),
+        totalTokens: total,
+      }
+    })
+  } catch {
+    return []
+  }
+}
+

@@ -95,12 +95,18 @@ export const KpiCard = memo(function KpiCard({
 
       {compact ? (
         <div className={s.compactBody}>
-          <span className={s.compactVal}>{formatKpiNumber(headline, metric.unit)}</span>
+          <div className={s.valStack}>
+            <span className={s.compactVal}>{formatKpiNumber(headline, metric.unit)}</span>
+            {metric.subtitle && <span className={s.cardSubtitle}>{metric.subtitle}</span>}
+          </div>
         </div>
       ) : (
         <>
           <div className={s.headlineRow}>
-            <span className={s.headlineVal}>{formatKpiNumber(headline, metric.unit)}</span>
+            <div className={s.valStack}>
+              <span className={s.headlineVal}>{formatKpiNumber(headline, metric.unit)}</span>
+              {metric.subtitle && <span className={s.cardSubtitle}>{metric.subtitle}</span>}
+            </div>
           </div>
 
           <div className={s.chartArea}>

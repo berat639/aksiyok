@@ -112,7 +112,7 @@ export default function IsletmeOzetSection({
           setLogoErr(false)
         }
       })
-      .catch(() => {})
+      .catch(() => { })
     const onLogoUpdated = (e: Event) => {
       const nextUrl = (e as CustomEvent<string>).detail
       if (typeof nextUrl === 'string') {
@@ -171,7 +171,7 @@ export default function IsletmeOzetSection({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ cards: remoteSubset }),
+          body: JSON.stringify({ cards: remoteSubset, refresh: true }),
         })
         const data = res.ok ? await res.json() : null
         setMetricsById((prev) => {
@@ -187,6 +187,20 @@ export default function IsletmeOzetSection({
     },
     [scope, sources, presets]
   )
+
+  const liveCards = useMemo(
+    () => cards.filter((c) => c.sourceId === 'builtin:assistant_live' || c.sourceId === 'builtin:ai_usage'),
+    [cards]
+  )
+
+  useEffect(() => {
+    if (liveCards.length === 0) return
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      void evaluateSubset(liveCards, cards)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [liveCards, cards, evaluateSubset])
 
   const loadBootstrap = useCallback(
     async (isManual = false) => {
@@ -290,7 +304,7 @@ export default function IsletmeOzetSection({
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ cards: next }),
-      }).catch(() => {})
+      }).catch(() => { })
     },
     [scope, sources, presets, metricsById]
   )
@@ -461,14 +475,31 @@ export default function IsletmeOzetSection({
 
       {/* Sabit Paket ve Abonelik Bilgileri Kartı (yalnızca İşletme Özet'te, silinemez) */}
       <BusinessPackageCard />
+      {/* Varsayılan Sabit Paket & Yükseltme Kartı + Kompakt Analiz Kartları */}
+      <div className={s.statGrid}>
+        <BusinessPackageCard />
+        {!loading &&
+          statCards.map((card) => (
+            <KpiCard
+              key={card.id}
+              metric={metricsById[card.id]}
+              chart={card.chart}
+              isEditing={builderOpen && editingCard?.id === card.id}
+              onEdit={(anchor) => handleOpenEdit(card, anchor)}
+              onRemove={() => handleRemoveCard(card.id)}
+            />
+          ))}
+      </div>
 
       {/* Analiz Kartları */}
+      {/* Grafikli Analiz Kartları / Boş Durum */}
       {loading ? (
         <div className={s.chartEmpty}>Göstergeler hazırlanıyor…</div>
       ) : cards.length === 0 ? (
         <div className={s.emptyHero}>
           <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--foreground)' }}>
             Henüz analiz kartı seçilmedi
+            Henüz ek analiz kartı seçilmedi
           </span>
           <button
             type="button"
@@ -516,6 +547,20 @@ export default function IsletmeOzetSection({
             </div>
           )}
         </>
+        chartCards.length > 0 && (
+      <div className={s.kpiGrid}>
+        {chartCards.map((card) => (
+          <KpiCard
+            key={card.id}
+            metric={metricsById[card.id]}
+            chart={card.chart}
+            isEditing={builderOpen && editingCard?.id === card.id}
+            onEdit={(anchor) => handleOpenEdit(card, anchor)}
+            onRemove={() => handleRemoveCard(card.id)}
+          />
+        ))}
+      </div>
+      )
       )}
 
       {/* Ekle / Kartı Düzenle Popover — tıklanan düğmenin (Ekle veya Kalem) hemen altında açılır */}

@@ -449,6 +449,119 @@
   font-variant-numeric: tabular-nums;
 }
 
+.valStack {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.cardSubtitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--foreground-2);
+  line-height: 1.25;
+}
+
+/* Sabit Paket & Yükseltme KPI Kartı */
+.pkgHeadline {
+  font-size: 24px;
+  font-weight: 900;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+  color: var(--foreground);
+}
+
+.pkgActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 2px;
+}
+
+.pkgPrimaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid #1d4ed8;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  box-shadow: var(--pc-clay-primary);
+  color: #ffffff;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.18s var(--kpi-ease-pop), filter 0.14s ease;
+}
+
+.pkgPrimaryBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+
+.pkgSecondaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--kpi-border);
+  border-radius: 10px;
+  background: var(--kpi-ctl-bg);
+  box-shadow: var(--kpi-ctl-sh);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 750;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.18s var(--kpi-ease-pop), border-color 0.14s ease;
+}
+
+.pkgSecondaryBtn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--pc-blue);
+}
+
+.pkgDangerBtn {
+  composes: pkgSecondaryBtn;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.pkgModalOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--modal-overlay);
+}
+
+.pkgModalCard {
+  width: min(460px, calc(100vw - 24px));
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 18px 20px;
+  border: 1.5px solid var(--input-border);
+  border-radius: 14px;
+  background: var(--card-bg);
+  box-shadow: var(--pc-modal-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 /* Grafik Alanı */
 .chartArea {
   width: 100%;
@@ -1204,6 +1317,27 @@
 :global([data-theme='light'] .admin-content) .summaryWrap .bizStrip .heroPrimaryBtn,
 :global([data-theme='light'] .admin-content) .summaryWrap .bizStrip .heroPrimaryBtn span {
   color: #0e2152 !important;
+}
+
+:global([data-theme='light']) .summaryWrap .cardSubtitle,
+:global([data-theme='light'] .admin-content) .summaryWrap .cardSubtitle {
+  color: var(--foreground-2) !important;
+}
+
+:global([data-theme='light']) .summaryWrap .pkgPrimaryBtn,
+:global([data-theme='light']) .summaryWrap .pkgPrimaryBtn span,
+:global([data-theme='light']) .summaryWrap .pkgPrimaryBtn *,
+:global([data-theme='light'] .admin-content) .summaryWrap .pkgPrimaryBtn,
+:global([data-theme='light'] .admin-content) .summaryWrap .pkgPrimaryBtn span,
+:global([data-theme='light'] .admin-content) .summaryWrap .pkgPrimaryBtn * {
+  color: #ffffff !important;
+}
+
+:global([data-theme='light']) .summaryWrap .pkgDangerBtn,
+:global([data-theme='light']) .summaryWrap .pkgDangerBtn span,
+:global([data-theme='light'] .admin-content) .summaryWrap .pkgDangerBtn,
+:global([data-theme='light'] .admin-content) .summaryWrap .pkgDangerBtn span {
+  color: var(--danger) !important;
 }
 
 @media (max-width: 680px) {
