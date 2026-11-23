@@ -473,8 +473,6 @@ export default function IsletmeOzetSection({
         </div>
       </div>
 
-      {/* Sabit Paket ve Abonelik Bilgileri Kartı (yalnızca İşletme Özet'te, silinemez) */}
-      <BusinessPackageCard />
       {/* Varsayılan Sabit Paket & Yükseltme Kartı + Kompakt Analiz Kartları */}
       <div className={s.statGrid}>
         <BusinessPackageCard />
@@ -491,14 +489,12 @@ export default function IsletmeOzetSection({
           ))}
       </div>
 
-      {/* Analiz Kartları */}
       {/* Grafikli Analiz Kartları / Boş Durum */}
       {loading ? (
         <div className={s.chartEmpty}>Göstergeler hazırlanıyor…</div>
       ) : cards.length === 0 ? (
         <div className={s.emptyHero}>
           <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--foreground)' }}>
-            Henüz analiz kartı seçilmedi
             Henüz ek analiz kartı seçilmedi
           </span>
           <button
@@ -516,51 +512,20 @@ export default function IsletmeOzetSection({
           </button>
         </div>
       ) : (
-        <>
-          {statCards.length > 0 && (
-            <div className={s.statGrid}>
-              {statCards.map((card) => (
-                <KpiCard
-                  key={card.id}
-                  metric={metricsById[card.id]}
-                  chart={card.chart}
-                  isEditing={builderOpen && editingCard?.id === card.id}
-                  onEdit={(anchor) => handleOpenEdit(card, anchor)}
-                  onRemove={() => handleRemoveCard(card.id)}
-                />
-              ))}
-            </div>
-          )}
-
-          {chartCards.length > 0 && (
-            <div className={s.kpiGrid}>
-              {chartCards.map((card) => (
-                <KpiCard
-                  key={card.id}
-                  metric={metricsById[card.id]}
-                  chart={card.chart}
-                  isEditing={builderOpen && editingCard?.id === card.id}
-                  onEdit={(anchor) => handleOpenEdit(card, anchor)}
-                  onRemove={() => handleRemoveCard(card.id)}
-                />
-              ))}
-            </div>
-          )}
-        </>
         chartCards.length > 0 && (
-      <div className={s.kpiGrid}>
-        {chartCards.map((card) => (
-          <KpiCard
-            key={card.id}
-            metric={metricsById[card.id]}
-            chart={card.chart}
-            isEditing={builderOpen && editingCard?.id === card.id}
-            onEdit={(anchor) => handleOpenEdit(card, anchor)}
-            onRemove={() => handleRemoveCard(card.id)}
-          />
-        ))}
-      </div>
-      )
+          <div className={s.kpiGrid}>
+            {chartCards.map((card) => (
+              <KpiCard
+                key={card.id}
+                metric={metricsById[card.id]}
+                chart={card.chart}
+                isEditing={builderOpen && editingCard?.id === card.id}
+                onEdit={(anchor) => handleOpenEdit(card, anchor)}
+                onRemove={() => handleRemoveCard(card.id)}
+              />
+            ))}
+          </div>
+        )
       )}
 
       {/* Ekle / Kartı Düzenle Popover — tıklanan düğmenin (Ekle veya Kalem) hemen altında açılır */}
