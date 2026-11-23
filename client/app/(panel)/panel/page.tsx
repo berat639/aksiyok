@@ -16,8 +16,9 @@ import SubscriptionCheckoutModal, {
 import VipAssistantTab from './tabs/VipAssistantTab'
 import PlatformClinicsTab from './tabs/PlatformClinicsTab'
 import IsletmeKayitlarTab, { type IsletmeSection, type SectionAccess } from './tabs/IsletmeKayitlarTab'
+import GelenKayitlarTab from './tabs/GelenKayitlarTab'
 
-type Tab = 'isletme' | 'calendar' | 'patients' | 'payments' | 'stok' | 'knowledge' | 'klinik' | 'integrations' | 'vip' | 'platform-clinics'
+type Tab = 'isletme' | 'calendar' | 'patients' | 'incoming' | 'payments' | 'stok' | 'knowledge' | 'klinik' | 'integrations' | 'vip' | 'platform-clinics'
 
 // Üst sekme çubuğu. "Ödemeler & Finans" (payments), "İşletme Personeli" (klinik), "Stok & Bakım" (stok)
 // ve "Ayarlar ve Entegrasyonlar" (integrations) artık "İşletme ve Kayıtlar" altında; yetki anahtarları geriye dönük uyumluluk için korunur.
@@ -25,6 +26,7 @@ const BASE_TABS: { id: Tab; label: string }[] = [
   { id: 'isletme', label: 'İşletme ve Kayıtlar' },
   { id: 'calendar', label: 'Takvim' },
   { id: 'patients', label: 'Veri Tabloları' },
+  { id: 'incoming', label: 'Gelen Kayıtlar' },
   { id: 'knowledge', label: 'Bilgi Tabanı' },
 ]
 
@@ -202,10 +204,11 @@ export default function YoneticiPage() {
     const aliasToPanelTab = (raw: string): Tab | null => {
       const normalized = raw.trim().toLowerCase()
       if (normalized === 'records') return 'patients'
+      if (normalized === 'gelen-kayitlar' || normalized === 'gelen_kayitlar' || normalized === 'whatsapp') return 'incoming'
       if (normalized === 'finance') return 'payments'
       if (normalized === 'inventory') return 'stok'
       if (normalized === 'team') return 'klinik'
-      if (['isletme', 'calendar', 'patients', 'payments', 'stok', 'knowledge', 'klinik', 'integrations', 'vip', 'platform-clinics'].includes(normalized)) {
+      if (['isletme', 'calendar', 'patients', 'incoming', 'payments', 'stok', 'knowledge', 'klinik', 'integrations', 'vip', 'platform-clinics'].includes(normalized)) {
         return normalized as Tab
       }
       return null
@@ -213,7 +216,7 @@ export default function YoneticiPage() {
     if (isModerator) {
       const allowed: Tab[] = [
         ...(user.canManagePlatform ? ['platform-clinics' as Tab] : []),
-        'vip', 'knowledge', 'calendar',
+        'vip', 'incoming', 'knowledge', 'calendar',
       ]
       setAllowedTabs(allowed)
       setTabState(prev => (prev && allowed.includes(prev) && !isTabLockedByPlan(prev, user) ? prev : resolveInitialPanelTab(allowed, 'vip', user)))
@@ -408,6 +411,7 @@ export default function YoneticiPage() {
           )}
           {tab === 'calendar' && <CalendarTab onNavigateToClinicStaff={() => setTab('klinik')} />}
           {tab === 'patients' && <PatientsTab />}
+          {tab === 'incoming' && <GelenKayitlarTab />}
           {tab === 'knowledge' && <KnowledgeTab />}
           {tab === 'vip' && <VipAssistantTab />}
           {tab === 'platform-clinics' && user?.canManagePlatform && <PlatformClinicsTab />}

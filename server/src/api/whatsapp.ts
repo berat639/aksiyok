@@ -46,7 +46,8 @@ import { buildToolDeclarations } from '../services/assistant-tool-declarations'
 import { openSecret } from '../services/integration-secrets'
 import { generateWhatsAppReply, handoffDeclaration, pauseOffTopicDeclaration } from '../services/whatsapp-live'
 import { executeWhatsAppTool, WHATSAPP_TOOL_NAMES } from '../services/whatsapp-tools'
-import { normalizeBusinessTemplate } from '../platform/roles'
+import { hasPanelTabAccess, normalizeBusinessTemplate } from '../platform/roles'
+import { getEffectiveUserAccess } from '../services/staff-invitations'
 import { getClinicEntitlements } from '../services/subscriptions'
 import { requireClinicId, runWithTenantContext } from '../tenancy/context'
 
@@ -465,12 +466,29 @@ async function verifyMetaHubChallenge(request: Request, clinicIdParam?: string):
 
   return new Response('Forbidden', { status: 403 })
 }
+const INBOX_ROUTE_PATTERN =
+  /^\/api\/admin\/whatsapp(?:\/?$|(?:\/[0-9a-f-]+(?:\/conversations(?:\/[0-9a-f-]+(?:\/messages)?)?|\/sync-contacts|\/messages\/[0-9a-f-]+\/resolve))\/?$)/i
+
 const admin = new Elysia({ prefix: '/api/admin/whatsapp' })
   .onBeforeHandle(async ({ cookie, request, set }) => {
     const user = await authenticateRequest(cookie.token?.value as string | undefined, request)
-    if (!user || !['yonetici', 'moderator'].includes(user.role)) {
-      set.status = user ? 403 : 401
-      return { error: 'WhatsApp yönetimi için yönetici girişi gerekli.' }
+    if (!user) {
+      set.status = 401
+      return { error: 'WhatsApp yönetimi için giriş gerekli.' }
+    }
+    const isAdminUser = ['yonetici', 'moderator'].includes(user.role)
+    if (!isAdminUser) {
+      const pathname = new URL(request.url).pathname
+      const isInboxRoute = INBOX_ROUTE_PATTERN.test(pathname)
+      if (!isInboxRoute) {
+        set.status = 403
+        return { error: 'WhatsApp ayar yönetimi için yönetici girişi gerekli.' }
+      }
+      const access = await getEffectiveUserAccess(requireClinicId(), { id: user.id, role: user.role })
+      if (!hasPanelTabAccess(access.allowedTabs, 'incoming')) {
+        set.status = 403
+        return { error: 'Gelen Kayıtlar ekranına erişim yetkiniz yok.' }
+      }
     }
     if (request.method !== 'GET' && !user.isPlatformAdmin) {
       const plan = await getClinicEntitlements(requireClinicId())

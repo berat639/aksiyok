@@ -9,6 +9,7 @@ export const LEGACY_EMPLOYEE_ROLES = ['calisan', 'hekim', 'sekreter', 'asistan',
 export const CANONICAL_ASSIGNABLE_PANEL_TABS = [
   'calendar',
   'records',
+  'incoming',
   'finance',
   'inventory',
   'knowledge',
@@ -22,6 +23,9 @@ const TAB_TO_CANONICAL: Record<string, string> = {
   payments: 'finance',
   stok: 'inventory',
   klinik: 'team',
+  'gelen-kayitlar': 'incoming',
+  gelen_kayitlar: 'incoming',
+  whatsapp: 'incoming',
 }
 
 const CANONICAL_TO_LEGACY_TAB: Record<string, string> = {

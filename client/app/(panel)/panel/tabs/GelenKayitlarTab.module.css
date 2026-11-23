@@ -1,0 +1,125 @@
+/* Gelen Kayıtlar sekmesi — opak Clay/Neo çift tema (Light & Dark), blur/glassmorphism yok. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.headerCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  background: var(--card-bg);
+  border: 1.5px solid var(--input-border);
+  border-radius: 14px;
+  box-shadow: var(--pc-neo-card);
+  color: var(--foreground);
+}
+
+.headerTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.titleGroup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.iconChip {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(145deg, #3b82f6 0%, #1d4ed8 100%);
+  border: 1px solid #1d4ed8;
+  box-shadow: var(--pc-clay-primary);
+  color: #ffffff;
+}
+
+.titleWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  color: var(--foreground);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--foreground-2);
+  line-height: 1.45;
+}
+
+.channelTrack {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 11px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  box-shadow: var(--pc-neo-inset);
+}
+
+.channelPillActive {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 13px;
+  border-radius: 8px;
+  border: 1px solid #1d4ed8;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  box-shadow: var(--pc-clay-primary);
+  color: #ffffff !important;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.channelPillActive *,
+.channelPillActive svg {
+  color: #ffffff !important;
+}
+
+:global([data-theme="light"]) .channelPillActive,
+:global([data-theme="light"]) .channelPillActive *,
+:global([data-theme="light"] .admin-content) .channelPillActive,
+:global([data-theme="light"] .admin-content) .channelPillActive * {
+  color: #ffffff !important;
+}
+
+@media (max-width: 700px) {
+  .headerCard {
+    padding: 14px;
+  }
+}

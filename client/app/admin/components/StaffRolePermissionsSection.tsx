@@ -183,6 +183,7 @@ export default function StaffRolePermissionsSection({
   const panelTabs = [
     { id: 'calendar', label: 'Takvim' },
     { id: 'patients', label: dynamicTabLabel || 'Veri Tabloları' },
+    { id: 'incoming', label: 'Gelen Kayıtlar' },
     { id: 'payments', label: 'Ödemeler ve Finans' },
     { id: 'stok', label: 'Stok ve Bakım' },
     { id: 'knowledge', label: termLabel('knowledgeBlock') },

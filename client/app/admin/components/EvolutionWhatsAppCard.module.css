@@ -322,6 +322,13 @@
 
 .inboxHeader { margin-top: 0; }
 
+.inboxTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .headerActions {
   display: flex;
   align-items: center;
@@ -329,18 +336,151 @@
   flex-wrap: wrap;
 }
 
+.headerActions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inboxToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.inboxSearchWrap {
+  position: relative;
+  flex: 1 1 240px;
+  max-width: 380px;
+}
+
+.inboxSearchIcon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--foreground-2);
+  pointer-events: none;
+}
+
+.inboxSearchInput {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 11px 7px 32px;
+  background: var(--input-bg) !important;
+  border: 1.5px solid var(--input-border) !important;
+  border-radius: 9px;
+  box-shadow: var(--pc-neo-inset);
+  color: var(--foreground) !important;
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.inboxSearchInput:focus {
+  border-color: var(--pc-blue, var(--accent)) !important;
+}
+
+.inboxSearchInput::placeholder {
+  color: var(--foreground-2);
+  opacity: 1;
+}
+
+.inboxFilterTrack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  box-shadow: var(--pc-neo-inset);
+  flex-wrap: wrap;
+}
+
+.card .inboxFilterBtn {
+  min-height: 30px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  background: var(--card-bg);
+  border: 1px solid var(--input-border);
+  box-shadow: var(--pc-clay-btn);
+  color: var(--foreground-2) !important;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.card .inboxFilterBtn *,
+.card .inboxFilterBtn svg {
+  color: var(--foreground-2) !important;
+}
+
+.card .inboxFilterBtn:hover,
+.card .inboxFilterBtn:hover * {
+  color: var(--foreground) !important;
+}
+
+.card .inboxFilterActive {
+  min-height: 30px;
+  padding: 5px 11px;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  border: 1px solid #1d4ed8;
+  box-shadow: var(--pc-clay-primary);
+  color: #ffffff !important;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.card .inboxFilterActive *,
+:global([data-theme="light"]) .card .inboxFilterActive,
+:global([data-theme="light"] .admin-content) .card .inboxFilterActive {
+  color: #ffffff !important;
+}
+
+.messagesHeaderBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--input-border);
+}
+
+.messagesPeerInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.messagesPeerInfo strong {
+  color: var(--foreground) !important;
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.messagesPeerInfo span {
+  color: var(--foreground-2) !important;
+  font-size: 12px;
+}
+
 .inbox {
   display: grid;
-  grid-template-columns: minmax(210px, 1fr) minmax(0, 2fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2.2fr);
   gap: 16px;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .conversations,
 .messages {
-  max-height: 520px;
-  min-height: 120px;
-  padding: 10px;
+  max-height: 580px;
+  min-height: 220px;
+  padding: 12px;
   overflow: auto;
   background: var(--card-inner);
   border: 1px solid var(--input-border);

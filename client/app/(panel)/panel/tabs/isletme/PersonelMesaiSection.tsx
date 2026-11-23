@@ -158,6 +158,7 @@ export default function PersonelMesaiSection() {
     () => [
       { id: 'calendar', label: 'Takvim' },
       { id: 'patients', label: dynamicLabel },
+      { id: 'incoming', label: 'Gelen Kayıtlar' },
       { id: 'knowledge', label: 'Bilgi Tabanı' },
       { id: 'stok', label: 'Stok ve Bakım' },
       { id: 'klinik', label: 'Personel ve Mesai' },

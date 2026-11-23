@@ -37,7 +37,7 @@ export interface ClinicUserPermissionsMap {
   byInviteEmail: Record<string, UserAccessOverride>
 }
 
-export const ASSIGNABLE_PANEL_TABS = ['calendar', 'patients', 'payments', 'stok', 'knowledge', 'klinik'] as const
+export const ASSIGNABLE_PANEL_TABS = ['calendar', 'patients', 'incoming', 'payments', 'stok', 'knowledge', 'klinik'] as const
 
 export const DEFAULT_CUSTOM_ROLE_TABS: string[] = ['calendar', 'patients', 'klinik']
 
@@ -208,6 +208,7 @@ export function sanitizeAllowedTabs(raw: unknown, fallback: string[]): string[] 
   const validSet = new Set<string>(ASSIGNABLE_PANEL_TABS)
   const canonicalToPanel: Record<string, string> = {
     records: 'patients',
+    incoming: 'incoming',
     finance: 'payments',
     inventory: 'stok',
     team: 'klinik',

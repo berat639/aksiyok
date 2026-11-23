@@ -1,7 +1,6 @@
 'use client'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import FlowBuilder from './FlowBuilder'
-import WhatsAppConversationsCard from './WhatsAppConversationsCard'
 import VoiceAiSettings from './VoiceAiSettings'
 import ConfirmModal from './ConfirmModal'
 import InfoTooltip from './ui/InfoTooltip'
@@ -771,8 +770,6 @@ export default function KnowledgeTab() {
           />
         </div>
       </div>
-
-      <WhatsAppConversationsCard />
 
       {/* Konuşma akışı */}
       <div className={`${d.card} ${s.stack}`}>
